@@ -10,3 +10,4 @@ build/
 .okfy-cache/
 uv.lock
 .DS_Store
+.okfy-public-export

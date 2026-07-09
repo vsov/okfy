@@ -85,9 +85,27 @@ def survey(corpus: Path, sample_chars: int = 400, max_samples: int = 25) -> dict
             "oversized": [f["path"] for f in files if f["tokens_est"] > DEFAULT_BUDGET]}
 
 
+def _char_chunks(rel: str, start: int, end: int, budget: int) -> list[dict]:
+    """Fixed-width character windows over text[start:end), 1-based inclusive spans."""
+    window = budget * 4
+    out = []
+    pos = start
+    while pos < end:
+        e = min(pos + window, end)
+        out.append({"path": rel, "chars": f"{pos + 1}-{e}",
+                    "tokens_est": max(1, (e - pos) // 4)})
+        pos = e
+    return out
+
+
 def _chunk_file(path: Path, rel: str, budget: int) -> list[dict]:
-    """Split one oversized file at blank lines nearest to even token-budget cuts."""
-    lines = path.read_text(encoding="utf-8").splitlines()
+    """Split one oversized file at blank lines nearest to even token-budget cuts.
+
+    Chunks that still exceed the budget (no blank lines in range — minified or
+    single-line files) fall back to fixed character windows.
+    """
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
     toks = [len(ln) // 4 for ln in lines]
     prefix = [0]
     for t in toks:
@@ -105,11 +123,19 @@ def _chunk_file(path: Path, rel: str, budget: int) -> list[dict]:
         cuts.append(c)
         lo = c
     bounds = [0] + [c + 1 for c in cuts] + [len(lines)]
+    starts = [0]  # absolute char offset where each line begins
+    for ln in lines:
+        starts.append(starts[-1] + len(ln) + 1)
     chunks = []
     for s, e in zip(bounds, bounds[1:]):
-        if s < e:
-            chunks.append({"path": rel, "lines": f"{s + 1}-{e}",
-                           "tokens_est": max(1, prefix[e] - prefix[s])})
+        if s >= e:
+            continue
+        tokens = max(1, prefix[e] - prefix[s])
+        if tokens > budget:
+            end = len(text) if e == len(lines) else starts[e]
+            chunks += _char_chunks(rel, starts[s], end, budget)
+        else:
+            chunks.append({"path": rel, "lines": f"{s + 1}-{e}", "tokens_est": tokens})
     return chunks
 
 

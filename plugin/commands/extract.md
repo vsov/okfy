@@ -21,9 +21,14 @@ prompt.
    one-line term seeds (term + gloss). Keep in memory; pass to every worker.
 3. For each pending segment, spawn a subagent (Task tool) with the prompt from
    `plugin/prompts/extract-worker.md`, placeholders filled. A segment's file
-   entries may be CHUNK dicts `{path, lines: "A-B"}` (oversized files the
-   segmenter split) instead of bare paths — tell the worker to read ONLY lines
-   A-B (1-indexed, inclusive) of `path` for those entries, not the whole file.
+   entries may be CHUNK dicts instead of bare paths (oversized files the
+   segmenter split) — two forms, handle BOTH:
+   - `{path, lines: "A-B"}` — read ONLY lines A-B (1-indexed, inclusive);
+   - `{path, chars: "A-B"}` — a dense file with no blank-line boundaries
+     (minified / single-line): read ONLY the character window A-B (1-indexed,
+     inclusive) of the file's text.
+   Never let a worker read the whole file for a chunk entry — the segment
+   budget exists precisely because these files don't fit.
    Run up to 4 concurrently. After each segment completes:
    - `okfy validate <bundle> --all` — draft frontmatter must parse (fix by
      re-running the worker on its segment if broken);
@@ -61,6 +66,11 @@ prompt.
 2. Layer 3 (purpose fitness): `okfy sample <bundle>` → for each sampled id,
    `okfy show` it and judge against the archetype's `purpose_checks` (read
    them from the archetype yaml). Fix failures in place, commit fixes.
+   PERSIST the pass as an artifact, not a story: write `meta/purpose-fitness.md`
+   (frontmatter `type: PurposeFitness`, `date`, `prompt_version`; body = one
+   table row per sampled id × check: pass/fail + one-line evidence, plus what
+   was fixed). Commit it — L3 must be replayable evidence like the eval, not
+   an agent action that evaporates with the transcript.
 3. Layer 4 (consumption smoke test) — run the **/okfy:eval** flow, NOT a prose
    check: `okfy eval run <bundle>` (deterministic hits), LLM-judge each query
    (`okfy eval verdict ... --llm`), then take the owner through the checkpoint

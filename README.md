@@ -82,7 +82,7 @@ for full options.
 | --- | --- |
 | `okfy init <bundle> --corpus <path> [--language en]` | Create an empty Bundle skeleton and init its git repo. |
 | `okfy survey <corpus>` | Cheap reconnaissance pass over a corpus → JSON corpus map (files, sizes, samples). Git corpora walk `git ls-files` (`.gitignore` respected); vendor/build/lockfile/binary noise is excluded by default — and everything skipped is reported, never silently dropped. |
-| `okfy segment <bundle> [--budget N] [--include ...] [--exclude ...]` | Cut the corpus into deterministic per-Worker segments; files over budget are chunked at blank-line boundaries into `{path, lines}` slices. |
+| `okfy segment <bundle> [--budget N] [--include ...] [--exclude ...]` | Cut the corpus into deterministic per-Worker segments; files over budget are chunked at blank-line boundaries into `{path, lines}` slices; dense files with no blank lines (minified, single-line) fall back to `{path, chars}` character windows. |
 | `okfy segment-status <bundle> <segment_id> <status>` | Record a segment's extraction status in the pipeline state. |
 | `okfy cluster <bundle>` | Pre-cluster draft concepts to guide consolidation. |
 | `okfy validate <bundle> [--all] [--no-archetype] [--quiet] [--strict-sources]` | Validate concepts: OKF spec conformance + bundle integrity. Source paths resolve against the corpus snapshot — broken ones warn (`W_BAD_SOURCE`); `--strict-sources` escalates to errors, the bar new extractions are held to. |

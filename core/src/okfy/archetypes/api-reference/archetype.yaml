@@ -51,3 +51,13 @@ purpose_checks:
       binds), and does On violation state what actually breaks (leak, crash,
       ban, corrupt data) rather than "undefined behavior" hand-waving?
 consumption_protocol: protocols/agents.tmpl
+link_rules:
+  - from: Recipe
+    to_dirs: [operations/]
+    min: 1
+  - from: Contract
+    section: Scope
+    to_dirs: [operations/, types/]
+    min: 1
+nonempty_sections:
+  Operation: [Signature]

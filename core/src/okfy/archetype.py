@@ -15,6 +15,8 @@ class Archetype:
     required_sections: dict[str, list[str]]
     layout: dict[str, str]
     purpose_checks: list[dict]
+    link_rules: list[dict]
+    nonempty_sections: dict[str, list[str]]
     consumption_protocol: str
     root: Path
 
@@ -36,6 +38,8 @@ def load_archetype(name: str) -> Archetype:
         required_sections=d.get("required_sections", {}),
         layout=d.get("layout", {}),
         purpose_checks=d.get("purpose_checks", []),
+        link_rules=d.get("link_rules", []),
+        nonempty_sections=d.get("nonempty_sections", {}),
         consumption_protocol=d.get("consumption_protocol", ""),
         root=root,
     )

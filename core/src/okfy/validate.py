@@ -283,15 +283,43 @@ def _check_orphans(bundle, concepts, linked_ids, r: Report):
             r.add("warning", "W_ORPHAN", c.id, "not reachable from index.md or any concept")
 
 
+def _section_text(body: str, name: str) -> str | None:
+    """Text of one '## name' section (case-insensitive), None if absent."""
+    m = re.search(rf"^##\s+{re.escape(name)}\s*$(.*?)(?=^##\s|\Z)", body,
+                  re.IGNORECASE | re.MULTILINE | re.DOTALL)
+    return m.group(1) if m else None
+
+
 def _check_archetype(c, archetype, r: Report):
     required = list(archetype.required_fields.get("_all", []))
     required += archetype.required_fields.get(str(c.meta.get("type")), [])
     for f in required:
         if c.meta.get(f) in (None, "", []):
             r.add("error", "E_REQUIRED_FIELD", c.id, f"required field missing/empty: {f}")
-    sections = archetype.required_sections.get(str(c.meta.get("type")), [])
+    ctype = str(c.meta.get("type"))
+    sections = archetype.required_sections.get(ctype, [])
     if sections:
         headings = {h.strip().lower() for h in HEADING_RE.findall(c.body)}
         for s in sections:
             if s.lower() not in headings:
                 r.add("error", "E_REQUIRED_SECTION", c.id, f"required section missing: ## {s}")
+    # deterministic value rules (ADR-0013 spirit: form checks that carry substance)
+    for rule in archetype.link_rules:
+        if rule.get("from") != ctype:
+            continue
+        scope = _section_text(c.body, rule["section"]) if rule.get("section") else c.body
+        if scope is None:
+            continue  # missing section already reported above
+        dirs = tuple(rule.get("to_dirs", []))
+        found = sum(1 for t in re.findall(r"\]\(/([^)#\s]+?)(?:\.md)?\)", scope)
+                    if t.startswith(dirs))
+        if found < int(rule.get("min", 1)):
+            where = f"section ## {rule['section']}" if rule.get("section") else "body"
+            r.add("error", "E_LINK_RULE", c.id,
+                  f"{ctype} must link >= {rule.get('min', 1)} concept(s) under "
+                  f"{'/'.join(dirs) if len(dirs) == 1 else dirs} in {where}; found {found}")
+    for s in archetype.nonempty_sections.get(ctype, []):
+        text = _section_text(c.body, s)
+        if text is not None and not text.strip():
+            r.add("error", "E_EMPTY_SECTION", c.id,
+                  f"section ## {s} is present but empty — the heading alone carries nothing")
