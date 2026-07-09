@@ -63,14 +63,23 @@ prompt.
    — MUST exit 0. New bundles are born strict: broken `sources` paths are errors
    here, not warnings. Fix errors (missing fields/sections, dead sources) and
    re-run until green.
-2. Layer 3 (purpose fitness): `okfy sample <bundle>` → for each sampled id,
-   `okfy show` it and judge against the archetype's `purpose_checks` (read
-   them from the archetype yaml). Fix failures in place, commit fixes.
+2. Layer 3 (purpose fitness): `okfy sample <bundle>` → returns JSON
+   `{selector_version, seed, sampled, reasons, notes}` — a risk-oriented
+   deterministic sample (changed sources, stale, rare types, weak coverage
+   first). For each sampled id, `okfy show` it and judge against the
+   archetype's `purpose_checks` (read them from the archetype yaml). Fix
+   failures in place, commit fixes.
    PERSIST the pass as an artifact, not a story: write `meta/purpose-fitness.md`
-   (frontmatter `type: PurposeFitness`, `date`, `prompt_version`; body = one
-   table row per sampled id × check: pass/fail + one-line evidence, plus what
-   was fixed). Commit it — L3 must be replayable evidence like the eval, not
-   an agent action that evaporates with the transcript.
+   with frontmatter `type: PurposeFitness`, `date`, `prompt_version`, and —
+   copied verbatim from the sample output — `selector_version`, `seed`,
+   `sampled`, plus the `fraction`/`minimum` used if non-default. Body = a
+   markdown table with one row per sampled id × check id: verdict
+   `pass`/`fail`/`n/a` + one-line evidence, plus what was fixed. Commit it.
+   Then `okfy validate <bundle> --strict-quality` MUST exit 0 — the validator
+   checks the artifact exists, covers every sampled id × check, and (while
+   the corpus hasn't moved) still covers the deterministic sample. L3 is
+   replayable evidence like the eval, not an agent action that evaporates
+   with the transcript.
 3. Layer 4 (consumption smoke test) — run the **/okfy:eval** flow, NOT a prose
    check: `okfy eval run <bundle>` (deterministic hits), LLM-judge each query
    (`okfy eval verdict ... --llm`), then take the owner through the checkpoint

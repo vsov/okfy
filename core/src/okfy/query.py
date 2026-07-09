@@ -1,6 +1,7 @@
 """Retrieval: lexicon-expanded BM25 over the index (ADR-0013). Accepted lexicon
 rows pin their maps_to concepts first (via: lexicon); BM25 over the expanded
 query fills the rest. Stale concepts stay visible but marked — no demotion."""
+import hashlib
 import math
 
 from okfy import lexicon
@@ -65,26 +66,102 @@ def links(bundle: Bundle, concept_id: str) -> dict:
     return {"id": concept_id, "out": out, "backlinks": backlinks}
 
 
-def sample_for_review(bundle: Bundle, fraction: float = 0.1, minimum: int = 20) -> list[str]:
+SELECTOR_VERSION = 2
+
+
+def _selector_seed(bundle: Bundle) -> str:
+    """Deterministic seed tied to the corpus state: git SHA when the corpus is
+    a git repo, else a digest of the corpus manifest. Recording it in the
+    PurposeFitness artifact makes the sample replayable — and lets the
+    validator detect when the recorded sample no longer matches."""
+    c = bundle.get("meta/corpus")
+    sha = c.meta.get("git_sha") if c else None
+    if sha:
+        return str(sha)
+    mf = bundle.root / "meta" / "corpus-manifest.json"
+    if mf.is_file():
+        return hashlib.sha256(mf.read_bytes()).hexdigest()[:16]
+    return "no-seed"
+
+
+def sample_for_review(bundle: Bundle, fraction: float = 0.1, minimum: int = 20) -> dict:
+    """Risk-oriented deterministic L3 sample. Priority tiers first — concepts
+    whose sources changed since the snapshot, stale concepts, rare types, weak
+    source coverage — then a seeded stratified fill across types. Alphabetical
+    position carries no weight (selector v1 was systematically biased to it)."""
     finals = sorted((c for c in bundle.concepts() if not c.id.startswith("meta/")),
                     key=lambda c: c.id)
+    seed = _selector_seed(bundle)
+    out = {"selector_version": SELECTOR_VERSION, "seed": seed,
+           "sampled": [], "reasons": {}, "notes": []}
     if not finals:
-        return []
-    target = min(len(finals), max(minimum, math.ceil(len(finals) * fraction)))
-    picked: list[str] = []
-    seen: set[str] = set()
+        return out
+
+    def rank(s: str) -> str:
+        return hashlib.sha256(f"{seed}:{s}".encode()).hexdigest()
+
+    changed: set[str] = set()
+    try:
+        from okfy.update import corpus_diff
+        d = corpus_diff(bundle)
+        changed = set(d["changed"]) | set(d["removed"])
+    except Exception as e:
+        out["notes"].append(f"corpus diff unavailable ({e}); "
+                            "changed-source tier skipped")
+
     by_type: dict[str, list] = {}
     for c in finals:
         by_type.setdefault(str(c.meta.get("type")), []).append(c)
-    for t in sorted(by_type):                      # >=1 per type
-        cid = by_type[t][0].id
+
+    risk: dict[str, list[str]] = {}
+    for c in finals:
+        srcs = {str(s).split("#", 1)[0] for s in (c.meta.get("sources") or [])}
+        rs = []
+        if srcs & changed:
+            rs.append("changed-source")
+        if c.meta.get("stale"):
+            rs.append("stale")
+        if len(srcs) <= 1:
+            rs.append("weak-coverage")
+        if len(by_type[str(c.meta.get("type"))]) <= 2:
+            rs.append("rare-type")
+        if rs:
+            risk[c.id] = rs
+
+    target = min(len(finals), max(minimum, math.ceil(len(finals) * fraction)))
+    picked: list[str] = []
+    seen: set[str] = set()
+    reasons: dict[str, list[str]] = {}
+    for cid in sorted(risk, key=lambda i: (-len(risk[i]), rank(i))):
+        if len(picked) >= target:
+            break
         picked.append(cid)
         seen.add(cid)
-    step = max(1, len(finals) // target)
-    for c in finals[::step]:                       # fill evenly
-        if len(picked) >= max(target, len(by_type)):
-            break
-        if c.id not in seen:
-            picked.append(c.id)
-            seen.add(c.id)
-    return sorted(picked)
+        reasons[cid] = list(risk[cid])
+
+    # stratified fill: round-robin across types in seeded order
+    queues = {t: [c.id for c in sorted(by_type[t], key=lambda c: rank(c.id))
+                  if c.id not in seen] for t in by_type}
+    order = sorted(queues, key=rank)
+    while len(picked) < target and any(queues.values()):
+        for t in order:
+            if len(picked) >= target:
+                break
+            if queues[t]:
+                cid = queues[t].pop(0)
+                picked.append(cid)
+                seen.add(cid)
+                reasons[cid] = ["stratified"]
+
+    # every type represented, even past target (v1 guarantee kept)
+    for t in order:
+        if not any(str(c.meta.get("type")) == t
+                   for c in finals if c.id in seen) and by_type[t]:
+            cid = sorted(by_type[t], key=lambda c: rank(c.id))[0].id
+            picked.append(cid)
+            seen.add(cid)
+            reasons[cid] = risk.get(cid, []) + ["type-coverage"]
+
+    out["sampled"] = sorted(picked)
+    out["reasons"] = {cid: reasons[cid] for cid in out["sampled"]}
+    return out

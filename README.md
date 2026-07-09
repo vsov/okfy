@@ -85,7 +85,7 @@ for full options.
 | `okfy segment <bundle> [--budget N] [--include ...] [--exclude ...]` | Cut the corpus into deterministic per-Worker segments; files over budget are chunked at blank-line boundaries into `{path, lines}` slices; dense files with no blank lines (minified, single-line) fall back to `{path, chars}` character windows. |
 | `okfy segment-status <bundle> <segment_id> <status>` | Record a segment's extraction status in the pipeline state. |
 | `okfy cluster <bundle>` | Pre-cluster draft concepts to guide consolidation. |
-| `okfy validate <bundle> [--all] [--no-archetype] [--quiet] [--strict-sources]` | Validate concepts: OKF spec conformance + bundle integrity. Source paths resolve against the corpus snapshot — broken ones warn (`W_BAD_SOURCE`); `--strict-sources` escalates to errors, the bar new extractions are held to. |
+| `okfy validate <bundle> [--all] [--no-archetype] [--quiet] [--strict-sources] [--strict-quality]` | Validate concepts: OKF spec conformance + bundle integrity. Source paths resolve against the corpus snapshot — broken ones warn (`W_BAD_SOURCE`); `--strict-sources` escalates to errors, the bar new extractions are held to. `--strict-quality` demands a complete `meta/purpose-fitness.md` artifact — the persisted L3 pass — covering every sampled concept × purpose check. |
 | `okfy index <bundle>` | Build the BM25 + link index into `.okfy-cache/`. |
 | `okfy query <bundle> <text> [--type T] [--tag T] [-n N] [--include-meta] [--no-expand] [--no-stale]` | Lexical BM25 search with frontmatter filters. Lexicon query expansion is on by default (`--no-expand` opts out); stale concepts stay visible but marked (`--no-stale` drops them). |
 | `okfy show <bundle> <concept_id>` | Print a concept's full content. |
@@ -101,7 +101,7 @@ for full options.
 | `okfy diff <bundle>` / `okfy snapshot <bundle>` | Corpus drift report (`affected` / `uncovered_new` / `stale_candidates`) / re-stamp the snapshot after updating. |
 | `okfy repair-links <bundle>` | Deterministically repair dangling concept links after renames and merges. |
 | `okfy workspace init\|status\|export …` / `okfy link-candidates …` | Federate several bundles: workspace lifecycle, crosswalk candidates, one-way export fusion. |
-| `okfy sample <bundle> [--fraction F] [--minimum N]` | Sample a deterministic subset of concepts (e.g. for review). |
+| `okfy sample <bundle> [--fraction F] [--minimum N]` | Risk-oriented deterministic sample for purpose-fitness review: changed sources, stale flags, rare types, weak coverage first, then a seeded stratified fill. Returns the selector version and seed so the sample is replayable. |
 | `okfy package <bundle>` | Generate `index.md`, `README.md`, `AGENTS.md`, log, and pre-commit hook. |
 | `okfy log <bundle> <message>` | Append a structured entry to the Bundle's `log.md`. |
 

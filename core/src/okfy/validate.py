@@ -100,7 +100,8 @@ def resolve_link(bundle: Bundle, concept_path, target: str) -> str | None:
         return None
 
 
-def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False) -> Report:
+def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
+                       strict_quality=False) -> Report:
     r = Report()
     concepts = []
     for p in bundle.iter_md_files():
@@ -115,6 +116,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False) -> 
     _check_lexicon(concepts, r)
     linked_ids = _check_links(bundle, concepts, r)
     _check_orphans(bundle, concepts, linked_ids, r)
+    _check_quality(bundle, archetype, r, strict=strict_quality)
     for c in concepts:
         if not c.id.startswith("meta/"):
             if not c.meta.get("sources"):
@@ -281,6 +283,63 @@ def _check_orphans(bundle, concepts, linked_ids, r: Report):
             continue
         if c.id not in indexed and c.id not in linked_ids:
             r.add("warning", "W_ORPHAN", c.id, "not reachable from index.md or any concept")
+
+
+QUALITY_FIELDS = ["date", "prompt_version", "selector_version", "seed", "sampled"]
+QUALITY_VERDICTS = {"pass", "fail", "n/a"}
+
+
+def _check_quality(bundle: Bundle, archetype, r: Report, strict: bool = False):
+    """PurposeFitness artifact (external review round 4): L3 must persist as a
+    checkable artifact — meta/purpose-fitness.md — not a prompt instruction
+    that evaporates with the transcript. Warning by default (old bundles),
+    errors under --strict-quality (the bar new extractions are held to)."""
+    def code(s: str) -> str:
+        return ("E_" if strict else "W_") + s
+
+    level = "error" if strict else "warning"
+    c = bundle.get("meta/purpose-fitness")
+    if c is None:
+        r.add(level, code("QUALITY_MISSING"), "meta/purpose-fitness.md",
+              "purpose-fitness artifact missing — L3 pass not persisted")
+        return
+    for f in QUALITY_FIELDS:
+        if c.meta.get(f) in (None, "", []):
+            r.add(level, code("QUALITY_FIELD"), c.id,
+                  f"purpose-fitness field missing/empty: {f}")
+    sampled = [str(s) for s in (c.meta.get("sampled") or [])]
+    known = {x.id for x in bundle.concepts()}
+    for sid in sampled:
+        if sid not in known:
+            r.add(level, code("QUALITY_UNKNOWN_ID"), c.id,
+                  f"sampled id not in bundle: {sid}")
+    checks = [str(pc.get("id")) for pc in (archetype.purpose_checks if archetype else [])]
+    rows = [ln for ln in c.body.splitlines()
+            if ln.lstrip().startswith("|") and not set(ln) <= set("|-: \t")]
+    for sid in sampled:
+        if sid not in known:
+            continue
+        for chk in checks:
+            match = [ln for ln in rows if sid in ln and chk in ln]
+            if not match:
+                r.add(level, code("QUALITY_ROW"), c.id,
+                      f"no verdict row for {sid} x {chk}")
+            elif not any(cell.strip().lower() in QUALITY_VERDICTS
+                         for ln in match for cell in ln.split("|")):
+                r.add(level, code("QUALITY_VERDICT"), c.id,
+                      f"row for {sid} x {chk} has no pass/fail/n-a verdict")
+    # replay: if the corpus hasn't moved (seed still current) the deterministic
+    # sample must be covered; a moved corpus is not replayable — skip silently.
+    from okfy.query import SELECTOR_VERSION, _selector_seed, sample_for_review
+    if (str(c.meta.get("seed")) == _selector_seed(bundle)
+            and c.meta.get("selector_version") == SELECTOR_VERSION):
+        rerun = sample_for_review(
+            bundle, fraction=float(c.meta.get("fraction", 0.1)),
+            minimum=int(c.meta.get("minimum", 20)))
+        missing = sorted(set(rerun["sampled"]) - set(sampled))
+        if missing:
+            r.add(level, code("QUALITY_SAMPLE"), c.id,
+                  f"recorded sample misses deterministic selection: {missing}")
 
 
 def _section_text(body: str, name: str) -> str | None:

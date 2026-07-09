@@ -35,6 +35,9 @@ def main(argv=None) -> int:
     p.add_argument("--no-archetype", action="store_true")
     p.add_argument("--strict-sources", action="store_true",
                    help="broken sources: paths become errors (new extractions)")
+    p.add_argument("--strict-quality", action="store_true",
+                   help="missing/incomplete purpose-fitness artifact becomes "
+                        "errors (new extractions)")
     p.add_argument("--quiet", action="store_true")
 
     p = sub.add_parser("index");    p.add_argument("bundle", type=Path)
