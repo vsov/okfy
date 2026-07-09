@@ -94,7 +94,8 @@ for full options.
 | `okfy eval run <bundle> [-n N]` | Replay the bundle's `purpose.md` test queries (expansion → top hits) into an append-only Eval Run in `meta/eval.json`. |
 | `okfy eval verdict <bundle> <run\|latest> <q-idx> <pass\|fail\|partial> (--llm \| --owner) [--note …]` | Record a Verdict on one query. `--llm` proposes (stays provisional); `--owner` disposes (the only kind release acceptance counts). |
 | `okfy eval status <bundle> [run\|latest]` | Effective verdict per query and totals; a bundle stays *provisional* until every query has an owner verdict. |
-| `okfy ledger add\|list <bundle> …` | Append/read the Extraction Ledger (`meta/ledger.jsonl`) — segment-level provenance of Worker and Consolidation steps. |
+| `okfy job <bundle> <segment> --prompt-file <p>` | Freeze a segment's worker contract into `meta/jobs/<segment>.json` — inputs with `lines`/`chars` spans and content hashes, corpus snapshot, archetype, prompt SHA-256 — and print it with its digest. |
+| `okfy ledger add\|list <bundle> … [--job <digest>]` | Append/read the Extraction Ledger (`meta/ledger.jsonl`) — segment-level provenance of Worker and Consolidation steps; `--job` ties a row to its frozen job artifact. |
 | `okfy propose <bundle> …` | Agent channel: file a concept change into `proposals/` — never into the live map. |
 | `okfy review list\|accept\|reject <bundle> …` | Owner gate: review proposals; accept validates before merging. |
 | `okfy refine <bundle> <concept_id>` | Owner channel: direct edit of a live concept, validated and committed. |

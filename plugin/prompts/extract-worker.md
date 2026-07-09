@@ -7,7 +7,13 @@ resolved later — extract what YOUR files support, completely.
 
 Inputs (filled by the orchestrator):
 - BUNDLE: {bundle_path}
-- SEGMENT: {segment_id}, files (corpus-relative): {file_list}
+- SEGMENT: {segment_id}
+- JOB ARTIFACT: {bundle_path}/meta/jobs/{segment_id}.json — your AUTHORITATIVE
+  input manifest (schema okfy-worker-job@1). Its `inputs` list is exactly what
+  you read: `{path}` = whole file; `{path, lines: "A-B"}` = only lines A-B
+  (1-indexed, inclusive); `{path, chars: "A-B"}` = only that character window
+  (1-indexed, inclusive). Never read outside a span; an unrecognized span form
+  means STOP and report, not guess.
 - CORPUS ROOT: {corpus_path}
 - PLAN: read {bundle_path}/meta/extraction-plan.md fully before starting
 - TEMPLATES: {templates_dir} — one per concept type; imitate them exactly

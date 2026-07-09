@@ -2,6 +2,7 @@ import sys
 
 from okfy.bundle import Bundle
 from okfy.evaluation import eval_run, eval_status, eval_verdict
+from okfy.job import build_job, write_job
 from okfy.ledger import add_row, parse_merge_map, read_rows
 from okfy.proposals import clear_stale, set_stale
 
@@ -27,13 +28,22 @@ def cmd_eval(a) -> int:
     return 0
 
 
+def cmd_job(a) -> int:
+    b = Bundle(a.bundle)
+    job = build_job(b, a.segment_id, prompt_file=a.prompt_file)
+    write_job(b, job)
+    _print(job)
+    return 0
+
+
 def cmd_ledger(a) -> int:
     b = Bundle(a.bundle)
     if a.dcmd == "add":
         inputs = [s for s in (x.strip() for x in a.inputs.split(",")) if s]
         outputs = [s for s in (x.strip() for x in a.outputs.split(",")) if s]
         row = add_row(b, a.run, a.segment, inputs, a.prompt_version, outputs,
-                      a.validation, merge_map=parse_merge_map(a.merge_map))
+                      a.validation, merge_map=parse_merge_map(a.merge_map),
+                      job_digest=a.job)
         _print(row)
     else:
         for r in read_rows(b, run_id=a.run):

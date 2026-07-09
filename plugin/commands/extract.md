@@ -11,7 +11,9 @@ unrelated changes.
 Prompt versions (stamp these into every ledger row so provenance is
 reproducible): worker drafts = `extract-worker@1`, consolidation =
 `consolidate@1`. Bump the number here whenever you change the corresponding
-prompt.
+prompt. The human label is not the real version: for worker rows the ledger
+also records the digest of a core-built job artifact (see Stage 4) that
+hashes the actual prompt text and inputs.
 
 ## Stage 4 — Extract (blind parallel Workers)
 
@@ -19,16 +21,23 @@ prompt.
    `okfy segment <bundle> --budget <plan budget> --include <globs> --exclude <globs>`.
 2. Seed Glossary: from the plan's glossary strategy + survey, draft 10-30
    one-line term seeds (term + gloss). Keep in memory; pass to every worker.
-3. For each pending segment, spawn a subagent (Task tool) with the prompt from
-   `plugin/prompts/extract-worker.md`, placeholders filled. A segment's file
-   entries may be CHUNK dicts instead of bare paths (oversized files the
-   segmenter split) — two forms, handle BOTH:
-   - `{path, lines: "A-B"}` — read ONLY lines A-B (1-indexed, inclusive);
+3. For each pending segment, FIRST freeze the worker's contract:
+   `okfy job <bundle> <segment-id> --prompt-file plugin/prompts/extract-worker.md`
+   — the core writes `meta/jobs/<segment-id>.json` (schema `okfy-worker-job@1`:
+   inputs with their `lines`/`chars` spans and content hashes, corpus snapshot,
+   archetype, prompt SHA-256) and prints it with its `digest`. Then spawn a
+   subagent (Task tool) with the prompt from `plugin/prompts/extract-worker.md`,
+   placeholders filled, passing the job artifact's `inputs` list as the
+   worker's AUTHORITATIVE input manifest — the worker reads exactly what the
+   artifact says, nothing else:
+   - `{path}` — the whole file;
+   - `{path, lines: "A-B"}` — ONLY lines A-B (1-indexed, inclusive);
    - `{path, chars: "A-B"}` — a dense file with no blank-line boundaries
-     (minified / single-line): read ONLY the character window A-B (1-indexed,
+     (minified / single-line): ONLY the character window A-B (1-indexed,
      inclusive) of the file's text.
-   Never let a worker read the whole file for a chunk entry — the segment
-   budget exists precisely because these files don't fit.
+   Never let a worker read the whole file for a span entry — the segment
+   budget exists precisely because these files don't fit. If the artifact
+   contains a span form you don't recognize, STOP and report — do not guess.
    Run up to 4 concurrently. After each segment completes:
    - `okfy validate <bundle> --all` — draft frontmatter must parse (fix by
      re-running the worker on its segment if broken);
@@ -36,8 +45,10 @@ prompt.
    - `git -C <bundle> add . && git -C <bundle> commit -m "extract: <segment-id>"`
    - `okfy ledger add <bundle> --run <run-id> --segment <segment-id>
      --inputs <corpus-paths-the-worker-used> --prompt-version extract-worker@1
-     --outputs <draft-ids-written> --validation <pass|fail>` — one row per
-     worker, after its drafts commit.
+     --outputs <draft-ids-written> --validation <pass|fail>
+     --job <digest-from-the-job-artifact>` — one row per worker, after its
+     drafts commit. The `--job` digest ties the row to the exact frozen
+     contract in `meta/jobs/<segment-id>.json`.
 
 ## Stage 5 — Consolidate
 

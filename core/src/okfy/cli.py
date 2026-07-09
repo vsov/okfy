@@ -117,6 +117,13 @@ def main(argv=None) -> int:
     e = esub.add_parser("status");  e.add_argument("bundle", type=Path)
     e.add_argument("run", nargs="?", default="latest")
 
+    p = sub.add_parser("job", help="freeze a segment's worker inputs into a "
+                       "versioned job artifact (meta/jobs/<segment>.json)")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("segment_id")
+    p.add_argument("--prompt-file", dest="prompt_file", type=Path, required=True,
+                   help="the exact worker prompt text (its SHA-256 is recorded)")
+
     p = sub.add_parser("ledger")
     dsub = p.add_subparsers(dest="dcmd", required=True)
     d = dsub.add_parser("add");     d.add_argument("bundle", type=Path)
@@ -128,6 +135,8 @@ def main(argv=None) -> int:
     d.add_argument("--validation", required=True)
     d.add_argument("--merge-map", dest="merge_map", default=None,
                    help="draft=final,draft2=final2 (consolidation rows)")
+    d.add_argument("--job", default=None,
+                   help="digest of the worker-job artifact (okfy job output)")
     d = dsub.add_parser("list");    d.add_argument("bundle", type=Path)
     d.add_argument("--run", default=None)
 

@@ -67,7 +67,8 @@ def _check(row: dict) -> None:
 
 
 def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: str,
-            outputs, validation: str, merge_map: dict | None = None) -> dict:
+            outputs, validation: str, merge_map: dict | None = None,
+            job_digest: str | None = None) -> dict:
     """Append one transition row to meta/ledger.jsonl and commit the ledger
     --no-verify. input_hashes come from the corpus manifest ('unknown' when the
     path is absent); commit captures the current bundle HEAD (the artifact commit
@@ -91,6 +92,10 @@ def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: s
     }
     if merge_map:
         row["merge_map"] = dict(merge_map)
+    if job_digest:
+        # digest of the worker-job artifact (meta/jobs/<segment>.json) — the
+        # reproducible version of what this worker actually consumed
+        row["job_digest"] = job_digest
 
     path = ledger_path(bundle)
     path.parent.mkdir(parents=True, exist_ok=True)
