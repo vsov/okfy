@@ -113,6 +113,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_collisions(concepts, r)
     _check_stale(concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
+    _check_anchors(bundle, concepts, r, strict=strict_sources)
     _check_lexicon(concepts, r)
     linked_ids = _check_links(bundle, concepts, r)
     _check_orphans(bundle, concepts, linked_ids, r)
@@ -219,6 +220,74 @@ def _check_sources(bundle: Bundle, concepts, r: Report, strict=False):
             r.add(level, code, c.id, f"concept {c.id}: source not in corpus: {p}")
     r.sources = {"concepts_with_sources": with_sources,
                  "all_valid": with_sources - broken, "with_broken_paths": broken}
+
+
+ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L(\d+))?$")
+MD_EXTS = {".md", ".markdown"}
+
+
+def _heading_slugs(text: str) -> set[str]:
+    """GitHub-style slugs of every markdown heading."""
+    out = set()
+    for h in re.findall(r"^#{1,6}\s+(.+?)\s*$", text, re.MULTILINE):
+        s = re.sub(r"[^\w\s-]", "", h.lower(), flags=re.UNICODE)
+        out.add(re.sub(r"[\s_]+", "-", s).strip("-"))
+    return out
+
+
+def _check_anchors(bundle: Bundle, concepts, r: Report, strict=False):
+    """Source anchors (external review round 4, item 4): `path#L10-L20` must be
+    a real line range, `guide.md#heading-id` a real heading — checkable only
+    when the corpus tree is locally readable (a manifest carries hashes, not
+    content). Provenance stays shallow; the link stops being decorative.
+    Non-line fragments on non-markdown files have no checkable meaning —
+    warning only, even strict: code/binary corpora must not fail falsely."""
+    try:
+        snap = bundle.get("meta/corpus")
+        purpose = bundle.purpose()
+    except frontmatter.FrontmatterError:
+        return
+    if snap is None or purpose.get("exported") or snap.meta.get("exported"):
+        return
+    corpus = Path(str(snap.meta.get("corpus") or ""))
+    if not corpus.is_dir():
+        return  # no local corpus — no basis to check (same rule as paths)
+    root = corpus.resolve()
+    level, code = ("error", "E_BAD_ANCHOR") if strict else ("warning", "W_BAD_ANCHOR")
+    for c in concepts:
+        if c.id.startswith("meta/"):
+            continue
+        srcs = c.meta.get("sources") or []
+        for s in (srcs if isinstance(srcs, list) else [srcs]):
+            s = str(s)
+            if "#" not in s:
+                continue
+            rel, frag = s.split("#", 1)
+            f = (root / rel).resolve()
+            if not (f.is_relative_to(root) and f.is_file()):
+                continue  # missing path is _check_sources' finding, not ours
+            m = ANCHOR_LINE_RE.match(frag)
+            if m:
+                start = int(m.group(1))
+                end = int(m.group(2) or m.group(1))
+                try:
+                    nlines = len(f.read_text(encoding="utf-8").splitlines())
+                except (OSError, UnicodeDecodeError):
+                    r.add("warning", "W_ANCHOR_UNCHECKED", c.id,
+                          f"anchor {s}: source unreadable as text")
+                    continue
+                if start < 1 or end < start or end > nlines:
+                    r.add(level, code, c.id,
+                          f"anchor {s}: line range invalid (file has {nlines} lines)")
+            elif f.suffix.lower() in MD_EXTS:
+                if frag.strip().lower() not in _heading_slugs(
+                        f.read_text(encoding="utf-8")):
+                    r.add(level, code, c.id,
+                          f"anchor {s}: no heading with that id in the source")
+            else:
+                r.add("warning", "W_ANCHOR_UNCHECKED", c.id,
+                      f"anchor {s}: non-line fragment on non-markdown source — "
+                      "not checkable")
 
 
 def _check_lexicon(concepts, r: Report):
