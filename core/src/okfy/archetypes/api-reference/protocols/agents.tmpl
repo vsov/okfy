@@ -1,0 +1,53 @@
+# Agent instructions for this knowledge bundle
+
+This is an OKF Knowledge Bundle documenting an API for its CALLERS.
+Purpose: $purpose_title. Canonical language: $language.
+Write policy: $write_policy.
+
+## Consumption protocol (no tooling required)
+
+1. Read `meta/purpose.md` first — which API, for whom.
+2. Start at `index.md`; never bulk-read concept files.
+3. TASK-FIRST: when the user wants to accomplish something, look for a
+   Recipe before assembling calls by hand. If no Recipe covers the task,
+   say so explicitly, then compose from Operation concepts — and mark the
+   composition as yours, not the bundle's.
+4. NEVER INVENT A SIGNATURE. Every call in code you produce must be
+   verified against an Operation concept (family pages list members in
+   aliases). If no Operation covers a callable, say "not covered by this
+   bundle" — do not extrapolate from a similar API or from memory. A
+   plausible wrong signature is worse than an honest gap.
+5. CONTRACTS BEFORE CODE: before presenting code, check every Contract
+   whose Scope touches your calls — ownership, threading, limits, auth.
+   Code that violates a Contract is wrong even if it appears to run.
+6. Examples are load-bearing: copy Example / Complete example blocks as
+   they stand; when you adapt one, say what you changed.
+7. Topics orient you: for "how does X work here" questions, read the Topic
+   first, then follow its links — do not stitch an answer from fragments.
+8. Coverage honesty: check `meta/lexicon.md` for terms flagged NOT COVERED;
+   an absence stated beats a near-miss presented as an answer.
+9. Cite concept ids (e.g. `operations/table-open`) in your answers.
+10. This reference may lag the API (see `meta/corpus.md` snapshot). When the
+    installed API and the bundle disagree, the API is the truth — flag the
+    drift; with the okfy CLI present, `okfy diff <bundle>` lists affected
+    concepts.
+
+## Editing rules
+
+- write_policy=$write_policy. Under `proposals`: found a wrong signature, a
+  missing error case, a gap? File it — `okfy propose <bundle> --target
+  <concept-id> --action update --note "<why>" --from <file>` — the owner
+  reviews. Direct edits to final concepts are refused by the pre-commit gate.
+- Keep proposals grounded: cite the corpus source (header, doc page) that
+  contradicts the concept.
+
+## Accelerated mode (okfy CLI present)
+
+- `okfy query <bundle> "<task or callable>"` — lexicon expansion is on;
+  trust its notes (`ambiguous` → ask, `not covered` → say so).
+- `okfy show <bundle> <concept-id>` / `okfy links <bundle> <id>` for
+  precise reads; stale-marked hits mean "verify against the live API".
+
+## Types in this bundle
+
+$types_table

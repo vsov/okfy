@@ -1,0 +1,53 @@
+name: api-reference
+version: 1
+description: >
+  Bundles that let a model (or engineer) correctly USE an API — a C library,
+  a query language, an HTTP surface: what each callable does, what shapes move
+  through it, how tasks compose into call sequences, and which cross-cutting
+  contracts a caller must not violate. The caller's mirror of codebase-map:
+  that archetype serves whoever changes the engine; this one serves whoever
+  drives it.
+canonical_types: [Operation, Type, Recipe, Contract, Topic]
+required_fields:
+  _all: [type, title, description]
+  Operation: [sources, tags]
+  Type: [sources]
+  Recipe: [sources]
+  Contract: [sources]
+  Topic: [sources]
+required_sections:
+  Operation: [Signature, Parameters, Returns, Errors, Example]
+  Type: [Shape, Invariants, Produced / consumed by]
+  Recipe: [Goal, Steps, Complete example, Pitfalls]
+  Contract: [Rule, Scope, On violation]
+layout:
+  Operation: operations/
+  Type: types/
+  Recipe: recipes/
+  Contract: contracts/
+  Topic: topics/
+purpose_checks:
+  - id: callable-from-concept-alone
+    prompt: >
+      Read this Operation. Could an agent write a CORRECT call seeing only
+      this concept — full real signature, every parameter's meaning, error
+      cases enumerated, a runnable example? A signature the reader must guess
+      or verify elsewhere is a failure.
+  - id: recipe-grounded
+    prompt: >
+      For Recipe concepts: does every step reference the Operation concept it
+      uses (links into operations/), and does the Complete example actually
+      compose those operations? A recipe that tells a story without grounding
+      each call in the reference is a failure.
+  - id: family-findable
+    prompt: >
+      For Operation concepts covering a FAMILY of callables (one concept, many
+      builtins/functions): are the individual member names listed in aliases
+      so lexical search for any single member finds the family page? A family
+      page that "sqrt" cannot reach is a failure.
+  - id: contract-scoped
+    prompt: >
+      For Contract concepts: is the Scope concrete (which operations/types it
+      binds), and does On violation state what actually breaks (leak, crash,
+      ban, corrupt data) rather than "undefined behavior" hand-waving?
+consumption_protocol: protocols/agents.tmpl
