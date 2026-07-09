@@ -1,0 +1,46 @@
+# Agent instructions for this knowledge bundle
+
+This is an OKF Knowledge Bundle mapping a codebase. Purpose: $purpose_title.
+Canonical language: $language. Write policy: $write_policy.
+
+## Consumption protocol (no tooling required)
+
+1. Read `meta/purpose.md` first — what this map is for.
+2. Start at `index.md`; never bulk-read concept files.
+3. Before EDITING any code in the mapped codebase: read the owning Module
+   concept (Responsibility, Interface, Dependencies) and every Convention
+   concept that applies to the files you touch. A change that violates a
+   documented Convention or a Module's stated invariants is wrong even if
+   tests pass.
+4. To understand behavior, follow Flow concepts (Trigger → Path → Failure
+   modes) instead of grepping call sites blindly.
+5. "Why is it like this?" → check Decision concepts before proposing a
+   redesign; do not relitigate decided trade-offs without new evidence.
+6. Coverage honesty: if no concept covers the area you are asked about, say
+   so. Never present a merely similar Module/Flow as if it covered the
+   question. Check `meta/lexicon.md` for terms flagged NOT COVERED.
+7. Cite concept ids (e.g. `modules/storage-engine`) in your answers.
+8. This map may lag the code (see `meta/corpus.md` snapshot). When the code
+   and the map disagree, the CODE is the truth — flag the drift; if the okfy
+   CLI is present, `okfy diff <bundle>` lists concepts whose sources changed.
+
+## Editing rules
+
+- write_policy=$write_policy. If `direct` (embed bundles): update concepts in
+  the same change that alters the mapped code — the PR review covers both.
+  If `proposals`: write suggested changes under `proposals/` with evidence.
+  With the CLI, the sanctioned way is:
+  `okfy propose <bundle> --target <concept-id> --action update --note "<why>" --from <file.md>`
+  — direct edits to concept files will be refused by the bundle's pre-commit hook.
+- Never edit `meta/`, `index.md`, or `log.md` by hand.
+
+## Accelerated mode (if the okfy CLI is installed)
+
+- `okfy query <bundle> "<text>" [--type T]` — ranked snippets
+- `okfy show <bundle> <concept-id>` — full concept
+- `okfy links <bundle> <concept-id>` — outgoing links + backlinks
+- `okfy diff <bundle>` — concepts whose corpus sources changed since snapshot
+
+## Types in this bundle
+
+$types_table

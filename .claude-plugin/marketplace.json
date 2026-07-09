@@ -1,0 +1,5 @@
+{
+  "name": "okfy",
+  "owner": { "name": "vsov" },
+  "plugins": [{ "name": "okfy", "source": "./plugin", "description": "OKFy: corpus → purpose-shaped OKF bundle" }]
+}

@@ -1,0 +1,38 @@
+name: codebase-map
+version: 1
+description: >
+  Bundles that let a model (or engineer) navigate and safely change a codebase:
+  what the parts are, how data flows, which conventions bind changes, and why
+  past decisions were made.
+canonical_types: [Module, DataModel, Flow, Convention, Decision]
+required_fields:
+  _all: [type, title, description]
+  Module: [sources, tags]
+  DataModel: [sources]
+  Flow: [sources]
+  Convention: [sources]
+  Decision: [sources]
+required_sections:
+  Module: [Responsibility, Interface, Dependencies]
+  DataModel: [Shape, Invariants, Lifecycle]
+  Flow: [Trigger, Path, Failure modes]
+  Convention: [Rule, Rationale, Enforcement]
+  Decision: [Context, Decision, Consequences]
+layout:
+  Module: modules/
+  DataModel: data-models/
+  Flow: flows/
+  Convention: conventions/
+  Decision: decisions/
+purpose_checks:
+  - id: standalone-content
+    prompt: >
+      Read this concept. Could an engineer or agent act on it WITHOUT opening
+      the corpus? Pointer-style content ("see foo.c") without the contract
+      itself is a failure.
+  - id: change-safe
+    prompt: >
+      For Module/Convention concepts: does it state what a change must preserve
+      (interfaces, invariants, conventions) concretely enough that an agent
+      editing the code would know the rules? Vague guidance is a failure.
+consumption_protocol: protocols/agents.tmpl

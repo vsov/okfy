@@ -1,0 +1,35 @@
+name: decision-support
+version: 1
+description: >
+  Bundles that help a model support a human's decisions in a domain
+  (trading, ops, purchasing). Structure favors regime-awareness:
+  what to do, when it applies, what can go wrong.
+canonical_types: [Strategy, MarketRegime, RiskFactor, GlossaryTerm, Playbook]
+required_fields:
+  _all: [type, title, description]
+  Strategy: [tags, sources, aliases]
+  MarketRegime: [sources]
+  RiskFactor: [sources]
+  GlossaryTerm: [aliases]
+  Playbook: [sources]
+required_sections:
+  Strategy: [Setup, Risk, Exit]
+  Playbook: [Trigger, Steps]
+layout:
+  Strategy: strategies/
+  MarketRegime: regimes/
+  RiskFactor: risks/
+  GlossaryTerm: glossary/
+  Playbook: playbooks/
+purpose_checks:
+  - id: standalone-content
+    prompt: >
+      Read this concept. Could a model answer purpose-level questions about it
+      WITHOUT access to the original corpus? Flag pointer-style content
+      ("see chapter 5") as a failure.
+  - id: decision-ready
+    prompt: >
+      For Strategy/Playbook concepts: are entry conditions, risks, and exit
+      criteria concrete enough to act on? Vague advice ("manage risk carefully")
+      is a failure.
+consumption_protocol: protocols/agents.tmpl

@@ -1,0 +1,32 @@
+# Agent instructions for this OKFy workspace
+
+This is a FEDERATION of OKF bundles: $title. It contains no knowledge of its
+own — knowledge lives in the member bundles listed below; this workspace adds
+roles, crosswalks (reviewed cross-bundle links), and a federated protocol.
+
+## Members
+
+$members_table
+
+## Federated consumption protocol
+
+1. Read `meta/workspace.md` first (members, roles, purpose, test queries).
+2. Query with `okfy query <workspace-dir> "<text>"` when the CLI is present:
+   results come namespaced (`member:concept-id`), grouped by role, with
+   `constrains`-linked concepts attached under `pulled`. Open full concepts
+   with `okfy show <workspace-dir> <member>:<concept-id>`.
+3. Without tooling: read each member's AGENTS.md and index.md; use
+   `links/*.md` crosswalk rows to translate vocabulary between members
+   (same-as) and to find constraints bound to a concept (constrains).
+4. AUTHORITY: constraint members outrank knowledge members. A recommendation
+   that violates any pulled constraint must lead with the violation, not bury
+   it. When constraint members disagree, the STRICTEST reading wins by
+   default; surface the disagreement.
+5. Coverage honesty: if no member covers the question, say so. Check member
+   lexicons for terms flagged NOT COVERED.
+6. Never edit member bundles from here; respect each member's write_policy.
+   To suggest a change to a member concept, use
+   `okfy propose <member-bundle-path> --target <concept-id> ...` — the member's
+   owner reviews it via okfy review.
+   Crosswalk rows change only through the review flow (/okfy:relink).
+$queries_note
