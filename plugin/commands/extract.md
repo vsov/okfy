@@ -46,9 +46,10 @@ hashes the actual prompt text and inputs.
    - `okfy ledger add <bundle> --run <run-id> --segment <segment-id>
      --inputs <corpus-paths-the-worker-used> --prompt-version extract-worker@1
      --outputs <draft-ids-written> --validation <pass|fail>
-     --job <digest-from-the-job-artifact>` — one row per worker, after its
-     drafts commit. The `--job` digest ties the row to the exact frozen
-     contract in `meta/jobs/<segment-id>.json`.
+     --job <segment-id>` — one row per worker, after its drafts commit.
+     `--job` takes the SEGMENT ID: the core loads the frozen artifact in
+     `meta/jobs/<segment-id>.json` and computes the digest itself — never
+     hand-copy a digest.
 
 ## Stage 5 — Consolidate
 
@@ -83,14 +84,16 @@ hashes the actual prompt text and inputs.
    PERSIST the pass as an artifact, not a story: write `meta/purpose-fitness.md`
    with frontmatter `type: PurposeFitness`, `date`, `prompt_version`, and —
    copied verbatim from the sample output — `selector_version`, `seed`,
-   `sampled`, plus the `fraction`/`minimum` used if non-default. Body = a
-   markdown table with one row per sampled id × check id: verdict
-   `pass`/`fail`/`n/a` + one-line evidence, plus what was fixed. Commit it.
+   `sampled`, plus the `fraction`/`minimum` used if non-default. The verdicts
+   are MACHINE-READABLE frontmatter, not prose: `rows:` — one entry per
+   sampled id × check id, each `{concept_id, check_id, verdict:
+   pass|fail|n/a, evidence: <one line>}`. The body is a human rendering
+   (what was checked, what was fixed) — never the source of truth. Commit it.
    Then `okfy validate <bundle> --strict-quality` MUST exit 0 — the validator
-   checks the artifact exists, covers every sampled id × check, and (while
-   the corpus hasn't moved) still covers the deterministic sample. L3 is
-   replayable evidence like the eval, not an agent action that evaporates
-   with the transcript.
+   demands every sampled id × check row, unique, with a real verdict and
+   non-empty evidence, and (while the corpus hasn't moved) replays the
+   selector. L3 is replayable evidence like the eval, not an agent action
+   that evaporates with the transcript.
 3. Layer 4 (consumption smoke test) — run the **/okfy:eval** flow, NOT a prose
    check: `okfy eval run <bundle>` (deterministic hits), LLM-judge each query
    (`okfy eval verdict ... --llm`), then take the owner through the checkpoint
@@ -98,9 +101,18 @@ hashes the actual prompt text and inputs.
    Acceptance is the owner's call at that checkpoint — an LLM-only pass is
    provisional and must never be reported as accepted.
 4. `okfy package <bundle>` then `okfy index <bundle>` (refresh after doc gen).
-5. `okfy log <bundle> "extract: <N> concepts, smoke <K>/10 (eval <run-id>)"`;
+   Packaging records a fingerprint of the concept set in `meta/package.json`;
+   any concept change after this point makes the package stale.
+5. FINAL GATE — the full strict validation, after packaging:
+   `okfy validate <bundle> --strict-sources --strict-quality
+   --strict-provenance --strict-package` MUST exit 0. This cross-checks the
+   whole release: sources and anchors real, purpose-fitness complete, every
+   job artifact/frozen prompt/ledger digest consistent, every concept
+   reachable from index.md, package fresh. If it fails, fix and re-run —
+   repackage if concepts changed.
+6. `okfy log <bundle> "extract: <N> concepts, smoke <K>/10 (eval <run-id>)"`;
    final commit `reextract: complete — <K>/10 smoke queries pass (eval <run-id>)`.
-6. Report to the user: concept counts by type, validation summary, and the Eval
+7. Report to the user: concept counts by type, validation summary, and the Eval
    Run result (owner-confirmed vs provisional per `okfy eval status`) with any
    failing/gapping queries and suggested fixes: refine targets or corpus gaps.
    MVP acceptance: ≥8/10 owner PASS.

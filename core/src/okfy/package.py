@@ -105,10 +105,18 @@ def install_precommit(bundle: Bundle) -> None:
 
 
 def package(bundle: Bundle, archetype: Archetype) -> None:
+    import json
+
+    from okfy.validate import package_fingerprint
     (bundle.root / "index.md").write_text(render_index(bundle), encoding="utf-8")
     (bundle.root / "README.md").write_text(render_readme(bundle, archetype), encoding="utf-8")
     (bundle.root / "AGENTS.md").write_text(render_agents_md(bundle, archetype), encoding="utf-8")
     (bundle.root / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
+    # fingerprint of the concept set the generated docs describe — any later
+    # mutation makes the package provably stale (validate --strict-package)
+    (bundle.root / "meta" / "package.json").write_text(json.dumps(
+        {"schema": "okfy-package@1",
+         "fingerprint": package_fingerprint(bundle)}) + "\n", encoding="utf-8")
     install_precommit(bundle)
     append_log(bundle, "package: regenerated index.md, README.md, AGENTS.md")
 

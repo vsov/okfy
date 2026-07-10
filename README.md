@@ -85,7 +85,7 @@ for full options.
 | `okfy segment <bundle> [--budget N] [--include ...] [--exclude ...]` | Cut the corpus into deterministic per-Worker segments; files over budget are chunked at blank-line boundaries into `{path, lines}` slices; dense files with no blank lines (minified, single-line) fall back to `{path, chars}` character windows. |
 | `okfy segment-status <bundle> <segment_id> <status>` | Record a segment's extraction status in the pipeline state. |
 | `okfy cluster <bundle>` | Pre-cluster draft concepts to guide consolidation. |
-| `okfy validate <bundle> [--all] [--no-archetype] [--quiet] [--strict-sources] [--strict-quality]` | Validate concepts: OKF spec conformance + bundle integrity. Source paths resolve against the corpus snapshot — broken ones warn (`W_BAD_SOURCE`); `--strict-sources` escalates to errors, the bar new extractions are held to. Anchors are checked too when the corpus is locally readable: `path#L10-L20` must be a real line range, `guide.md#heading-id` a real heading (`W_BAD_ANCHOR`/`E_BAD_ANCHOR`). `--strict-quality` demands a complete `meta/purpose-fitness.md` artifact — the persisted L3 pass — covering every sampled concept × purpose check. |
+| `okfy validate <bundle> [--all] [--no-archetype] [--quiet] [--strict-sources] [--strict-quality] [--strict-provenance] [--strict-package]` | Validate concepts: OKF spec conformance + bundle integrity. Source paths resolve against the corpus snapshot — broken ones warn (`W_BAD_SOURCE`); `--strict-sources` escalates to errors, the bar new extractions are held to. Anchors are checked too when the corpus is locally readable: `path#L10-L20` must be a real line range, `guide.md#heading-id` a real heading (`W_BAD_ANCHOR`/`E_BAD_ANCHOR`). `--strict-quality` demands a complete `meta/purpose-fitness.md` artifact — machine-readable verdict `rows:` covering every sampled concept × purpose check, unique, with evidence. `--strict-provenance` cross-checks every job artifact, frozen prompt, and ledger job digest. `--strict-package` demands every concept reachable from `index.md` and the package fingerprint fresh. |
 | `okfy index <bundle>` | Build the BM25 + link index into `.okfy-cache/`. |
 | `okfy query <bundle> <text> [--type T] [--tag T] [-n N] [--include-meta] [--no-expand] [--no-stale]` | Lexical BM25 search with frontmatter filters. Lexicon query expansion is on by default (`--no-expand` opts out); stale concepts stay visible but marked (`--no-stale` drops them). |
 | `okfy show <bundle> <concept_id>` | Print a concept's full content. |
@@ -94,8 +94,8 @@ for full options.
 | `okfy eval run <bundle> [-n N]` | Replay the bundle's `purpose.md` test queries (expansion → top hits) into an append-only Eval Run in `meta/eval.json`. |
 | `okfy eval verdict <bundle> <run\|latest> <q-idx> <pass\|fail\|partial> (--llm \| --owner) [--note …]` | Record a Verdict on one query. `--llm` proposes (stays provisional); `--owner` disposes (the only kind release acceptance counts). |
 | `okfy eval status <bundle> [run\|latest]` | Effective verdict per query and totals; a bundle stays *provisional* until every query has an owner verdict. |
-| `okfy job <bundle> <segment> --prompt-file <p>` | Freeze a segment's worker contract into `meta/jobs/<segment>.json` — inputs with `lines`/`chars` spans and content hashes, corpus snapshot, archetype, prompt SHA-256 — and print it with its digest. |
-| `okfy ledger add\|list <bundle> … [--job <digest>]` | Append/read the Extraction Ledger (`meta/ledger.jsonl`) — segment-level provenance of Worker and Consolidation steps; `--job` ties a row to its frozen job artifact. |
+| `okfy job <bundle> <segment> --prompt-file <p>` | Freeze a segment's worker contract into `meta/jobs/<segment>.json` — inputs with `lines`/`chars` spans and content hashes, corpus snapshot, archetype — and copy the exact prompt text into the bundle (`meta/prompts/<sha256>.txt`): the contract travels with the bundle, not with the plugin repo. |
+| `okfy ledger add\|list <bundle> … [--job <segment>]` | Append/read the Extraction Ledger (`meta/ledger.jsonl`) — segment-level provenance of Worker and Consolidation steps. `--job` takes a segment id; the core computes the digest from the frozen artifact itself — a hand-passed digest proves nothing. |
 | `okfy propose <bundle> …` | Agent channel: file a concept change into `proposals/` — never into the live map. |
 | `okfy review list\|accept\|reject <bundle> …` | Owner gate: review proposals; accept validates before merging. |
 | `okfy refine <bundle> <concept_id>` | Owner channel: direct edit of a live concept, validated and committed. |
@@ -103,7 +103,7 @@ for full options.
 | `okfy repair-links <bundle>` | Deterministically repair dangling concept links after renames and merges. |
 | `okfy workspace init\|status\|export …` / `okfy link-candidates …` | Federate several bundles: workspace lifecycle, crosswalk candidates, one-way export fusion. |
 | `okfy sample <bundle> [--fraction F] [--minimum N]` | Risk-oriented deterministic sample for purpose-fitness review: changed sources, stale flags, rare types, weak coverage first, then a seeded stratified fill. Returns the selector version and seed so the sample is replayable. |
-| `okfy package <bundle>` | Generate `index.md`, `README.md`, `AGENTS.md`, log, and pre-commit hook. |
+| `okfy package <bundle>` | Generate `index.md`, `README.md`, `AGENTS.md`, log, and pre-commit hook; records a fingerprint of the concept set (`meta/package.json`) so later mutations make the package provably stale. |
 | `okfy log <bundle> <message>` | Append a structured entry to the Bundle's `log.md`. |
 
 ## MCP

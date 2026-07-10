@@ -101,7 +101,8 @@ def resolve_link(bundle: Bundle, concept_path, target: str) -> str | None:
 
 
 def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
-                       strict_quality=False) -> Report:
+                       strict_quality=False, strict_provenance=False,
+                       strict_package=False) -> Report:
     r = Report()
     concepts = []
     for p in bundle.iter_md_files():
@@ -116,8 +117,10 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_anchors(bundle, concepts, r, strict=strict_sources)
     _check_lexicon(concepts, r)
     linked_ids = _check_links(bundle, concepts, r)
-    _check_orphans(bundle, concepts, linked_ids, r)
+    _check_orphans(bundle, concepts, linked_ids, r, strict=strict_package)
     _check_quality(bundle, archetype, r, strict=strict_quality)
+    _check_provenance(bundle, r, strict=strict_provenance)
+    _check_package(bundle, r, strict=strict_package)
     for c in concepts:
         if not c.id.startswith("meta/"):
             if not c.meta.get("sources"):
@@ -339,7 +342,9 @@ def _check_links(bundle, concepts, r: Report) -> set[str]:
     return linked
 
 
-def _check_orphans(bundle, concepts, linked_ids, r: Report):
+def _check_orphans(bundle, concepts, linked_ids, r: Report, strict=False):
+    """strict (--strict-package): an unreachable concept is an error — agents
+    following the consumption protocol through index.md must find everything."""
     idx = bundle.root / "index.md"
     indexed = set()
     if idx.is_file():
@@ -347,22 +352,26 @@ def _check_orphans(bundle, concepts, linked_ids, r: Report):
             cid = resolve_link(bundle, idx, target)
             if cid:
                 indexed.add(cid)
+    level, code = ("error", "E_ORPHAN") if strict else ("warning", "W_ORPHAN")
     for c in concepts:
         if c.id.startswith("meta/"):
             continue
         if c.id not in indexed and c.id not in linked_ids:
-            r.add("warning", "W_ORPHAN", c.id, "not reachable from index.md or any concept")
+            r.add(level, code, c.id, "not reachable from index.md or any concept")
 
 
-QUALITY_FIELDS = ["date", "prompt_version", "selector_version", "seed", "sampled"]
+QUALITY_FIELDS = ["date", "prompt_version", "selector_version", "seed",
+                  "sampled", "rows"]
 QUALITY_VERDICTS = {"pass", "fail", "n/a"}
 
 
 def _check_quality(bundle: Bundle, archetype, r: Report, strict: bool = False):
     """PurposeFitness artifact (external review round 4): L3 must persist as a
     checkable artifact — meta/purpose-fitness.md — not a prompt instruction
-    that evaporates with the transcript. Warning by default (old bundles),
-    errors under --strict-quality (the bar new extractions are held to)."""
+    that evaporates with the transcript. Round 5 item 3: verdicts live in
+    frontmatter `rows:` (concept_id/check_id/verdict/evidence) — the same call
+    the lexicon made; markdown is human rendering, never the source of truth.
+    Warning by default (old bundles), errors under --strict-quality."""
     def code(s: str) -> str:
         return ("E_" if strict else "W_") + s
 
@@ -383,20 +392,30 @@ def _check_quality(bundle: Bundle, archetype, r: Report, strict: bool = False):
             r.add(level, code("QUALITY_UNKNOWN_ID"), c.id,
                   f"sampled id not in bundle: {sid}")
     checks = [str(pc.get("id")) for pc in (archetype.purpose_checks if archetype else [])]
-    rows = [ln for ln in c.body.splitlines()
-            if ln.lstrip().startswith("|") and not set(ln) <= set("|-: \t")]
+    rows = [x for x in (c.meta.get("rows") or []) if isinstance(x, dict)]
+    by_key: dict[tuple, list[dict]] = {}
+    for row in rows:
+        by_key.setdefault((str(row.get("concept_id")), str(row.get("check_id"))),
+                          []).append(row)
     for sid in sampled:
         if sid not in known:
             continue
         for chk in checks:
-            match = [ln for ln in rows if sid in ln and chk in ln]
+            match = by_key.get((sid, chk), [])
             if not match:
                 r.add(level, code("QUALITY_ROW"), c.id,
                       f"no verdict row for {sid} x {chk}")
-            elif not any(cell.strip().lower() in QUALITY_VERDICTS
-                         for ln in match for cell in ln.split("|")):
+                continue
+            if len(match) > 1:
+                r.add(level, code("QUALITY_DUP"), c.id,
+                      f"duplicate verdict rows for {sid} x {chk}")
+            row = match[0]
+            if str(row.get("verdict", "")).strip().lower() not in QUALITY_VERDICTS:
                 r.add(level, code("QUALITY_VERDICT"), c.id,
-                      f"row for {sid} x {chk} has no pass/fail/n-a verdict")
+                      f"row for {sid} x {chk}: verdict must be pass/fail/n-a")
+            if not str(row.get("evidence", "")).strip():
+                r.add(level, code("QUALITY_EVIDENCE"), c.id,
+                      f"row for {sid} x {chk}: evidence is empty")
     # replay: if the corpus hasn't moved (seed still current) the deterministic
     # sample must be covered; a moved corpus is not replayable — skip silently.
     from okfy.query import SELECTOR_VERSION, _selector_seed, sample_for_review
@@ -409,6 +428,107 @@ def _check_quality(bundle: Bundle, archetype, r: Report, strict: bool = False):
         if missing:
             r.add(level, code("QUALITY_SAMPLE"), c.id,
                   f"recorded sample misses deterministic selection: {missing}")
+
+
+def _check_provenance(bundle: Bundle, r: Report, strict: bool = False):
+    """Worker-job chain (external review round 5, item 2): every frozen job
+    artifact must be internally consistent (digest recomputes, prompt copy
+    present and unmodified), and every ledger row that claims a job must match
+    it — digest and inputs. Bundles with no jobs have nothing to verify."""
+    import hashlib as _hashlib
+
+    from okfy.job import job_digest
+    from okfy.ledger import read_rows
+
+    def code(s: str) -> str:
+        return ("E_" if strict else "W_") + s
+
+    level = "error" if strict else "warning"
+    jobs_dir = bundle.root / "meta" / "jobs"
+    jobs: dict[str, dict] = {}
+    if jobs_dir.is_dir():
+        for f in sorted(jobs_dir.glob("*.json")):
+            rel = f"meta/jobs/{f.name}"
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                r.add(level, code("PROV_JOB_UNREADABLE"), rel,
+                      "job artifact unreadable")
+                continue
+            if data.get("segment") != f.stem:
+                r.add(level, code("PROV_JOB_SEGMENT"), rel,
+                      f"artifact claims segment {data.get('segment')!r}")
+            if job_digest(data) != data.get("digest"):
+                r.add(level, code("PROV_JOB_DIGEST"), rel,
+                      "stored digest does not recompute — artifact edited "
+                      "after freeze")
+            pp = data.get("prompt_path")
+            pf = (bundle.root / pp) if pp else None
+            if not pp or not pf.is_file():
+                r.add(level, code("PROV_PROMPT"), rel,
+                      f"frozen prompt copy missing: {pp}")
+            elif (_hashlib.sha256(pf.read_bytes()).hexdigest()
+                  != data.get("prompt_sha256")):
+                r.add(level, code("PROV_PROMPT"), rel,
+                      f"prompt copy {pp} does not match prompt_sha256 — "
+                      "edited after freeze")
+            jobs[f.stem] = data
+    for row in read_rows(bundle):
+        jd = row.get("job_digest")
+        if not jd:
+            continue
+        where = f"meta/ledger.jsonl ({row.get('run_id')} {row.get('segment')})"
+        job = jobs.get(str(row.get("segment")))
+        if job is None:
+            r.add(level, code("PROV_LEDGER_JOB"), where,
+                  "row claims a job but no artifact exists for its segment")
+            continue
+        if job.get("digest") != jd:
+            r.add(level, code("PROV_LEDGER_DIGEST"), where,
+                  "row's job_digest does not match the frozen artifact")
+        job_paths = {i.get("path") for i in job.get("inputs", [])}
+        outside = sorted(set(row.get("inputs", [])) - job_paths)
+        if outside:
+            r.add(level, code("PROV_LEDGER_INPUTS"), where,
+                  f"row inputs not in the job artifact: {outside}")
+
+
+def package_fingerprint(bundle: Bundle) -> str:
+    """Content fingerprint of the final concept set: sorted id:sha256 lines,
+    hashed. Any concept mutation, addition, or removal changes it — so a
+    package generated before the change is provably stale."""
+    import hashlib as _hashlib
+    lines = []
+    for c in sorted(bundle.concepts(), key=lambda c: c.id):
+        if c.id.startswith("meta/"):
+            continue
+        lines.append(f"{c.id}:{_hashlib.sha256(c.path.read_bytes()).hexdigest()}")
+    return _hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def _check_package(bundle: Bundle, r: Report, strict: bool = False):
+    """Package freshness (external review round 5, item 4): the generated
+    index is the consumption contract for agents without the CLI — a concept
+    accepted after `okfy package` is invisible to them until repackage.
+    meta/package.json records the concept-set fingerprint at package time."""
+    def code(s: str) -> str:
+        return ("E_" if strict else "W_") + s
+
+    level = "error" if strict else "warning"
+    p = bundle.root / "meta" / "package.json"
+    if not p.is_file():
+        r.add(level, code("PACKAGE_MISSING"), "meta/package.json",
+              "no package fingerprint — run `okfy package`")
+        return
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        recorded = data.get("fingerprint")
+    except (OSError, ValueError):
+        recorded = None
+    if recorded != package_fingerprint(bundle):
+        r.add(level, code("STALE_PACKAGE"), "meta/package.json",
+              "concepts changed since `okfy package` — the generated index "
+              "no longer reflects the bundle; repackage before acceptance")
 
 
 def _section_text(body: str, name: str) -> str | None:

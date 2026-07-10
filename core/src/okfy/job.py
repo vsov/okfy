@@ -17,6 +17,21 @@ from okfy.ledger import _manifest
 JOB_SCHEMA = "okfy-worker-job@1"
 
 
+def freeze_prompt(bundle: Bundle, prompt_file: Path) -> tuple[str, str]:
+    """Copy the exact prompt text into the bundle as an immutable,
+    content-addressed artifact (external review round 5: a SHA alone proves
+    the text existed, not what it said — the bundle must carry the text).
+    Stored as .txt: prompt copies are not concepts and carry no frontmatter."""
+    data = Path(prompt_file).read_bytes()
+    sha = hashlib.sha256(data).hexdigest()
+    rel = f"meta/prompts/{sha}.txt"
+    out = bundle.root / rel
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not out.exists():
+        out.write_bytes(data)
+    return rel, sha
+
+
 def job_digest(job: dict) -> str:
     """SHA-256 over the canonical JSON of the job, digest field excluded."""
     body = {k: v for k, v in job.items() if k != "digest"}
@@ -45,6 +60,7 @@ def build_job(bundle: Bundle, segment_id: str, prompt_file: Path) -> dict:
                 i[span] = entry[span]
         i["sha256"] = manifest.get(entry["path"], "unknown")
         inputs.append(i)
+    prompt_path, prompt_sha = freeze_prompt(bundle, prompt_file)
     job = {
         "schema": JOB_SCHEMA,
         "segment": segment_id,
@@ -53,11 +69,19 @@ def build_job(bundle: Bundle, segment_id: str, prompt_file: Path) -> dict:
         "archetype": {"name": plan.meta.get("archetype"),
                       "version": plan.meta.get("archetype_version")},
         "inputs": inputs,
-        "prompt_sha256": hashlib.sha256(
-            Path(prompt_file).read_bytes()).hexdigest(),
+        "prompt_path": prompt_path,
+        "prompt_sha256": prompt_sha,
     }
     job["digest"] = job_digest(job)
     return job
+
+
+def load_job(bundle: Bundle, segment_id: str) -> dict:
+    p = bundle.root / "meta" / "jobs" / f"{segment_id}.json"
+    if not p.is_file():
+        raise FileNotFoundError(f"no job artifact for segment: {segment_id} "
+                                f"(expected {p}) — run `okfy job` first")
+    return json.loads(p.read_text(encoding="utf-8"))
 
 
 def write_job(bundle: Bundle, job: dict) -> Path:

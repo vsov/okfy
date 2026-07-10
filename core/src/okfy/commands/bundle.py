@@ -19,7 +19,9 @@ def cmd_validate(a) -> int:
     r = validate_conformance(b, include_drafts=a.all, include_proposals=a.all)
     arch = None if a.no_archetype else _archetype_for(b)
     r2 = validate_integrity(b, arch, strict_sources=a.strict_sources,
-                            strict_quality=a.strict_quality)
+                            strict_quality=a.strict_quality,
+                            strict_provenance=a.strict_provenance,
+                            strict_package=a.strict_package)
     r.findings.extend(r2.findings)
     r.sources = r2.sources
     if not a.quiet:

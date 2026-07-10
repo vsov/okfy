@@ -2,7 +2,7 @@ import sys
 
 from okfy.bundle import Bundle
 from okfy.evaluation import eval_run, eval_status, eval_verdict
-from okfy.job import build_job, write_job
+from okfy.job import build_job, job_digest, load_job, write_job
 from okfy.ledger import add_row, parse_merge_map, read_rows
 from okfy.proposals import clear_stale, set_stale
 
@@ -41,9 +41,18 @@ def cmd_ledger(a) -> int:
     if a.dcmd == "add":
         inputs = [s for s in (x.strip() for x in a.inputs.split(",")) if s]
         outputs = [s for s in (x.strip() for x in a.outputs.split(",")) if s]
+        jd = None
+        if a.job:
+            # --job takes a SEGMENT ID: the core loads the frozen artifact and
+            # computes the digest itself — a hand-passed digest proves nothing
+            job = load_job(b, a.job)
+            if job.get("segment") != a.segment:
+                raise ValueError(f"job artifact is for segment "
+                                 f"{job.get('segment')!r}, row is for {a.segment!r}")
+            jd = job_digest(job)
         row = add_row(b, a.run, a.segment, inputs, a.prompt_version, outputs,
                       a.validation, merge_map=parse_merge_map(a.merge_map),
-                      job_digest=a.job)
+                      job_digest=jd)
         _print(row)
     else:
         for r in read_rows(b, run_id=a.run):

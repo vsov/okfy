@@ -38,6 +38,12 @@ def main(argv=None) -> int:
     p.add_argument("--strict-quality", action="store_true",
                    help="missing/incomplete purpose-fitness artifact becomes "
                         "errors (new extractions)")
+    p.add_argument("--strict-provenance", action="store_true",
+                   help="job artifacts, frozen prompts, and ledger job digests "
+                        "must all cross-check")
+    p.add_argument("--strict-package", action="store_true",
+                   help="every concept reachable from index.md; concepts "
+                        "unchanged since okfy package")
     p.add_argument("--quiet", action="store_true")
 
     p = sub.add_parser("index");    p.add_argument("bundle", type=Path)
@@ -135,8 +141,9 @@ def main(argv=None) -> int:
     d.add_argument("--validation", required=True)
     d.add_argument("--merge-map", dest="merge_map", default=None,
                    help="draft=final,draft2=final2 (consolidation rows)")
-    d.add_argument("--job", default=None,
-                   help="digest of the worker-job artifact (okfy job output)")
+    d.add_argument("--job", default=None, metavar="SEGMENT_ID",
+                   help="segment id of the worker-job artifact; the digest is "
+                        "computed from meta/jobs/<id>.json, never hand-passed")
     d = dsub.add_parser("list");    d.add_argument("bundle", type=Path)
     d.add_argument("--run", default=None)
 
