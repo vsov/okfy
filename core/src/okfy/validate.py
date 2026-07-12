@@ -230,11 +230,18 @@ MD_EXTS = {".md", ".markdown"}
 
 
 def _heading_slugs(text: str) -> set[str]:
-    """GitHub-style slugs of every markdown heading."""
+    """Plausible slugs of every markdown heading. Real corpora disagree on the
+    slugger: GitHub keeps one dash per space around removed punctuation
+    ("NumPy / Lists" -> numpy--lists), mkdocs collapses runs (numpy-lists),
+    and mkdocs-material prefixes headings with :icon-codes: that no slugger
+    keeps. Accept any of these variants — the check exists to catch anchors
+    pointing at nothing, not to referee slugger dialects."""
     out = set()
     for h in re.findall(r"^#{1,6}\s+(.+?)\s*$", text, re.MULTILINE):
-        s = re.sub(r"[^\w\s-]", "", h.lower(), flags=re.UNICODE)
-        out.add(re.sub(r"[\s_]+", "-", s).strip("-"))
+        h = re.sub(r":[a-z0-9_+-]+:", "", h.lower()).strip()  # icon/emoji codes
+        s = re.sub(r"[^\w\s-]", "", h, flags=re.UNICODE)
+        out.add(re.sub(r"[\s_]", "-", s).strip("-"))    # github: dash per space
+        out.add(re.sub(r"[-\s_]+", "-", s).strip("-"))  # mkdocs: collapsed
     return out
 
 

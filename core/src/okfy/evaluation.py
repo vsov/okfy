@@ -69,6 +69,10 @@ def eval_run(bundle: Bundle, n: int = 10) -> dict:
         out = query.query(bundle, str(q), n=n, expand=True)
         results.append({"query": str(q), "expanded_query": out["expanded_query"],
                         "top_hits": [_slim(h) for h in out["results"]],
+                        # lexicon notes (ambiguous / not-covered) are part of
+                        # the answer: an honest "this bundle does not cover X"
+                        # must survive into the replayable record
+                        "notes": out["notes"],
                         "llm_verdict": None, "llm_reason": None,
                         "owner_verdict": None, "owner_note": None})
     run = {"run_id": ts, "tool_version": __version__, "created": ts,
