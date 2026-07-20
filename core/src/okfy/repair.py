@@ -57,7 +57,7 @@ def repair_links(bundle: Bundle, apply: bool = True) -> dict:
                 (ambiguous if how == "ambiguous" else unresolved).append(d)
                 continue
             anchor = ("#" + d["raw"].split("#", 1)[1]) if "#" in d["raw"] else ""
-            body = body.replace(f"({d['raw']})", f"(/{target}.md{anchor})")
+            body = body.replace(f"({d['raw']})", f"(/{target}.md{anchor})", 1)
             rewritten.append({**d, "target": target, "how": how})
         if apply and body != c.body:
             c.path.write_text(frontmatter.serialize(c.meta, body), encoding="utf-8")
