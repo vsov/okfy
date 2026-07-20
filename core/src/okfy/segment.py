@@ -1,4 +1,5 @@
 import subprocess
+import sys
 from fnmatch import fnmatch
 from math import ceil
 from pathlib import Path
@@ -43,12 +44,16 @@ def _default_excluded(rel: str) -> bool:
 def _walk(corpus: Path) -> list[str]:
     """Relative posix paths, files only. Git corpora get exact gitignore semantics."""
     if (corpus / ".git").exists():
-        out = subprocess.run(
-            ["git", "-C", str(corpus), "ls-files", "--cached", "--others",
-             "--exclude-standard", "-z"],
-            capture_output=True, text=True, check=True).stdout
-        rels = {r for r in out.split("\0") if r and (corpus / r).is_file()}
-        return sorted(rels)
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(corpus), "ls-files", "--cached", "--others",
+                 "--exclude-standard", "-z"],
+                capture_output=True, text=True, check=True).stdout
+            rels = {r for r in out.split("\0") if r and (corpus / r).is_file()}
+            return sorted(rels)
+        except subprocess.CalledProcessError:
+            print(f"warning: {corpus} has .git but is not a valid git repo; "
+                  "falling back to rglob", file=sys.stderr)
     rels = []
     for p in sorted(corpus.rglob("*")):
         rel = p.relative_to(corpus)
