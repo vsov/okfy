@@ -31,8 +31,9 @@ def cmd_validate(a) -> int:
 
 def cmd_index(a) -> int:
     b = Bundle(a.bundle)
-    save_index(b, build_index(b))
-    _print({"indexed": len(build_index(b)["concepts"])})
+    idx = build_index(b)
+    save_index(b, idx)
+    _print({"indexed": len(idx["concepts"])})
     return 0
 
 
