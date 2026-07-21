@@ -228,6 +228,8 @@ The hard part is that two independently-shaped bundles do not share a vocabulary
 
 Once linked, `query` over the workspace auto-detects the federation, pulls from every relevant member, and surfaces the binding constraints alongside the knowledge. When you are done, `okfy workspace export` fuses the members into a single frozen hand-off marked `exported: true` — at which point the update verbs refuse to touch it. An export is a snapshot for delivery, not a living bundle; if the members move, you re-federate and re-export rather than editing the frozen fusion in place.
 
+Federated results also deduplicate honestly. When two members carry the same concept — a vendor bundle and your own both defining the same term — the accepted `same-as` crosswalk row now merges them into ONE result at query time: the scores add (two members agreeing is stronger evidence, not two rows eating two ranks), the stronger entry is canonical, and the absorbed refs are listed in `duplicates` so nothing is hidden. Only accepted rows merge — a proposed equivalence is a hypothesis, not an identity — and only within one role: a constraint that mirrors a knowledge concept stays visible in the constraints group, because collapsing a limit into the strategy it limits is exactly the kind of smoothing federation exists to prevent.
+
 Cheatsheet: `okfy workspace init|status|export` manage the workspace lifecycle; `okfy link-candidates` proposes crosswalk rows; `okfy query <workspace>` auto-detects the federation and answers across members.
 
 ## 10. The refinement loop

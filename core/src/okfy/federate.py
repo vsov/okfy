@@ -53,6 +53,51 @@ def expansion_terms(ws: Workspace, member_name: str, text: str) -> list[str]:
     return sorted(set(extra))
 
 
+def _same_as_root(ws: Workspace) -> dict[str, str]:
+    """Union-find over accepted same-as rows: ref -> class root. Only
+    accepted rows merge — a proposed equivalence is a hypothesis, not
+    an identity."""
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for r in load_rows(ws):
+        if r.rel == "same-as" and r.status == "accepted":
+            ra, rb = find(r.src), find(r.dst)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+    return {x: find(x) for x in list(parent)}
+
+
+def _merge_same_as(ranked: dict[str, dict], ws: Workspace) -> list[dict]:
+    """Merge-proper dedup: entries of one same-as class within one ROLE
+    collapse into a single result — scores add (both members' evidence
+    counts once, not as two rank-eating rows), the stronger entry is
+    canonical, the rest land in `duplicates`. Cross-role pairs stay
+    separate: a constraint mirror of a knowledge concept must remain
+    visible in the constraints group."""
+    root = _same_as_root(ws)
+    groups: dict[tuple, list[dict]] = {}
+    for e in ranked.values():
+        groups.setdefault((root.get(e["ref"], e["ref"]), e["role"]),
+                          []).append(e)
+    out = []
+    for members in groups.values():
+        members.sort(key=lambda e: (-e["score"], e["ref"]))
+        canon = members[0]
+        if len(members) > 1:
+            canon = dict(canon)
+            canon["score"] = sum(m["score"] for m in members)
+            canon["duplicates"] = sorted(m["ref"] for m in members[1:])
+        out.append(canon)
+    return out
+
+
 def federated_query(ws: Workspace, text: str, n: int = 10,
                     pull_top: int = 5) -> dict:
     from okfy.query import filter_pool, search_pool
@@ -80,7 +125,8 @@ def federated_query(ws: Workspace, text: str, n: int = 10,
                 e["stale"] = True
                 e["stale_reason"] = h.get("stale_reason", "")
             e["score"] += 1.0 / (RRF_K + rank + 1)
-    ordered = sorted(ranked.values(), key=lambda e: (-e["score"], e["ref"]))
+    ordered = sorted(_merge_same_as(ranked, ws),
+                     key=lambda e: (-e["score"], e["ref"]))
     out = {"knowledge": [e for e in ordered if e["role"] == "knowledge"][:n],
            "constraints": [e for e in ordered if e["role"] == "constraints"][:n],
            "notes": notes, "expanded_query": expanded}
