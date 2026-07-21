@@ -29,6 +29,13 @@ def cmd_validate(a) -> int:
     return 0 if r.ok else 1
 
 
+def cmd_release_check(a) -> int:
+    from okfy.release import release_check
+    out = release_check(Bundle(a.bundle))
+    _print(out)
+    return 0 if out["ok"] else 1
+
+
 def cmd_index(a) -> int:
     b = Bundle(a.bundle)
     save_index(b, build_index(b))

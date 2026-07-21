@@ -4,7 +4,8 @@ Each handler takes the parsed argparse namespace and returns an exit code.
 The argparse construction and dispatch live in okfy.cli; this package holds
 the per-verb logic, grouped by domain.
 """
-from .bundle import cmd_index, cmd_init, cmd_log, cmd_package, cmd_validate
+from .bundle import (cmd_index, cmd_init, cmd_log, cmd_package,
+                     cmd_release_check, cmd_validate)
 from .corpus import (cmd_cluster, cmd_diff, cmd_repair_links, cmd_segment,
                      cmd_segment_status, cmd_snapshot, cmd_survey)
 from .quality import cmd_eval, cmd_job, cmd_ledger, cmd_stale
@@ -19,6 +20,7 @@ HANDLERS = {
     "segment-status": cmd_segment_status,
     "cluster": cmd_cluster,
     "validate": cmd_validate,
+    "release-check": cmd_release_check,
     "index": cmd_index,
     "query": cmd_query,
     "show": cmd_show,

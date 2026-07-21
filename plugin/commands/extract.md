@@ -110,6 +110,15 @@ hashes the actual prompt text and inputs.
    job artifact/frozen prompt/ledger digest consistent, every concept
    reachable from index.md, package fresh. If it fails, fix and re-run —
    repackage if concepts changed.
+   Then `okfy release-check <bundle>` MUST exit 0 — the fail-closed
+   completeness gate: every done worker segment has a job artifact + a ledger
+   row carrying its digest; the latest eval run is owner-complete, its
+   retrieval fingerprint still matches the bundle (concepts/lexicon/test
+   queries/tool unchanged since the run), and owner passes meet the bundle's
+   acceptance policy (`acceptance.min_owner_pass` in meta/purpose.md,
+   default 8); L3 has no unexcused `fail` verdicts. If concepts or lexicon
+   changed after the eval, the run is stale — re-run the eval and repeat the
+   owner checkpoint; never edit an old run.
 6. `okfy log <bundle> "extract: <N> concepts, smoke <K>/10 (eval <run-id>)"`;
    final commit `reextract: complete — <K>/10 smoke queries pass (eval <run-id>)`.
 7. Report to the user: concept counts by type, validation summary, and the Eval

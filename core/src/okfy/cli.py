@@ -46,6 +46,12 @@ def main(argv=None) -> int:
                         "unchanged since okfy package")
     p.add_argument("--quiet", action="store_true")
 
+    p = sub.add_parser(
+        "release-check",
+        help="fail-closed release gate: provenance completeness, eval "
+             "currency (retrieval fingerprint), acceptance policy")
+    p.add_argument("bundle", type=Path)
+
     p = sub.add_parser("index");    p.add_argument("bundle", type=Path)
 
     p = sub.add_parser("query");    p.add_argument("bundle", type=Path)

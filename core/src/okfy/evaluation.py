@@ -75,7 +75,12 @@ def eval_run(bundle: Bundle, n: int = 10) -> dict:
                         "notes": out["notes"],
                         "llm_verdict": None, "llm_reason": None,
                         "owner_verdict": None, "owner_note": None})
+    # pin the retrieval contract this run was judged against: a later
+    # concept/lexicon/test-query/tool change makes the run stale evidence
+    # (release_check compares this against the live bundle)
+    from okfy.release import retrieval_fingerprint
     run = {"run_id": ts, "tool_version": __version__, "created": ts,
+           "retrieval_fingerprint": retrieval_fingerprint(bundle),
            "results": results}
     data = load_evals(bundle)
     data["runs"].append(run)

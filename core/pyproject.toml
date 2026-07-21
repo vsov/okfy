@@ -1,6 +1,6 @@
 [project]
 name = "okfy"
-version = "0.5.0"
+version = "0.6.0"
 description = "Purpose-shaped OKF knowledge bundles: extraction at scale, deterministic retrieval"
 license = "Apache-2.0"
 requires-python = ">=3.11"
