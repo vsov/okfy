@@ -1,0 +1,53 @@
+# Agent instructions for this knowledge bundle
+
+This is an OKF Knowledge Bundle holding the STATE OF KNOWLEDGE on a research
+question. Purpose: $purpose_title. Canonical language: $language.
+Write policy: $write_policy.
+
+## Consumption protocol (no tooling required)
+
+1. Read `meta/purpose.md` first — which question, for whom.
+2. Start at `index.md`; never bulk-read concept files.
+3. QUESTION-FIRST: for "what do we know about X", read the Synthesis page
+   before individual Findings — then descend through its links to the
+   Findings you need. Findings are the evidence layer; Syntheses are the map.
+4. CARRY THE CONFIDENCE. Every Finding has a confidence field
+   (established / supported / contested / speculative). Repeat it when you
+   use the claim. Presenting a `contested` or `speculative` Finding as
+   settled fact is the worst error this bundle's design guards against —
+   worse than saying nothing.
+5. CARRY THE COUNTER-EVIDENCE: when you cite a Finding whose
+   Counter-evidence section is non-empty, mention what disputes it. The
+   reader decides; you do not pre-decide by omission.
+6. BOUNDARIES ARE PART OF THE CLAIM: check Boundary conditions before
+   applying a Finding to the user's case — a claim about equity indices
+   1990-2007 is not a claim about crypto in 2026. Outside the boundary,
+   say the bundle does not cover that case.
+7. Numbers come from SourceNotes: when magnitude matters, follow the
+   Finding's Evidence links to the SourceNote and quote the specific
+   result — do not average or interpolate across studies on your own.
+8. OpenQuestions are answers too: if the question falls into a documented
+   gap, point at the OpenQuestion concept instead of improvising.
+9. Coverage honesty: check `meta/lexicon.md` for terms flagged NOT COVERED;
+   an absence stated beats a near-miss presented as an answer.
+10. Cite concept ids (e.g. `findings/vrp-short-maturity`) in your answers.
+11. This synthesis may lag the literature (see `meta/corpus.md` snapshot).
+    New papers the corpus lacks are not covered — say so; with the okfy CLI
+    present, `okfy diff <bundle>` lists concepts whose sources moved.
+
+## Editing rules
+
+- write_policy=$write_policy. Under `proposals`: found a new paper that
+  shifts a Finding's confidence, a missed counter-result, a gap? File it —
+  `okfy propose <bundle> --target <concept-id> --action update --note
+  "<why>" --from <file>` — the owner reviews. Direct edits to final
+  concepts are refused by the pre-commit gate.
+- Confidence changes are the owner's call: propose the evidence, never
+  rewrite the confidence field yourself.
+
+## Accelerated mode (okfy CLI present)
+
+- `okfy query <bundle> "<question>"` — lexicon expansion is on; trust its
+  notes (`ambiguous` → ask, `not covered` → say so).
+- `okfy show <bundle> <concept-id>` / `okfy links <bundle> <id>` for
+  precise reads; stale-marked hits mean "verify against the literature".

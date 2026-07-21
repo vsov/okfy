@@ -573,6 +573,11 @@ def _check_archetype(c, archetype, r: Report):
             r.add("error", "E_LINK_RULE", c.id,
                   f"{ctype} must link >= {rule.get('min', 1)} concept(s) under "
                   f"{'/'.join(dirs) if len(dirs) == 1 else dirs} in {where}; found {found}")
+    for fname, allowed in (archetype.field_enums.get(ctype) or {}).items():
+        v = c.meta.get(fname)
+        if v is not None and str(v) not in [str(a) for a in allowed]:
+            r.add("error", "E_FIELD_ENUM", c.id,
+                  f"{fname}: {v!r} not in {allowed}")
     for s in archetype.nonempty_sections.get(ctype, []):
         text = _section_text(c.body, s)
         if text is not None and not text.strip():

@@ -32,9 +32,12 @@ Interview the user, one question at a time, in their language:
 
 - Pick the closest archetype: **decision-support** (knowledge that backs a
   human's decisions), **codebase-map** (navigate + safely change a codebase),
-  or **api-reference** (correctly USE an API — the caller's mirror of
-  codebase-map: Operations, Types, Recipes, Contracts, Topics). If none fits,
-  say so and stop — don't force it.
+  **api-reference** (correctly USE an API — the caller's mirror of
+  codebase-map: Operations, Types, Recipes, Contracts, Topics), or
+  **research-synthesis** (the state of knowledge on a research question:
+  atomic Findings with a confidence enum, Methods, Syntheses, OpenQuestions,
+  SourceNotes — its cardinal sin is presenting contested as settled). If none
+  fits, say so and stop — don't force it.
 - For a git CODE corpus, offer `--embed`: the bundle lives at `.okf/` inside
   the corpus repo, rides its PRs, write_policy defaults to `direct`
   (`okfy init --corpus <corpus> --embed`). Warn the user this writes into

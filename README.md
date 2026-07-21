@@ -61,7 +61,7 @@ CLI for every deterministic step, so the core must be installed first.
 
 `/okfy:new` interviews you about what the Bundle is *for*, surveys the corpus,
 designs a schema from a Purpose Archetype (decision-support for prose corpora,
-codebase-map for changing code, api-reference for using an API), and writes an
+codebase-map for changing code, api-reference for using an API, research-synthesis for the state of knowledge on a research question), and writes an
 Extraction Plan you approve. `/okfy:extract`
 runs blind parallel extraction, consolidates drafts into final concepts,
 validates against the OKF spec with strict source checking, and packages the

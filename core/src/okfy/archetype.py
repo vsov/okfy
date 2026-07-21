@@ -17,6 +17,9 @@ class Archetype:
     purpose_checks: list[dict]
     link_rules: list[dict]
     nonempty_sections: dict[str, list[str]]
+    # {type: {field: [allowed values]}} — closed vocabularies the validator
+    # enforces (E_FIELD_ENUM); free text in an enum field is machine-invisible
+    field_enums: dict[str, dict[str, list[str]]]
     consumption_protocol: str
     root: Path
 
@@ -40,6 +43,7 @@ def load_archetype(name: str) -> Archetype:
         purpose_checks=d.get("purpose_checks", []),
         link_rules=d.get("link_rules", []),
         nonempty_sections=d.get("nonempty_sections", {}),
+        field_enums=d.get("field_enums", {}),
         consumption_protocol=d.get("consumption_protocol", ""),
         root=root,
     )

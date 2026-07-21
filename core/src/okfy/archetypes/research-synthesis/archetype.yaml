@@ -1,0 +1,79 @@
+name: research-synthesis
+version: 1
+description: >
+  Bundles that hold the STATE OF KNOWLEDGE on a research question — what is
+  established, what is contested, by whom, and what remains open. Extracted
+  from paper collections, research notes, experiment logs. The mirror of
+  decision-support: that archetype serves the moment of choosing; this one
+  serves knowing how firm the ground is before you choose. Its cardinal sin
+  is smoothing: presenting a contested result as settled.
+canonical_types: [Finding, Method, Synthesis, OpenQuestion, SourceNote]
+required_fields:
+  _all: [type, title, description]
+  Finding: [sources, confidence, tags]
+  Method: [sources]
+  Synthesis: [tags]
+  OpenQuestion: [tags]
+  SourceNote: [sources]
+field_enums:
+  Finding:
+    confidence: [established, supported, contested, speculative]
+required_sections:
+  Finding: [Statement, Evidence, Counter-evidence, Boundary conditions]
+  Method: [Procedure, Assumptions, Known failure modes]
+  Synthesis: [State of knowledge, Contested, Open]
+  OpenQuestion: [Question, Why it matters, What would answer it]
+  SourceNote: [Key results, Relevance, Caveats]
+layout:
+  Finding: findings/
+  Method: methods/
+  Synthesis: syntheses/
+  OpenQuestion: questions/
+  SourceNote: sources/
+purpose_checks:
+  - id: claim-has-evidence
+    prompt: >
+      Read this Finding. Does Evidence cite specific sources (paper, section,
+      table, experiment) for the exact statement made — not the general topic?
+      Does the confidence field match the evidence shown: `established` with a
+      single source, or `contested` with no counter-evidence listed, is a
+      failure. A Finding whose evidence the reader must trust rather than
+      trace is a failure.
+  - id: contested-is-honest
+    prompt: >
+      For Finding concepts: if the literature disagrees on this claim, does
+      Counter-evidence name the disagreeing work and what it found — not
+      soften it into "some caveats apply"? An empty Counter-evidence section
+      on a claim the corpus itself disputes is a failure. Check the sources:
+      does any cited work actually push the other way?
+  - id: synthesis-grounded
+    prompt: >
+      For Synthesis concepts: is every substantive claim in State of knowledge
+      and Contested backed by a link to a Finding concept (findings/), so the
+      reader can descend from the summary to the evidence? A synthesis
+      sentence with no Finding behind it is the author's opinion smuggled in
+      as knowledge — a failure.
+  - id: question-actionable
+    prompt: >
+      For OpenQuestion concepts: does "What would answer it" describe a
+      concrete test, dataset, or analysis — something a researcher could
+      actually run — rather than "more research is needed"? Vague open
+      questions are decoration, not knowledge.
+  - id: boundary-stated
+    prompt: >
+      For Finding concepts: do Boundary conditions state WHERE the claim
+      holds — asset class, period, regime, sample — concretely enough that a
+      reader can tell whether it applies to their case? "Generally true" is
+      a failure; every empirical claim has a domain.
+consumption_protocol: protocols/agents.tmpl
+link_rules:
+  - from: Synthesis
+    to_dirs: [findings/]
+    min: 2
+  - from: Finding
+    section: Evidence
+    to_dirs: [sources/, methods/]
+    min: 1
+nonempty_sections:
+  Finding: [Statement, Evidence]
+  Synthesis: [State of knowledge]
