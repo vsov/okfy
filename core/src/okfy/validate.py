@@ -111,6 +111,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
         except frontmatter.FrontmatterError:
             continue  # layer 1's problem
     _check_meta(bundle, r)
+    _check_corpus_snapshot(bundle, r, strict=strict_sources)
     _check_collisions(concepts, r)
     _check_stale(concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
@@ -151,6 +152,39 @@ def _check_meta(bundle: Bundle, r: Report):
             v = c.meta.get(f)
             if v in (None, "", []):
                 r.add("error", "E_META_FIELD", c.id, f"meta field missing/empty: {f}")
+
+
+def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
+    """The snapshot's git_sha is the temporal identity of the evidence (a
+    frozen regulatory corpus lives or dies by it). When the corpus tree is
+    locally present and is a git repo, the pinned SHA must be a real commit
+    of that repo — a mutated or unreachable pin is reported, never silently
+    trusted (audit round 8 regulatory mutation M1)."""
+    import subprocess
+    try:
+        snap = bundle.get("meta/corpus")
+    except frontmatter.FrontmatterError:
+        return
+    if snap is None:
+        return
+    sha = str(snap.meta.get("git_sha") or "").strip()
+    corpus = Path(str(snap.meta.get("corpus") or ""))
+    if not sha or not corpus.is_dir() or not (corpus / ".git").exists():
+        return
+    level, code = (("error", "E_CORPUS_SHA") if strict
+                   else ("warning", "W_CORPUS_SHA"))
+    if not re.fullmatch(r"[0-9a-f]{40}", sha):
+        r.add(level, code, "meta/corpus.md",
+              f"corpus snapshot git_sha is malformed: {sha!r}")
+        return
+    probe = subprocess.run(
+        ["git", "-C", str(corpus), "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True, text=True)
+    if probe.returncode != 0:
+        r.add(level, code, "meta/corpus.md",
+              f"corpus snapshot git_sha {sha[:12]}... is not a commit of "
+              f"{corpus} — the snapshot no longer identifies real corpus "
+              "state (rewritten history, corrupted pin, or wrong corpus)")
 
 
 def _check_stale(concepts, r: Report):

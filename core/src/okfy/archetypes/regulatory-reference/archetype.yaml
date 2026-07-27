@@ -1,0 +1,94 @@
+name: regulatory-reference
+version: 1
+description: >
+  Bundles that let an agent answer "what does the law require HERE and NOW"
+  from a frozen slice of primary sources — statutes, regulations, joint
+  rules, official interpretations. Its load-bearing properties are the ones
+  prose summaries lose: the authority hierarchy (a guidance letter never
+  outranks a statute), temporal validity (effective dates, amendments,
+  superseded text), jurisdictional scope (who regulates what, with a
+  testable boundary), and honest refusal outside the slice. Its cardinal
+  sins are citing superseded text as current and flattening the authority
+  chain.
+canonical_types: [Provision, Definition, JurisdictionBoundary,
+                  ComplianceProcedure, InterpretationNote]
+required_fields:
+  _all: [type, title, description]
+  Provision: [sources, authority, jurisdiction, status, tags]
+  Definition: [sources, authority]
+  JurisdictionBoundary: [sources, jurisdiction, tags]
+  ComplianceProcedure: [sources, jurisdiction]
+  InterpretationNote: [sources, authority]
+field_enums:
+  Provision:
+    authority: [statute, regulation, joint-rule, interpretation]
+    jurisdiction: [SEC, CFTC, joint]
+    status: [active, superseded]
+  Definition:
+    authority: [statute, regulation, joint-rule, interpretation]
+  JurisdictionBoundary:
+    jurisdiction: [SEC, CFTC, joint]
+  ComplianceProcedure:
+    jurisdiction: [SEC, CFTC, joint]
+  InterpretationNote:
+    authority: [interpretation]
+required_sections:
+  Provision: [Rule text, Applies to, Effective dates and amendments,
+              Authority chain]
+  Definition: [Definition, Source of authority, Used by]
+  JurisdictionBoundary: [Boundary, Test, Consequences]
+  ComplianceProcedure: [Requirement, Steps, Deadlines and records]
+  InterpretationNote: [Position, Interprets, Limits]
+layout:
+  Provision: provisions/
+  Definition: definitions/
+  JurisdictionBoundary: boundaries/
+  ComplianceProcedure: procedures/
+  InterpretationNote: interpretations/
+purpose_checks:
+  - id: authority-chain-cited
+    prompt: >
+      Read this Provision. Does Authority chain name the specific enacting
+      authority (statute section, CFR part, FR release) with a source
+      citation the reader can trace — not "the SEC requires"? A provision
+      whose legal basis must be trusted rather than followed is a failure.
+  - id: temporal-honest
+    prompt: >
+      Does "Effective dates and amendments" state concrete dates taken from
+      the sources — original effectiveness and any later amendment the
+      corpus shows? A provision whose current text differs from an earlier
+      rulemaking in the corpus MUST name that amendment. Undated "currently
+      in effect" hand-waving is a failure.
+  - id: precedence-explicit
+    prompt: >
+      Where an interpretation and a statute/regulation both speak to this
+      concept, does the text state which controls? For InterpretationNote:
+      does Limits say explicitly that guidance cannot override the statute
+      or CFR text it interprets? Silent coexistence of conflicting
+      authorities is a failure.
+  - id: boundary-testable
+    prompt: >
+      For JurisdictionBoundary concepts: is Test concrete enough to apply
+      to a case — named criteria, numbers, statutory references — so a
+      reader can classify a product/actor without further research?
+      "Depends on the circumstances" is a failure.
+  - id: superseded-never-active
+    prompt: >
+      Does the status field match the sources? If the corpus contains a
+      later amendment that replaced this text, status must be `superseded`
+      and the body must point at the successor; an `active` claim must be
+      consistent with the newest source in the corpus. Superseded text
+      presented as current is this archetype's cardinal sin.
+consumption_protocol: protocols/agents.tmpl
+link_rules:
+  - from: InterpretationNote
+    section: Interprets
+    to_dirs: [provisions/, definitions/]
+    min: 1
+  - from: JurisdictionBoundary
+    to_dirs: [definitions/, provisions/]
+    min: 1
+nonempty_sections:
+  Provision: [Rule text, Effective dates and amendments, Authority chain]
+  JurisdictionBoundary: [Test]
+  InterpretationNote: [Limits]

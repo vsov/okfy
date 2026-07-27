@@ -36,8 +36,12 @@ Interview the user, one question at a time, in their language:
   codebase-map: Operations, Types, Recipes, Contracts, Topics), or
   **research-synthesis** (the state of knowledge on a research question:
   atomic Findings with a confidence enum, Methods, Syntheses, OpenQuestions,
-  SourceNotes — its cardinal sin is presenting contested as settled). If none
-  fits, say so and stop — don't force it.
+  SourceNotes — its cardinal sin is presenting contested as settled), or
+  **regulatory-reference** (a frozen slice of primary legal sources:
+  Provisions with authority/jurisdiction/status enums, Definitions,
+  JurisdictionBoundaries, ComplianceProcedures, InterpretationNotes — its
+  cardinal sins are citing superseded text as current and flattening the
+  authority chain). If none fits, say so and stop — don't force it.
 - For a git CODE corpus, offer `--embed`: the bundle lives at `.okf/` inside
   the corpus repo, rides its PRs, write_policy defaults to `direct`
   (`okfy init --corpus <corpus> --embed`). Warn the user this writes into

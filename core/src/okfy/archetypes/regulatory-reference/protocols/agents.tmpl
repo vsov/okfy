@@ -1,0 +1,59 @@
+# Agent instructions for this knowledge bundle
+
+This is an OKF Knowledge Bundle holding a FROZEN SLICE of primary
+regulatory sources. Purpose: $purpose_title. Canonical language: $language.
+Write policy: $write_policy.
+
+NOT LEGAL ADVICE: this bundle reproduces and organizes primary sources as
+of the corpus snapshot; it does not replace counsel.
+
+## Consumption protocol (no tooling required)
+
+1. Read `meta/purpose.md` first — which regime, which slice, what is
+   deliberately out of scope.
+2. Start at `index.md`; never bulk-read concept files.
+3. AUTHORITY ORDER IS LAW: statute > regulation / joint-rule >
+   interpretation. When texts at different levels bear on one question,
+   cite the higher level as controlling and the lower as explanation. An
+   InterpretationNote can never override the Provision it interprets — its
+   Limits section says so; repeat that when you use it.
+4. CARRY THE DATES: every Provision states effective dates and amendments.
+   Quote the requirement WITH its as-of context. If the corpus shows an
+   older rulemaking superseded by current CFR text, the current text
+   governs — say so and cite both.
+5. SUPERSEDED IS NEVER CURRENT: a `status: superseded` Provision may be
+   cited only as history, with its successor named. Presenting superseded
+   text as the live rule is this bundle's cardinal sin.
+6. JURISDICTION HONESTY: check the JurisdictionBoundary concepts before
+   attributing authority. If a product falls outside this slice's regime
+   (e.g. under another regulator's exclusive jurisdiction), say which
+   regulator and stop — do not extrapolate rules across the boundary.
+7. Definitions are load-bearing: statutory terms mean what the Definition
+   concept says, not what everyday usage suggests. Link the definition
+   when your answer turns on it.
+8. Coverage honesty: check `meta/lexicon.md` for terms flagged NOT
+   COVERED; topics excluded from the slice (see purpose.md) get an
+   explicit "not covered by this bundle", never a near-miss answer.
+9. Cite concept ids (e.g. `provisions/customer-margin-minimum`) AND the
+   underlying citation (statute/CFR/FR) in your answers.
+10. The law may have moved since the snapshot (see `meta/corpus.md` and
+    MANIFEST.md dates). For anything time-sensitive, say the as-of date;
+    with the okfy CLI present, `okfy diff <bundle>` lists concepts whose
+    sources changed.
+
+## Editing rules
+
+- write_policy=$write_policy. Under `proposals`: found a missed amendment,
+  a wrong date, a boundary error? File it — `okfy propose <bundle>
+  --target <concept-id> --action update --note "<why>" --from <file>` —
+  the owner reviews. Direct edits to final concepts are refused by the
+  pre-commit gate.
+- Status changes (`active` -> `superseded`) are the owner's call: propose
+  the evidence (the amending release), never rewrite status yourself.
+
+## Accelerated mode (okfy CLI present)
+
+- `okfy query <bundle> "<question>"` — lexicon expansion is on; trust its
+  notes (`ambiguous` -> ask, `not covered` -> say so).
+- `okfy show <bundle> <concept-id>` / `okfy links <bundle> <id>` for
+  precise reads; stale-marked hits mean "verify against current law".
