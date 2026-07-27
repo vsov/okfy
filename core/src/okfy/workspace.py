@@ -118,14 +118,21 @@ def _changed_concepts(member: Member) -> tuple[str, list[str]]:
         st = subprocess.run(["git", "-C", str(member.path), "rev-parse", "HEAD"],
                             capture_output=True, text=True)
         return ("git-error" if st.returncode != 0 else "unreachable-pin", [])
+    # pin vs WORKING TREE (no HEAD arg): federation reads the live member
+    # path, so staged and unstaged edits count as change (audit round 8:
+    # pin..HEAD missed a dirty working tree)
     r = subprocess.run(
         ["git", "-C", str(member.path), "diff", "--name-only",
-         member.git_sha, "HEAD", "--", "*.md"],
+         member.git_sha, "--", "*.md"],
         capture_output=True, text=True)
-    if r.returncode != 0:
+    u = subprocess.run(
+        ["git", "-C", str(member.path), "ls-files", "--others",
+         "--exclude-standard", "--", "*.md"],
+        capture_output=True, text=True)
+    if r.returncode != 0 or u.returncode != 0:
         return ("git-error", [])
-    return ("ok", sorted(p[:-3] for p in r.stdout.splitlines()
-                         if p.endswith(".md")))
+    files = set(r.stdout.splitlines()) | set(u.stdout.splitlines())
+    return ("ok", sorted(p[:-3] for p in files if p.endswith(".md")))
 
 
 def workspace_status(ws: "Workspace") -> dict:
