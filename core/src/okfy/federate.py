@@ -26,15 +26,17 @@ def _name_tokens(entry: dict) -> set[str]:
     return toks
 
 
-def active_rows(ws: Workspace) -> tuple[list, int]:
+def active_rows(ws: Workspace) -> tuple[list, int, list[str]]:
     """Accepted crosswalk rows minus stale ones (a row citing a concept that
-    changed since its member SHA was pinned). Stale rows are DETECTED by
-    workspace_status; here they stop influencing answers too — an equivalence
-    or constraint reviewed against a concept that has since changed is a
-    hypothesis again, not a fact (audit round 7, finding 3)."""
+    changed since its member SHA was pinned — or touching a member whose
+    baseline cannot be verified at all: no pin, unreachable pin, broken git.
+    An unverifiable baseline is stale-by-definition, never fresh-by-default;
+    audit round 8). Stale rows are DETECTED by workspace_status; here they
+    stop influencing answers too — an equivalence or constraint reviewed
+    against a concept that has since changed is a hypothesis again."""
     from okfy.workspace import workspace_status
-    stale = {(s["src"], s["rel"], s["dst"])
-             for s in workspace_status(ws)["stale_rows"]}
+    st = workspace_status(ws)
+    stale = {(s["src"], s["rel"], s["dst"]) for s in st["stale_rows"]}
     rows, n_stale = [], 0
     for r in load_rows(ws):
         if r.status != "accepted":
@@ -43,7 +45,7 @@ def active_rows(ws: Workspace) -> tuple[list, int]:
             n_stale += 1
             continue
         rows.append(r)
-    return rows, n_stale
+    return rows, n_stale, st.get("unverifiable_members", [])
 
 
 def expansion_terms(ws: Workspace, member_name: str, text: str,
@@ -53,7 +55,7 @@ def expansion_terms(ws: Workspace, member_name: str, text: str,
     lexically touches the FAR side's title/aliases, contribute the NEAR side's
     title+alias tokens."""
     if rows is None:
-        rows, _ = active_rows(ws)
+        rows, _, _ = active_rows(ws)
     qtok = set(tokenize(text))
     indexes = {m.name: load_index(Bundle(m.path)) for m in ws.members}
     extra: list[str] = []
@@ -126,9 +128,15 @@ def federated_query(ws: Workspace, text: str, n: int = 10,
     from okfy.query import filter_pool, search_pool
     ws_rows = lexicon.load_rows(Bundle(ws.root))   # workspace meta/lexicon.md
     role_of = {m.name: m.role for m in ws.members}
-    rows, n_stale = active_rows(ws)
+    rows, n_stale, unverifiable = active_rows(ws)
     ranked: dict[str, dict] = {}
     notes: list[str] = []
+    if unverifiable:
+        notes.append(
+            f"workspace: member baseline unverifiable for "
+            f"{', '.join(unverifiable)} (no pin / unreachable pin / broken "
+            "git) — ALL crosswalk rows touching them are excluded until "
+            "re-pinned (okfy workspace status)")
     if n_stale:
         notes.append(f"workspace: {n_stale} stale crosswalk row(s) excluded "
                      "from expansion/merge/constrains — re-review and re-pin "
@@ -161,12 +169,17 @@ def federated_query(ws: Workspace, text: str, n: int = 10,
     for e in out["knowledge"] + out["constraints"]:
         e["score"] = round(e["score"], 5)
     pulled: dict[str, dict] = {}
-    # a merged canonical answers FOR its absorbed duplicates — constraints
-    # bound to an absorbed ref must still fire (audit round 7, finding 2)
+    # a top result answers FOR its whole accepted same-as class, not only
+    # for the duplicates that happened to be retrieved: a constraint bound
+    # to ANY class member fires regardless of that member's retrieval rank
+    # (audit round 8 — `duplicates` alone missed equivalents outside top-N)
+    root = _same_as_root(rows)
+    by_root: dict[str, set[str]] = {}
+    for ref, rt in root.items():
+        by_root.setdefault(rt, set()).add(ref)
     top_refs = set()
     for e in out["knowledge"][:pull_top]:
-        top_refs.add(e["ref"])
-        top_refs.update(e.get("duplicates", []))
+        top_refs |= by_root.get(root.get(e["ref"], e["ref"]), {e["ref"]})
     indexes = {m.name: load_index(Bundle(m.path)) for m in ws.members}
     for r in rows:
         if r.rel != "constrains":

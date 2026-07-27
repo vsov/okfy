@@ -1,6 +1,7 @@
 """Workspace: federation glue over untouched member Bundles (ADR-0010).
 Holds no knowledge — only the manifest, roles, crosswalks, and test queries."""
 import datetime
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,36 +98,63 @@ def init_workspace(path: Path, members: list[tuple[str, Path, str]],
     return path.resolve()
 
 
-def _changed_concepts(member: Member) -> list[str]:
-    """Concept ids whose files changed in the member repo since the pinned SHA."""
+def _changed_concepts(member: Member) -> tuple[str, list[str]]:
+    """(baseline, changed-concept-ids) since the pinned SHA. baseline is one
+    of: 'ok' (diff computed against a verified pin), 'no-pin' (member was
+    registered without a SHA), 'unreachable-pin' (pin malformed or absent
+    from history — rewritten, shallow, corrupted), 'git-error' (member is
+    not a usable git repo). Anything but 'ok' means freshness CANNOT be
+    proven — the caller must fail closed, not assume fresh (audit round 8:
+    a git failure used to read as 'nothing changed')."""
     if not member.git_sha:
-        return []
+        return ("no-pin", [])
+    if not re.fullmatch(r"[0-9a-f]{40}", str(member.git_sha)):
+        return ("unreachable-pin", [])
+    probe = subprocess.run(
+        ["git", "-C", str(member.path), "cat-file", "-e",
+         f"{member.git_sha}^{{commit}}"],
+        capture_output=True, text=True)
+    if probe.returncode != 0:
+        st = subprocess.run(["git", "-C", str(member.path), "rev-parse", "HEAD"],
+                            capture_output=True, text=True)
+        return ("git-error" if st.returncode != 0 else "unreachable-pin", [])
     r = subprocess.run(
         ["git", "-C", str(member.path), "diff", "--name-only",
          member.git_sha, "HEAD", "--", "*.md"],
         capture_output=True, text=True)
     if r.returncode != 0:
-        return []
-    return sorted(p[:-3] for p in r.stdout.splitlines() if p.endswith(".md"))
+        return ("git-error", [])
+    return ("ok", sorted(p[:-3] for p in r.stdout.splitlines()
+                         if p.endswith(".md")))
 
 
 def workspace_status(ws: "Workspace") -> dict:
     from okfy.crosswalk import load_rows, parse_ref
     members_out = []
     changed_by_member: dict[str, set[str]] = {}
+    unverifiable: set[str] = set()
     for m in ws.members:
         head = _bundle_sha(m.path)
-        changed = set(_changed_concepts(m))
+        baseline, changed_list = _changed_concepts(m)
+        changed = set(changed_list)
         changed_by_member[m.name] = changed
+        if baseline != "ok":
+            unverifiable.add(m.name)
         members_out.append({"name": m.name, "role": m.role,
                             "pinned": m.git_sha, "head": head,
-                            "fresh": head == m.git_sha and not changed,
+                            "baseline": baseline,
+                            "fresh": (baseline == "ok" and head == m.git_sha
+                                      and not changed),
                             "changed_concepts": sorted(changed)})
     stale = []
     for r in load_rows(ws):
         for ref in (r.src, r.dst):
             mname, cid = parse_ref(ref)
-            if cid in changed_by_member.get(mname, set()):
+            # a row touching a member whose baseline cannot be verified is
+            # stale by definition: there is no proof the reviewed concept
+            # still exists as reviewed
+            if mname in unverifiable or cid in changed_by_member.get(mname, set()):
                 stale.append(r.__dict__)
                 break
-    return {"members": members_out, "stale_rows": stale}
+    return {"members": members_out, "stale_rows": stale,
+            "unverifiable_members": sorted(unverifiable)}
