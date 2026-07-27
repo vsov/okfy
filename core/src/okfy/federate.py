@@ -26,16 +26,39 @@ def _name_tokens(entry: dict) -> set[str]:
     return toks
 
 
-def expansion_terms(ws: Workspace, member_name: str, text: str) -> list[str]:
+def active_rows(ws: Workspace) -> tuple[list, int]:
+    """Accepted crosswalk rows minus stale ones (a row citing a concept that
+    changed since its member SHA was pinned). Stale rows are DETECTED by
+    workspace_status; here they stop influencing answers too — an equivalence
+    or constraint reviewed against a concept that has since changed is a
+    hypothesis again, not a fact (audit round 7, finding 3)."""
+    from okfy.workspace import workspace_status
+    stale = {(s["src"], s["rel"], s["dst"])
+             for s in workspace_status(ws)["stale_rows"]}
+    rows, n_stale = [], 0
+    for r in load_rows(ws):
+        if r.status != "accepted":
+            continue
+        if (r.src, r.rel, r.dst) in stale:
+            n_stale += 1
+            continue
+        rows.append(r)
+    return rows, n_stale
+
+
+def expansion_terms(ws: Workspace, member_name: str, text: str,
+                    rows: list | None = None) -> list[str]:
     """Terms to ADD when querying member_name: for each accepted same-as row
     with one side in another member and one side in member_name, if the query
     lexically touches the FAR side's title/aliases, contribute the NEAR side's
     title+alias tokens."""
+    if rows is None:
+        rows, _ = active_rows(ws)
     qtok = set(tokenize(text))
     indexes = {m.name: load_index(Bundle(m.path)) for m in ws.members}
     extra: list[str] = []
-    for r in load_rows(ws):
-        if r.rel != "same-as" or r.status != "accepted":
+    for r in rows:
+        if r.rel != "same-as":
             continue
         (m1, c1), (m2, c2) = parse_ref(r.src), parse_ref(r.dst)
         if member_name == m1:
@@ -53,9 +76,9 @@ def expansion_terms(ws: Workspace, member_name: str, text: str) -> list[str]:
     return sorted(set(extra))
 
 
-def _same_as_root(ws: Workspace) -> dict[str, str]:
-    """Union-find over accepted same-as rows: ref -> class root. Only
-    accepted rows merge — a proposed equivalence is a hypothesis, not
+def _same_as_root(rows: list) -> dict[str, str]:
+    """Union-find over accepted non-stale same-as rows: ref -> class root.
+    Only accepted rows merge — a proposed equivalence is a hypothesis, not
     an identity."""
     parent: dict[str, str] = {}
 
@@ -66,22 +89,22 @@ def _same_as_root(ws: Workspace) -> dict[str, str]:
             x = parent[x]
         return x
 
-    for r in load_rows(ws):
-        if r.rel == "same-as" and r.status == "accepted":
+    for r in rows:
+        if r.rel == "same-as":
             ra, rb = find(r.src), find(r.dst)
             if ra != rb:
                 parent[max(ra, rb)] = min(ra, rb)
     return {x: find(x) for x in list(parent)}
 
 
-def _merge_same_as(ranked: dict[str, dict], ws: Workspace) -> list[dict]:
+def _merge_same_as(ranked: dict[str, dict], rows: list) -> list[dict]:
     """Merge-proper dedup: entries of one same-as class within one ROLE
     collapse into a single result — scores add (both members' evidence
     counts once, not as two rank-eating rows), the stronger entry is
     canonical, the rest land in `duplicates`. Cross-role pairs stay
     separate: a constraint mirror of a knowledge concept must remain
     visible in the constraints group."""
-    root = _same_as_root(ws)
+    root = _same_as_root(rows)
     groups: dict[tuple, list[dict]] = {}
     for e in ranked.values():
         groups.setdefault((root.get(e["ref"], e["ref"]), e["role"]),
@@ -103,13 +126,18 @@ def federated_query(ws: Workspace, text: str, n: int = 10,
     from okfy.query import filter_pool, search_pool
     ws_rows = lexicon.load_rows(Bundle(ws.root))   # workspace meta/lexicon.md
     role_of = {m.name: m.role for m in ws.members}
+    rows, n_stale = active_rows(ws)
     ranked: dict[str, dict] = {}
     notes: list[str] = []
+    if n_stale:
+        notes.append(f"workspace: {n_stale} stale crosswalk row(s) excluded "
+                     "from expansion/merge/constrains — re-review and re-pin "
+                     "(okfy workspace status, /okfy:relink)")
     expanded: dict[str, str] = {}
     for m in ws.members:
         b = Bundle(m.path)
         eff = lexicon.expand(lexicon.load_rows(b) + ws_rows, text)
-        extra = expansion_terms(ws, m.name, text)
+        extra = expansion_terms(ws, m.name, text, rows=rows)
         qtext = eff["expanded_query"] + (" " + " ".join(extra) if extra else "")
         expanded[m.name] = qtext
         notes += [f"{m.name}: {note}" for note in eff["notes"]]
@@ -125,7 +153,7 @@ def federated_query(ws: Workspace, text: str, n: int = 10,
                 e["stale"] = True
                 e["stale_reason"] = h.get("stale_reason", "")
             e["score"] += 1.0 / (RRF_K + rank + 1)
-    ordered = sorted(_merge_same_as(ranked, ws),
+    ordered = sorted(_merge_same_as(ranked, rows),
                      key=lambda e: (-e["score"], e["ref"]))
     out = {"knowledge": [e for e in ordered if e["role"] == "knowledge"][:n],
            "constraints": [e for e in ordered if e["role"] == "constraints"][:n],
@@ -133,10 +161,15 @@ def federated_query(ws: Workspace, text: str, n: int = 10,
     for e in out["knowledge"] + out["constraints"]:
         e["score"] = round(e["score"], 5)
     pulled: dict[str, dict] = {}
-    top_refs = {e["ref"] for e in out["knowledge"][:pull_top]}
+    # a merged canonical answers FOR its absorbed duplicates — constraints
+    # bound to an absorbed ref must still fire (audit round 7, finding 2)
+    top_refs = set()
+    for e in out["knowledge"][:pull_top]:
+        top_refs.add(e["ref"])
+        top_refs.update(e.get("duplicates", []))
     indexes = {m.name: load_index(Bundle(m.path)) for m in ws.members}
-    for r in load_rows(ws):
-        if r.rel != "constrains" or r.status != "accepted":
+    for r in rows:
+        if r.rel != "constrains":
             continue
         if r.dst in top_refs:
             cm, cc = parse_ref(r.src)

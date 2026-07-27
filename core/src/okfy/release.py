@@ -46,6 +46,34 @@ def retrieval_fingerprint(bundle: Bundle) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _check_validation(bundle: Bundle, problems: list):
+    """Compose the FULL strict validation into the release predicate. The
+    audit's bypass was exact: release-check checked completeness, validate
+    checked consistency, and nothing required both — delete package.json and
+    release-check stayed green (audit round 7, finding 1)."""
+    from okfy.archetype import load_archetype
+    from okfy.validate import validate_conformance, validate_integrity
+    r = validate_conformance(bundle)
+    plan = bundle.plan()
+    arch = None
+    name = (plan.meta.get("archetype") if plan else None)
+    if name:
+        try:
+            arch = load_archetype(str(name))
+        except FileNotFoundError:
+            problems.append(f"E_REL_VALIDATE: unknown archetype {name!r}")
+    r2 = validate_integrity(bundle, arch, strict_sources=True,
+                            strict_quality=True, strict_provenance=True,
+                            strict_package=True)
+    errors = r.errors + r2.errors
+    if errors:
+        codes = sorted({f.code for f in errors})
+        problems.append(
+            f"E_REL_VALIDATE: {len(errors)} strict validation error(s) "
+            f"({', '.join(codes[:6])}{', ...' if len(codes) > 6 else ''}) — "
+            "run okfy validate with all strict flags for detail")
+
+
 def _check_provenance_complete(bundle: Bundle, problems: list, notes: list):
     from okfy.job import job_digest
     from okfy.ledger import read_rows
@@ -56,6 +84,20 @@ def _check_provenance_complete(bundle: Bundle, problems: list, notes: list):
     plan = bundle.plan()
     segs = [s for s in (plan.meta.get("segments") if plan else []) or []
             if isinstance(s, dict)]
+    # fail-closed on the plan itself: an empty segment list or a segment
+    # parked outside `done` is missing evidence, not absent obligation —
+    # flipping done→pending must not turn the gate green
+    if not segs:
+        problems.append("E_REL_SEGMENTS: extraction plan has no segments — "
+                        "nothing proves what was extracted; declare "
+                        "provenance: legacy explicitly if this bundle "
+                        "predates the job chain")
+        return
+    not_done = [str(s.get("id")) for s in segs if s.get("status") != "done"]
+    if not_done:
+        problems.append(f"E_REL_SEGMENTS: segment(s) not done: "
+                        f"{', '.join(not_done)} — an unfinished extraction "
+                        "cannot be released")
     done = [str(s["id"]) for s in segs if s.get("status") == "done"]
     rows = read_rows(bundle)
     by_seg = {}
@@ -128,6 +170,7 @@ def release_check(bundle: Bundle) -> dict:
     evidence is a failure, not a skip."""
     problems: list[str] = []
     notes: list[str] = []
+    _check_validation(bundle, problems)
     _check_provenance_complete(bundle, problems, notes)
     _check_eval(bundle, problems, notes)
     _check_l3(bundle, problems, notes)

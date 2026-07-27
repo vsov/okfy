@@ -123,11 +123,22 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_package(bundle, r, strict=strict_package)
     for c in concepts:
         if not c.id.startswith("meta/"):
-            if not c.meta.get("sources"):
+            if not c.meta.get("sources") and _sources_expected(c, archetype):
                 r.add("warning", "W_NO_SOURCES", c.id, "extracted concept without sources")
             if archetype:
                 _check_archetype(c, archetype, r)
     return r
+
+
+def _sources_expected(c, archetype) -> bool:
+    """With an archetype loaded, a missing `sources` only warns for types
+    whose schema requires it — a Synthesis or GlossaryTerm without sources
+    is by design, and an expected warning is noise (audit round 7)."""
+    if archetype is None:
+        return True
+    required = set(archetype.required_fields.get("_all", []))
+    required |= set(archetype.required_fields.get(str(c.meta.get("type")), []))
+    return "sources" in required
 
 
 def _check_meta(bundle: Bundle, r: Report):
