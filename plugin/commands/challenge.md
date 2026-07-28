@@ -1,6 +1,6 @@
 ---
 description: "Adversarial candidate queries against a bundle — read-only, no authority, owner promotes"
-argument-hint: "<bundle-path> [--phase eval|consolidation]"
+argument-hint: "<bundle-path>"
 ---
 You are running OKFy's adversarial challenge pass against the bundle at $1.
 
