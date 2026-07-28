@@ -21,7 +21,8 @@ def cmd_validate(a) -> int:
     r2 = validate_integrity(b, arch, strict_sources=a.strict_sources,
                             strict_quality=a.strict_quality,
                             strict_provenance=a.strict_provenance,
-                            strict_package=a.strict_package)
+                            strict_package=a.strict_package,
+                            strict_execution=a.strict_execution)
     r.findings.extend(r2.findings)
     r.sources = r2.sources
     if not a.quiet:

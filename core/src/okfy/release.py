@@ -165,6 +165,59 @@ def _check_l3(bundle: Bundle, problems: list, notes: list):
             "fix the concepts or state the exception explicitly")
 
 
+def _check_dissent(bundle: Bundle, problems: list, notes: list):
+    """Completeness half of the shadow consolidation audit: every multi-draft
+    merge group must carry an adjudication row, and a waiver must still match the
+    concept it waived.
+
+    OPT-IN. This runs only when meta/purpose.md declares `acceptance.dissent:
+    required`. A bundle accepted before v0.10 has no dissent ledger, and failing
+    it for missing an artifact that did not exist at acceptance time would be
+    retroactive — the same reasoning behind `provenance: legacy`. The check tests
+    that adjudication HAPPENED, never that it was rigorous: a lazy adjudicator
+    satisfies it. That limit is real and is stated in the notes."""
+    from okfy.dissent import group_state
+    from okfy.merge_audit import merge_groups
+    acceptance = bundle.purpose().get("acceptance") or {}
+    if str(acceptance.get("dissent") or "") != "required":
+        return
+    state, groups = merge_groups(bundle)
+    if state != "ok":
+        notes.append("dissent: no merge_map in the ledger — nothing to adjudicate "
+                     "(this is not proof that nothing was merged)")
+        return
+    unadjudicated, open_, stale = [], [], []
+    for g in groups:
+        st = group_state(bundle, g["final"])
+        if st == "unadjudicated":
+            unadjudicated.append(g["final"])
+        elif st == "open":
+            open_.append(g["final"])
+        elif st == "stale":
+            stale.append(g["final"])
+    if unadjudicated and not acceptance.get("allow_open_dissent"):
+        problems.append(
+            f"E_REL_DISSENT_UNADJUDICATED: {len(unadjudicated)} merge group(s) "
+            f"have no dissent row (e.g. {', '.join(unadjudicated[:3])}) — run the "
+            "schism pass or state acceptance.allow_open_dissent")
+    if open_ and not acceptance.get("allow_open_dissent"):
+        problems.append(
+            f"E_REL_DISSENT_OPEN: {len(open_)} merge group(s) hold an unresolved "
+            f"split (e.g. {', '.join(open_[:3])}) — `okfy dissent waive --owner` "
+            "or split the concept")
+    if stale:
+        problems.append(
+            f"E_REL_DISSENT_STALE: {len(stale)} waiver(s) no longer match the "
+            f"concept they waived (e.g. {', '.join(stale[:3])}) — the concept "
+            "changed after the owner accepted the merge; re-adjudicate")
+    if acceptance.get("allow_open_dissent"):
+        notes.append("dissent: acceptance.allow_open_dissent is set — "
+                     "unadjudicated and open groups are not blocking")
+    notes.append(f"dissent: {len(groups)} merge group(s) checked for adjudication "
+                 "completeness only — this does not attest that any adjudication "
+                 "was adversarial")
+
+
 def release_check(bundle: Bundle) -> dict:
     """The machine predicate for 'release accepted'. Fail-closed: missing
     evidence is a failure, not a skip."""
@@ -174,5 +227,6 @@ def release_check(bundle: Bundle) -> dict:
     _check_provenance_complete(bundle, problems, notes)
     _check_eval(bundle, problems, notes)
     _check_l3(bundle, problems, notes)
+    _check_dissent(bundle, problems, notes)
     return {"ok": not problems, "problems": problems, "notes": notes,
             "retrieval_fingerprint": retrieval_fingerprint(bundle)}

@@ -30,6 +30,20 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("cluster");  p.add_argument("bundle", type=Path)
 
+    p = sub.add_parser(
+        "merge-audit",
+        help="read-only shadow consolidation report: what the drafts held and "
+             "the merged concepts no longer do (not a gate, never fails a build)")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("--ref", default=None,
+                   help="git ref holding the drafts (default: auto-detect the "
+                        "commit before drafts/ was deleted); overrides live drafts")
+    p.add_argument("--group", default=None,
+                   help="restrict the report to one merged concept id")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--quiet", action="store_true",
+                   help="summary only, no per-group detail")
+
     p = sub.add_parser("validate"); p.add_argument("bundle", type=Path)
     p.add_argument("--all", action="store_true", help="include drafts and proposals")
     p.add_argument("--no-archetype", action="store_true")
@@ -44,6 +58,9 @@ def main(argv=None) -> int:
     p.add_argument("--strict-package", action="store_true",
                    help="every concept reachable from index.md; concepts "
                         "unchanged since okfy package")
+    p.add_argument("--strict-execution", action="store_true",
+                   help="every job artifact must attest model/provider/sampling/"
+                        "harness_version (new extractions; pre-v0.10 bundles warn)")
     p.add_argument("--quiet", action="store_true")
 
     p = sub.add_parser(
@@ -135,6 +152,31 @@ def main(argv=None) -> int:
     p.add_argument("segment_id")
     p.add_argument("--prompt-file", dest="prompt_file", type=Path, required=True,
                    help="the exact worker prompt text (its SHA-256 is recorded)")
+    p.add_argument("--execution-file", dest="execution_file", type=Path, default=None,
+                   help="JSON with model/provider/sampling/harness_version — the "
+                        "harness's attestation of WHO ran the job (the core cannot "
+                        "observe it; a lying harness passes)")
+
+    p = sub.add_parser("dissent", help="adjudication ledger for merge groups — "
+                       "records that a merge was contested and how it was resolved")
+    xsub = p.add_subparsers(dest="xcmd", required=True)
+    x = xsub.add_parser("add");   x.add_argument("bundle", type=Path)
+    x.add_argument("--run", required=True)
+    x.add_argument("--group", required=True, help="the merged concept id")
+    x.add_argument("--draft", action="append", required=True,
+                   help="draft id that held the claim (repeatable)")
+    x.add_argument("--claim", required=True)
+    x.add_argument("--anchor", required=True, help="path#L10-L20 in the source")
+    x.add_argument("--verdict", choices=["split", "no-schism"], required=True)
+    x.add_argument("--overruled-because", dest="overruled_because", default="",
+                   help="required when a split was merged anyway")
+    x = xsub.add_parser("list");  x.add_argument("bundle", type=Path)
+    x.add_argument("--group", default=None)
+    x = xsub.add_parser("waive"); x.add_argument("bundle", type=Path)
+    x.add_argument("--group", required=True)
+    x.add_argument("--reason", required=True)
+    x.add_argument("--owner", action="store_true", required=True,
+                   help="waiving is an owner act; the flag is the acknowledgement")
 
     p = sub.add_parser("ledger")
     dsub = p.add_subparsers(dest="dcmd", required=True)

@@ -315,6 +315,88 @@ The generated index got the same treatment. An agent without the CLI follows the
 
 An external audit proved a sharp point: `--strict-provenance` verifies the consistency of whatever evidence exists, but a bundle with *no* job artifacts at all sailed through the full strict gate — strict flags cannot demand evidence that was never produced. And an eval run outlived the state it judged: change a concept or the lexicon after the owner checkpoint, and `provisional: false` still read as "accepted". `okfy release-check` closes both gaps as one fail-closed predicate. It requires: (1) **provenance completeness** — every `done` worker segment has a frozen job artifact *and* a ledger row carrying its digest (bundles extracted before the job chain existed declare `provenance: legacy` in `meta/purpose.md` — reported in the output, never silently waved through); (2) **eval currency** — every eval run records a `retrieval_fingerprint` (non-meta concept set, test queries, lexicon file, tool version), and the latest run must be owner-complete with a fingerprint that still matches the live bundle — touch a concept, the lexicon, or the test queries and the run is stale evidence, so you re-run the eval and repeat the owner checkpoint; (3) **acceptance policy** — owner passes meet the bundle's own bar (`acceptance.min_owner_pass`, default 8) and L3 carries no `fail` verdicts unless `acceptance.allow_l3_fail: true` states the exception explicitly. A second audit sharpened it further: release-check now COMPOSES the full strict validation (any `E_*` from conformance, sources, quality, provenance or package freshness fails the release as `E_REL_VALIDATE`) and refuses a non-legacy bundle whose extraction plan is empty or carries segments not marked `done` (`E_REL_SEGMENTS`) — flipping `done` back to `pending` and deleting the evidence no longer turns the gate green. `provisional: false` means the owner finished looking; `release-check` exit 0 means the release is accepted.
 
+### What consolidation dropped: `okfy merge-audit`
+
+Every step of the pipeline leaves an artifact — except one. Segmentation writes a plan, extraction writes job artifacts and frozen prompts, the ledger records every transition, packaging fingerprints the concept set. **Consolidation records only the outcome.** `okfy cluster` groups drafts that describe the same thing, a merge judge picks what survives, and whatever the losing drafts held disappears with no trace beyond the `merge_map` saying that they merged. In `sec-cftc-sfp-okf` that is 367 drafts becoming 304 concepts across 33 multi-draft merge groups, with no record of what the 63 absorbed drafts contributed.
+
+`okfy merge-audit` reconstructs those groups from the ledger's `merge_map`, recovers the drafts (from the working tree while they are still there, or from git history after the consolidate commit deleted them), and reports **asymmetric loss** — things a draft carried that the merged concept does not.
+
+```bash
+okfy merge-audit <bundle> [--ref <git-ref>] [--group <final-id>] [--json] [--quiet]
+```
+
+In the standard pipeline it runs as the last step of consolidation, right after the ledger row carrying the `merge_map` is written — by then the drafts are gone from the working tree and the tool auto-detects the commit before they were deleted.
+
+It is a **report, not a gate**. It exits 0 whether or not it finds anything, it is not wired into `release-check`, and its findings are candidates for your attention rather than proven defects: a consolidator may drop a source deliberately because a sibling draft cited the same passage more precisely. Measuring first and gating later — if ever — is the whole point; a gate built before anyone knew what the numbers looked like would have been a gate on noise.
+
+Four finding kinds, all structural. Free-text body comparison is deliberately out of scope, because paraphrase-versus-real-loss is not machine-decidable and attempting it produces review fatigue instead of signal.
+
+| kind | fires when |
+|---|---|
+| `lost-source` | a source cited by some draft is absent from the merged concept's `sources` |
+| `enum-collapse` | drafts disagreed on an archetype-declared enum field (`authority`, `status`, `jurisdiction`…) and the merge kept one value silently |
+| `lost-link` | a draft linked to a concept that still exists in the bundle, and the merged concept no longer links to it |
+| `lost-date` | an ISO date, a plausible year, or a percentage rate in a draft's frontmatter is absent from the merged concept's frontmatter |
+
+Both `lost-link` and `lost-date` are deliberately narrow, and the narrowing was measured rather than guessed. An unrestricted numeric pattern produced 854 literal hits on a real regulatory bundle, 83% of them citation fragments inside `aliases` (`Rule 41.22`, `17 CFR 242.403`); and 78% of raw `lost-link` hits pointed at concept ids that do not exist in the bundle, because drafts routinely link to names consolidation later renamed. Both classes are excluded at the source, and what remains spot-checked at four confirmed findings and zero false positives.
+
+Five recovery states, and the distinction between them is the point:
+
+| state | meaning |
+|---|---|
+| `live` | drafts are still in the working tree, and a `merge_map` is already in the ledger — a re-run scenario, not the standard pipeline order |
+| `ok` | drafts recovered from git at the resolved ref |
+| `no-merge-map` | no ledger row carried a `merge_map`; the groups cannot be reconstructed |
+| `unreachable-ref` | the ref does not resolve to a commit |
+| `git-error` | the bundle is not a usable git repository |
+
+The last three never report "no findings". They populate an `unverifiable` list instead, and the human output prints `N group(s) NOT AUDITED` where a clean run prints `unverifiable: 0`. This is not decoration: an earlier defect elsewhere in the codebase had a failed `git diff` collapse into an empty list that read as "nothing changed", and a tool that cannot distinguish *nothing was lost* from *nothing was checked* is worse than no tool. Relatedly, passing `--ref` explicitly overrides live drafts — a caller who names a ref means that ref, and quietly auditing something else would be the same class of surprise.
+
+### Recording who ran the job: execution identity
+
+The job artifact freezes what a worker consumes — input paths with their spans and content hashes, the corpus snapshot SHA, the archetype, the exact prompt text's SHA-256. It said nothing about what *ran* it. The same job artifact executed by a different model, a different provider, or at a different temperature produces a different bundle, and nothing recorded which — so a frozen prompt never actually meant a reproducible run, and a replay across a model change was indistinguishable from a replay across a bundle change.
+
+The optional `execution` block closes that gap:
+
+```bash
+okfy job <bundle> <segment> --prompt-file <p> --execution-file <exec.json>
+```
+
+```json
+{
+  "model": "claude-opus-5",
+  "provider": "anthropic",
+  "sampling": {"temperature": 0},
+  "harness_version": "claude-code/2.1"
+}
+```
+
+All four keys are required when the block is present, and unknown keys are refused — an open mapping would let each harness invent its own field names, and a claim nobody can compare across runs is not provenance. A blank value is refused too, at every strictness level, because a half-filled attestation reads as complete and is not. The block is covered by the job digest, so swapping the model is visible in the ledger.
+
+**This is an attestation, not a measurement, and the distinction is not a technicality.** ADR-0002 keeps the core agent-neutral: the core never talks to a model and therefore cannot observe which one ran. It records what the orchestrator declares. **A harness that reports the wrong model passes this check.** What the block buys is that the claim is written down, digested, and diffable across runs — not that it is true. Anyone reading a bundle's provenance should read the `execution` block as "the harness said this", with exactly the weight that deserves.
+
+`okfy validate` warns (`W_EXEC_MISSING`) when a job artifact has no execution block, and `--strict-execution` turns that into an error (`E_EXEC_MISSING`). Bundles built before v0.10 have no execution blocks at all: they warn and stay green, and you should not retrofit the flag onto them — an attestation invented after the fact is a fabrication, which is the same reasoning that made `provenance: legacy` an escape hatch rather than a back-dated migration. Turn `--strict-execution` on for new extractions.
+
+### When a merge is contested: the dissent ledger
+
+`merge-audit` re-derives its report on every run and records nothing about what you decided. Without a durable layer the same disagreement is re-adjudicated forever. The dissent ledger gives a merge decision the artifact every other pipeline step already has:
+
+```bash
+okfy dissent add <bundle> --run <id> --group <final-id> --draft <draft-id> \
+    --claim "..." --anchor path#L10-L20 --verdict split|no-schism \
+    --overruled-because "..."
+okfy dissent list <bundle> [--group <final-id>]
+okfy dissent waive <bundle> --group <final-id> --reason "..." --owner
+```
+
+Rows land append-only in `meta/dissent.jsonl`, the same shape as the extraction ledger. A `split` verdict on a group that was merged anyway *must* carry `--overruled-because`; an unexplained override is precisely what this ledger exists to prevent. Waiving is an owner act and the `--owner` flag is the acknowledgement.
+
+A waiver pins the waived concept's SHA-256 as `waiver_fingerprint`, so editing that concept afterwards reopens the row rather than silently inheriting the old decision — `retrieval_fingerprint`'s idiom transplanted onto merge. A waiver is a statement about a version of a concept, not about its name.
+
+`release-check` consults the ledger **only** when `meta/purpose.md` declares `acceptance.dissent: required`, and the opt-in is deliberate: bundles accepted before this existed have no dissent rows, and failing them for missing an artifact that did not exist at acceptance time would be retroactive. When enabled, three codes apply — `E_REL_DISSENT_UNADJUDICATED` (a multi-draft group with no row), `E_REL_DISSENT_OPEN` (an unresolved `split`), `E_REL_DISSENT_STALE` (a waiver that no longer matches its concept) — with `acceptance.allow_open_dissent: true` as the explicit escape hatch.
+
+One limit, stated plainly and repeated by the check itself in its output: **this verifies that adjudication happened, never that it was rigorous.** An adjudicator stamping `no-schism` on every group satisfies the gate completely. Requiring a source anchor on every row raises the cost of a lazy pass, but no machine check can establish that a judgement was made in good faith. Treat a green dissent gate as evidence that the question was asked, not that it was answered well.
+
 ### Extraction that survives messy corpora
 
 The first corpora OKFy ate were clean — curated markdown, a tidy C codebase. Real corpora are not: they carry `node_modules`, build artifacts, lockfiles, binaries, and the occasional 800-kilotoken file that would swallow a worker's entire budget. v0.5 hardens the survey/segment stage against all of that, and the theme is the same as everywhere else in this chapter: *no silent drops.*

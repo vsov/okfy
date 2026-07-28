@@ -8,7 +8,8 @@ from .bundle import (cmd_index, cmd_init, cmd_log, cmd_package,
                      cmd_release_check, cmd_validate)
 from .corpus import (cmd_cluster, cmd_diff, cmd_repair_links, cmd_segment,
                      cmd_segment_status, cmd_snapshot, cmd_survey)
-from .quality import cmd_eval, cmd_job, cmd_ledger, cmd_stale
+from .quality import (cmd_dissent, cmd_eval, cmd_job, cmd_ledger, cmd_merge_audit,
+                      cmd_stale)
 from .retrieval import cmd_links, cmd_query, cmd_sample, cmd_show
 from .review import cmd_propose, cmd_refine, cmd_review
 from .workspace import cmd_link_candidates, cmd_workspace
@@ -19,6 +20,8 @@ HANDLERS = {
     "segment": cmd_segment,
     "segment-status": cmd_segment_status,
     "cluster": cmd_cluster,
+    "merge-audit": cmd_merge_audit,
+    "dissent": cmd_dissent,
     "validate": cmd_validate,
     "release-check": cmd_release_check,
     "index": cmd_index,

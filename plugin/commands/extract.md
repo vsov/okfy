@@ -68,6 +68,16 @@ hashes the actual prompt text and inputs.
    --inputs <draft-ids-consumed> --prompt-version consolidate@1
    --outputs <final-concept-ids> --validation <pass|fail>
    --merge-map "<draft>=<final>,<draft2>=<final>"`.
+7. Run the shadow consolidation audit — `okfy merge-audit <bundle>`. It
+   reconstructs the merge groups from the `merge_map` you just recorded and
+   recovers the drafts from the commit before step 5 deleted them (the ref is
+   auto-detected). It is a REPORT, not a gate: it exits 0 either way and never
+   blocks the pipeline. Read it. `lost-source` means a citation vanished in a
+   merge; `enum-collapse` means two drafts disagreed on an archetype enum
+   (`authority`, `status`, `jurisdiction`) and you silently kept one. Fix what
+   is a real loss, and tell the user what you left as a deliberate merge
+   decision. If the output says `NOT AUDITED`, the drafts could not be
+   recovered — say so; it does not mean nothing was lost.
 
 ## Stage 6 — Validate + package
 

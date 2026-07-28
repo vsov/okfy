@@ -102,7 +102,7 @@ def resolve_link(bundle: Bundle, concept_path, target: str) -> str | None:
 
 def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
                        strict_quality=False, strict_provenance=False,
-                       strict_package=False) -> Report:
+                       strict_package=False, strict_execution=False) -> Report:
     r = Report()
     concepts = []
     for p in bundle.iter_md_files():
@@ -112,6 +112,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
             continue  # layer 1's problem
     _check_meta(bundle, r)
     _check_corpus_snapshot(bundle, r, strict=strict_sources)
+    _check_execution(bundle, r, strict=strict_execution)
     _check_collisions(concepts, r)
     _check_stale(concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
@@ -185,6 +186,53 @@ def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
               f"corpus snapshot git_sha {sha[:12]}... is not a commit of "
               f"{corpus} — the snapshot no longer identifies real corpus "
               "state (rewritten history, corrupted pin, or wrong corpus)")
+
+
+def _check_execution(bundle: Bundle, r: Report, strict: bool = False):
+    """Every worker-job artifact should record WHO ran it — model, provider,
+    sampling, harness version — not only what it consumed. A frozen prompt plus
+    a frozen input set still says nothing about the executor, so a replay across
+    a model change is indistinguishable from a replay across a bundle change.
+
+    This is attestation, not measurement: the core is agent-neutral (ADR-0002)
+    and cannot observe the model, so it checks that the harness declared one, not
+    that the declaration is true. Absent is a warning by default — every bundle
+    built before v0.10 lacks it and must not turn red — and an error only under
+    --strict-execution (new extractions). A block that exists but is incomplete
+    is an error at BOTH levels: a half-filled attestation reads as complete."""
+    from okfy.job import EXECUTION_FIELDS
+    jobs = sorted((bundle.root / "meta" / "jobs").glob("*.json"))
+    if not jobs:
+        return
+    level, code = (("error", "E_EXEC_MISSING") if strict
+                   else ("warning", "W_EXEC_MISSING"))
+    for p in jobs:
+        where = f"meta/jobs/{p.name}"
+        try:
+            job = json.loads(p.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            continue          # unreadable artifacts are _check_provenance's job
+        ex = job.get("execution")
+        if ex is None:
+            r.add(level, code, where,
+                  "job artifact records no execution identity — the prompt and "
+                  "inputs are frozen but the executor is not; a replay cannot "
+                  "tell a model change from a bundle change")
+            continue
+        if not isinstance(ex, dict):
+            r.add("error", "E_EXEC_FIELD", where,
+                  f"execution must be a mapping of {', '.join(EXECUTION_FIELDS)}")
+            continue
+        missing = [k for k in EXECUTION_FIELDS
+                   if not str(ex.get(k) or "").strip()]
+        if missing:
+            r.add("error", "E_EXEC_FIELD", where,
+                  f"execution is missing or blank: {', '.join(missing)} — a "
+                  "half-filled attestation reads as complete and is not")
+        unknown = sorted(set(ex) - set(EXECUTION_FIELDS))
+        if unknown:
+            r.add("error", "E_EXEC_FIELD", where,
+                  f"unknown execution field(s): {', '.join(unknown)}")
 
 
 def _check_stale(concepts, r: Report):
