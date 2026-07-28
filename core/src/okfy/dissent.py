@@ -127,7 +127,8 @@ def read_rows(bundle: Bundle, group: str | None = None) -> list:
 
 def waive(bundle: Bundle, group: str, reason: str) -> dict:
     """Owner-only: accept an open `split` for this group as adjudicated. The
-    waiver pins the concept's current content, so a later edit reopens it."""
+    waiver pins the concept's current content AND the group's current draft
+    set, so a later edit — or a later draft joining the group — reopens it."""
     if not reason.strip():
         raise ValueError("a waiver without a reason is not an adjudication — "
                          "pass --reason")

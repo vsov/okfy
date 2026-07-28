@@ -121,7 +121,11 @@ def cmd_dissent(a) -> int:
         _print(waive(b, a.group, a.reason))
     else:
         for r in read_rows(b, group=a.group):
-            mark = "waived" if r.get("waiver_fingerprint") else r["verdict"]
+            # An owner waiver carries `waiver`; it is NOT just another no-schism
+            # row, and printing it as one would erase the distinction the whole
+            # layer rests on — the party that recorded a merge cannot close the
+            # objection to it.
+            mark = "waived" if r.get("waiver") else r["verdict"]
             print(f"{r['group']} [{mark}] drafts={len(r['drafts'])} "
                   f"{r['claim'][:60]}")
         if a.group:

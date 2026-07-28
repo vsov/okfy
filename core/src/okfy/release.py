@@ -230,9 +230,10 @@ def _check_dissent(bundle: Bundle, problems: list, notes: list):
             "or split the concept")
     if stale:
         problems.append(
-            f"E_REL_DISSENT_STALE: {len(stale)} waiver(s) no longer match the "
-            f"concept they waived (e.g. {', '.join(stale[:3])}) — the concept "
-            "changed after the owner accepted the merge; re-adjudicate")
+            f"E_REL_DISSENT_STALE: {len(stale)} adjudication(s) no longer match "
+            f"what they ruled on (e.g. {', '.join(stale[:3])}) — the merged "
+            "concept's bytes or the group's draft set moved after the ruling; "
+            "re-adjudicate")
     if acceptance.get("allow_open_dissent"):
         notes.append("dissent: acceptance.allow_open_dissent is set — "
                      "unadjudicated and open groups are not blocking")

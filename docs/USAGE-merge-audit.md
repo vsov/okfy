@@ -252,7 +252,7 @@ acceptance:
   dissent: required
 ```
 
-Only then does `okfy release-check` consult the ledger, with three codes:
+Only then does `okfy release-check` consult the ledger, with four codes:
 
 | code | meaning |
 |---|---|
@@ -268,6 +268,10 @@ acceptance:
   dissent: required
   allow_open_dissent: true
 ```
+
+It excuses the first two codes only. `_STALE` and `_UNVERIFIABLE` still block, because
+they do not mean "a verdict you would rather not act on" — they mean the record no
+longer describes what is in the bundle, or cannot be read at all.
 
 Bundles that do not declare `acceptance.dissent` are completely unaffected — this is
 why turning it on is a per-bundle decision rather than a global upgrade.
