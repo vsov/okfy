@@ -11,11 +11,14 @@ The format deliberately mirrors `ledger.py`: one JSON object per line in
 claim that a merge group hides a real distinction, who held it, where in the source
 it is anchored, and how it was resolved.
 
-WAIVER FINGERPRINT. A waiver is a statement about a specific version of a concept.
-`waiver_fingerprint` is a SHA-256 over the waived concept's content at the moment of
-waiving, so editing that concept afterwards reopens the row rather than silently
-inheriting the old decision. This is `retrieval_fingerprint`'s idiom (an eval run is
-only valid for the bundle state it ran against) transplanted onto merge.
+ADJUDICATION FINGERPRINT. Every row — not only a waiver — is a statement about a
+specific version of a specific merge. `adjudication_fingerprint` is a SHA-256 over
+the merged concept's bytes AND the sorted ids of the drafts that fed it, so the row
+stops closing the group the moment either side moves: edit the concept, or add a
+draft to the group in a later run, and the group returns to `stale`. Binding to the
+concept alone was not enough — a group that grew a new draft would still have read as
+closed by an adjudication that never saw it. This is `retrieval_fingerprint`'s idiom
+(evidence is only valid for the state it was produced against) transplanted onto merge.
 
 OPT-IN BY CONSTRUCTION. `release-check` consults this ledger only when the bundle
 declares `acceptance.dissent: required` in `meta/purpose.md`. Bundles built before
@@ -41,12 +44,34 @@ def dissent_path(bundle: Bundle) -> Path:
 
 
 def concept_fingerprint(bundle: Bundle, concept_id: str) -> str:
-    """SHA-256 of a concept's file as it stands now. A waiver carries this so a
-    later edit to the concept reopens the row instead of inheriting the decision."""
+    """SHA-256 of a concept's file as it stands now."""
     p = bundle.root / f"{concept_id}.md"
     if not p.is_file():
         return ""
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+def _group_drafts(bundle: Bundle, group: str) -> list[str]:
+    from okfy.merge_audit import merge_groups
+    _, groups = merge_groups(bundle)
+    for g in groups:
+        if g["final"] == group:
+            return list(g["drafts"])
+    return []
+
+
+def adjudication_fingerprint(bundle: Bundle, group: str,
+                             drafts: list[str] | None = None) -> str:
+    """What an adjudication of `group` was actually about: the merged concept's
+    bytes plus the sorted ids of the drafts that fed it. A row carrying a stale
+    fingerprint no longer closes its group — neither an edited concept nor a
+    newly-added draft can inherit a decision made without it."""
+    if drafts is None:
+        drafts = _group_drafts(bundle, group)
+    payload = json.dumps({"final": concept_fingerprint(bundle, group),
+                          "drafts": sorted(str(d) for d in drafts)},
+                         sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _check(row: dict) -> None:
@@ -63,18 +88,23 @@ def _check(row: dict) -> None:
 
 def add_row(bundle: Bundle, run_id: str, group: str, drafts, claim: str,
             anchor: str, verdict: str, overruled_because: str = "") -> dict:
-    """Append one adjudication row. A `split` verdict that was nonetheless merged
-    must say why in overruled_because — an unexplained override is the thing this
-    ledger exists to prevent."""
+    """Append one adjudication row.
+
+    A `split` verdict does NOT close its group and does not require a reason:
+    an unresolved split has not been overruled by anyone yet, and demanding a
+    justification at the moment of recording invited the consolidator to write
+    one and move on. A split stays `open` until the owner waives it (with a
+    reason) or the concept is actually split. `overruled_because` remains
+    available as the consolidator's note on why the merge was kept — it
+    annotates, it never resolves."""
     row = {"run_id": run_id, "group": group,
            "drafts": list(drafts) if isinstance(drafts, (list, tuple)) else drafts,
            "claim": claim, "anchor": anchor, "verdict": verdict}
     _check(row)
-    if verdict == "split" and not overruled_because.strip():
-        raise ValueError("dissent row: a split verdict that was merged anyway "
-                         "requires --overruled-because")
     if overruled_because:
         row["overruled_because"] = overruled_because
+    row["adjudication_fingerprint"] = adjudication_fingerprint(
+        bundle, group, row["drafts"])
     path = dissent_path(bundle)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
@@ -108,7 +138,7 @@ def waive(bundle: Bundle, group: str, reason: str) -> dict:
            "anchor": f"{group}.md", "verdict": "no-schism",
            "overruled_because": reason,
            "waiver": reason,
-           "waiver_fingerprint": concept_fingerprint(bundle, group)}
+           "adjudication_fingerprint": adjudication_fingerprint(bundle, group)}
     _check(row)
     path = dissent_path(bundle)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,14 +148,25 @@ def waive(bundle: Bundle, group: str, reason: str) -> dict:
     return row
 
 
-def group_state(bundle: Bundle, group: str) -> str:
-    """'unadjudicated' (no rows) | 'open' (a split with no later waiver) |
-    'stale' (waived, but the concept changed since) | 'closed'."""
+def group_state(bundle: Bundle, group: str,
+                drafts: list[str] | None = None) -> str:
+    """'unadjudicated' (no rows) | 'open' (a split nobody has resolved) |
+    'stale' (adjudicated, but the concept or the draft set moved since) |
+    'closed'.
+
+    Only an owner waiver closes an open split. A later `no-schism` row does not:
+    the party that recorded the merge cannot also dismiss the objection to it."""
     rows = read_rows(bundle, group=group)
     if not rows:
         return "unadjudicated"
-    waivers = [r for r in rows if r.get("waiver_fingerprint") is not None]
+    current = adjudication_fingerprint(bundle, group, drafts)
+    waivers = [r for r in rows if r.get("waiver")]
     if waivers:
-        pinned = str(waivers[-1].get("waiver_fingerprint") or "")
-        return "closed" if pinned == concept_fingerprint(bundle, group) else "stale"
-    return "open" if any(r.get("verdict") == "split" for r in rows) else "closed"
+        return ("closed"
+                if str(waivers[-1].get("adjudication_fingerprint") or "") == current
+                else "stale")
+    if any(r.get("verdict") == "split" for r in rows):
+        return "open"
+    return ("closed"
+            if str(rows[-1].get("adjudication_fingerprint") or "") == current
+            else "stale")

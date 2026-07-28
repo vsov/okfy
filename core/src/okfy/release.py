@@ -177,18 +177,41 @@ def _check_dissent(bundle: Bundle, problems: list, notes: list):
     that adjudication HAPPENED, never that it was rigorous: a lazy adjudicator
     satisfies it. That limit is real and is stated in the notes."""
     from okfy.dissent import group_state
-    from okfy.merge_audit import merge_groups
+    from okfy.merge_audit import merge_groups, recover_drafts
     acceptance = bundle.purpose().get("acceptance") or {}
     if str(acceptance.get("dissent") or "") != "required":
         return
     state, groups = merge_groups(bundle)
     if state != "ok":
-        notes.append("dissent: no merge_map in the ledger — nothing to adjudicate "
-                     "(this is not proof that nothing was merged)")
+        # A bundle that declared the required-contract cannot satisfy it with an
+        # absent ledger. Reporting "nothing to adjudicate" here let the strongest
+        # possible evasion — never recording a merge_map at all — read as green.
+        problems.append(
+            "E_REL_DISSENT_UNVERIFIABLE: acceptance.dissent is required but no "
+            "ledger row carries a merge_map, so the merge groups cannot be "
+            "reconstructed and adjudication cannot be checked — record the "
+            "merge map at consolidation or drop the required contract")
         return
+    # A dissent row claims "I compared these drafts and this is what I found".
+    # Once the drafts cannot be recovered, that claim is unfalsifiable: nobody
+    # can re-derive it, and a future re-adjudication is impossible. Under the
+    # required contract that is a failure of the evidence, not a detail — the
+    # same standard merge-audit applies to itself when it refuses to report
+    # "clean" for groups it could not read.
+    rstate, _ = recover_drafts(bundle, sorted({d for g in groups
+                                               for d in g["drafts"]}))
+    if rstate not in ("live", "git"):
+        problems.append(
+            f"E_REL_DISSENT_UNVERIFIABLE: acceptance.dissent is required but the "
+            f"pre-consolidation drafts cannot be recovered ({rstate}) — every "
+            f"adjudication in meta/dissent.jsonl is unfalsifiable and cannot be "
+            f"redone; restore the history that holds drafts/ or drop the "
+            f"required contract")
+        return
+
     unadjudicated, open_, stale = [], [], []
     for g in groups:
-        st = group_state(bundle, g["final"])
+        st = group_state(bundle, g["final"], g["drafts"])
         if st == "unadjudicated":
             unadjudicated.append(g["final"])
         elif st == "open":

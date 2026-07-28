@@ -22,7 +22,26 @@ hashes the actual prompt text and inputs.
 2. Seed Glossary: from the plan's glossary strategy + survey, draft 10-30
    one-line term seeds (term + gloss). Keep in memory; pass to every worker.
 3. For each pending segment, FIRST freeze the worker's contract:
-   `okfy job <bundle> <segment-id> --prompt-file plugin/prompts/extract-worker.md`
+   First write the execution attestation once per run, to a scratch file outside
+   the bundle (e.g. `/tmp/okfy-exec.json`):
+
+   ```json
+   {"model": "<the model you are running as>",
+    "provider": "<the provider serving you>",
+    "sampling": {"temperature": "<if you know it, else \\"unknown-to-agent\\"">},
+    "harness_version": "<the harness and version you are running under>"}
+   ```
+
+   Fill in what you actually know about yourself. Where you do not know a value,
+   write `"unknown-to-agent"` rather than guessing — a fabricated attestation is
+   worse than an honest blank, because it reads as recorded fact. The core cannot
+   check any of this (it is agent-neutral and never talks to a provider), so this
+   block is YOUR REPORT ABOUT YOURSELF and nothing more. Tell the user that, in
+   those words, when you write it.
+
+   Then, per segment:
+
+   `okfy job <bundle> <segment-id> --prompt-file plugin/prompts/extract-worker.md --execution-file /tmp/okfy-exec.json`
    — the core writes `meta/jobs/<segment-id>.json` (schema `okfy-worker-job@1`:
    inputs with their `lines`/`chars` spans and content hashes, corpus snapshot,
    archetype, prompt SHA-256) and prints it with its `digest`. Then spawn a
@@ -78,6 +97,11 @@ hashes the actual prompt text and inputs.
    is a real loss, and tell the user what you left as a deliberate merge
    decision. If the output says `NOT AUDITED`, the drafts could not be
    recovered — say so; it does not mean nothing was lost.
+8. If `meta/purpose.md` declares `acceptance.dissent: required`, the bundle has
+   opted into recorded adjudication and `release-check` will refuse it until every
+   multi-draft group carries a ruling. Do NOT write those rulings yourself — tell
+   the user to run `/okfy:schism <bundle>`, which puts each group in front of them
+   and records only what they decide. A `no-schism` you chose is not evidence.
 
 ## Stage 6 — Validate + package
 
@@ -115,7 +139,8 @@ hashes the actual prompt text and inputs.
    any concept change after this point makes the package stale.
 5. FINAL GATE — the full strict validation, after packaging:
    `okfy validate <bundle> --strict-sources --strict-quality
-   --strict-provenance --strict-package` MUST exit 0. This cross-checks the
+   --strict-provenance --strict-package --strict-execution` MUST exit 0. This
+   cross-checks the
    whole release: sources and anchors real, purpose-fitness complete, every
    job artifact/frozen prompt/ledger digest consistent, every concept
    reachable from index.md, package fresh. If it fails, fix and re-run —

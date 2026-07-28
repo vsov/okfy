@@ -118,6 +118,13 @@ Create a small JSON file — anywhere, it does not live in the bundle:
 
 All four keys are required. Unknown keys are refused, and so is a blank value.
 
+**Where the values come from: the agent, and nowhere else.** There is no reliable
+channel through which the core, or you, can read the model actually serving a run —
+so `/okfy:extract` asks the agent to describe itself and records the answer verbatim.
+Read every field as *"the agent reported this"*. Where the agent does not know a value
+it writes `unknown-to-agent`; that is the correct entry, and it is strictly better than
+a plausible guess, which would read as recorded fact.
+
 ### 2.2 Attach it when freezing the job
 
 ```bash
@@ -169,6 +176,12 @@ want the decision to survive, instead of re-litigating it on every future audit.
 
 ### 3.1 Record an adjudication
 
+The supported way to do this is `/okfy:schism <bundle>`, which walks the queue, makes
+you state the strongest case for splitting *before* it shows you the merge, then the
+strongest case against, and records only the verdict you give it. The raw command
+below is what that pass ends up running; use it directly only when you are adjudicating
+a single group by hand.
+
 ```bash
 okfy dissent add ~/bundles/my-bundle \
     --run schism-2026-07-28 \
@@ -182,8 +195,23 @@ okfy dissent add ~/bundles/my-bundle \
 ```
 
 `--verdict no-schism` means the drafts really did describe one thing. `--verdict split`
-means they did not — and if you merged them anyway, `--overruled-because` is mandatory.
-An unexplained override is the thing this ledger exists to prevent.
+means they did not — and a split **stays open**. It is an unresolved objection, not a
+justification, so it needs no reason at the moment of recording; `--overruled-because`
+is available as the consolidator's note on why the merge was kept, and it annotates
+without resolving anything. Only an owner waiver, or actually splitting the concept,
+closes it. A later `no-schism` row does not: the party that recorded the merge cannot
+also dismiss the objection to it.
+
+`no-schism` needs a **positive** record, not the absence of a complaint:
+
+```
+Tested boundary: authority level.
+No-schism because both drafts instantiate the same obligation under
+text/cfr-part242-400-406.txt#L113-L145; the difference is only in worked examples.
+```
+
+`split` needs a **witness** — a concrete jurisdiction, date, regime, input, or required
+action where the drafts give different answers.
 
 `--anchor` should point at the source lines the claim rests on. A vote without evidence
 is cheap; requiring the anchor is what makes a lazy pass cost something.
@@ -209,9 +237,11 @@ okfy dissent waive ~/bundles/my-bundle \
 
 `--owner` is required. Waiving is your decision, and the flag is the acknowledgement.
 
-The waiver pins the concept's SHA-256. If you later edit that concept, the waiver goes
-`stale` and the group reopens — a waiver is a statement about a *version* of a concept,
-not about its name.
+Every row — waiver or not — pins an `adjudication_fingerprint` over the merged
+concept's bytes **and** the sorted ids of the drafts that fed it. Edit the concept, or
+let a later run add a draft to the group, and the ruling goes `stale` and the group
+reopens. Binding to the concept alone was not enough: a group that grew a new draft
+would still have read as closed by a ruling that never saw it.
 
 ### 3.4 Turn the release gate on (optional, per bundle)
 
@@ -228,7 +258,8 @@ Only then does `okfy release-check` consult the ledger, with three codes:
 |---|---|
 | `E_REL_DISSENT_UNADJUDICATED` | a multi-draft merge group has no dissent row at all |
 | `E_REL_DISSENT_OPEN` | a `split` was recorded and never resolved |
-| `E_REL_DISSENT_STALE` | a waiver no longer matches the concept it waived |
+| `E_REL_DISSENT_STALE` | an adjudication no longer matches what it ruled on — the concept's bytes or the group's draft set moved since |
+| `E_REL_DISSENT_UNVERIFIABLE` | the contract is required but the record cannot be checked at all: no `merge_map` in the ledger, so the groups cannot be reconstructed; or the pre-consolidation drafts cannot be recovered, so every ruling is unfalsifiable |
 
 The escape hatch, for a bundle where you want the ledger but not the blocking:
 

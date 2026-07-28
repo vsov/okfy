@@ -303,8 +303,8 @@ def audit_merge(bundle: Bundle, ref: str | None = None,
     state guarantees a non-empty `unverifiable` list: this function never reports
     "no findings" for work it could not actually inspect."""
     out = {"state": "ok", "recovery": None, "ref": None, "groups_total": 0,
-           "groups_with_findings": 0, "findings": [], "unverifiable": [],
-           "by_kind": dict.fromkeys(KINDS, 0), "notes": []}
+           "groups": [], "groups_with_findings": 0, "findings": [],
+           "unverifiable": [], "by_kind": dict.fromkeys(KINDS, 0), "notes": []}
 
     gstate, groups = merge_groups(bundle)
     if gstate != "ok":
@@ -327,6 +327,11 @@ def audit_merge(bundle: Bundle, ref: str | None = None,
             return out
         groups = selected
 
+    # the groups themselves, not just their count: an adjudication workflow needs
+    # the draft membership of every group, including the ones with no findings —
+    # zero findings is a claim to be tested, not a group to skip
+    out["groups"] = [{"final": g["final"], "drafts": list(g["drafts"])}
+                     for g in groups]
     out["groups_total"] = len(groups)
     draft_ids = sorted({d for g in groups for d in g["drafts"]})
     rstate, drafts = recover_drafts(bundle, draft_ids, ref=ref)

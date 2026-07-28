@@ -169,7 +169,9 @@ def main(argv=None) -> int:
     x.add_argument("--anchor", required=True, help="path#L10-L20 in the source")
     x.add_argument("--verdict", choices=["split", "no-schism"], required=True)
     x.add_argument("--overruled-because", dest="overruled_because", default="",
-                   help="required when a split was merged anyway")
+                   help="the consolidator's note on why the merge was kept — "
+                        "annotates the row, never resolves it; only an owner "
+                        "waiver closes a split")
     x = xsub.add_parser("list");  x.add_argument("bundle", type=Path)
     x.add_argument("--group", default=None)
     x = xsub.add_parser("waive"); x.add_argument("bundle", type=Path)
