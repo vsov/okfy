@@ -411,7 +411,7 @@ You extracted a crypto-options decision-support bundle. Its purpose declares ten
 $ okfy eval run ./options-bundle
 {
   "run_id": "2026-07-08T09:14:02.511+00:00",
-  "tool_version": "0.5.0",
+  "tool_version": "0.10.0",
   "created": "2026-07-08T09:14:02.511+00:00",
   "results": [
     {
