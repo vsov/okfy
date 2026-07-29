@@ -43,7 +43,7 @@ and would fail silently, so the adapter only hands you a correct block — pasti
 it is your explicit act:
 
 ```bash
-okfy-mcp config ~/bundles/rayforce-okf --client claude-code
+okfy-mcp config ~/bundles/my-bundle --client claude-code
 ```
 
 prints, e.g.:
@@ -51,9 +51,9 @@ prints, e.g.:
 ```json
 {
   "mcpServers": {
-    "rayforce-okf": {
+    "my-bundle": {
       "command": "okfy-mcp",
-      "args": ["serve", "/Users/you/bundles/rayforce-okf"]
+      "args": ["serve", "/Users/you/bundles/my-bundle"]
     }
   }
 }
