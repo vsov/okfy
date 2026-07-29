@@ -102,7 +102,8 @@ def resolve_link(bundle: Bundle, concept_path, target: str) -> str | None:
 
 def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
                        strict_quality=False, strict_provenance=False,
-                       strict_package=False, strict_execution=False) -> Report:
+                       strict_package=False, strict_execution=False,
+                       strict_schema=False) -> Report:
     r = Report()
     concepts = []
     for p in bundle.iter_md_files():
@@ -111,6 +112,9 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
         except frontmatter.FrontmatterError:
             continue  # layer 1's problem
     _check_meta(bundle, r)
+    _check_write_policy(bundle, r)
+    _check_acceptance(bundle, r)
+    _check_types(bundle, concepts, archetype, r, strict=strict_schema)
     _check_corpus_snapshot(bundle, r, strict=strict_sources)
     _check_execution(bundle, r, strict=strict_execution)
     _check_collisions(concepts, r)
@@ -153,6 +157,126 @@ def _check_meta(bundle: Bundle, r: Report):
             v = c.meta.get(f)
             if v in (None, "", []):
                 r.add("error", "E_META_FIELD", c.id, f"meta field missing/empty: {f}")
+
+
+WRITE_POLICIES = ("proposals", "direct")
+# Every key release.py reads out of `acceptance`. Closed on purpose: a typo in
+# `dissent` or `allow_open_dissent` silently changes which gates apply, and an
+# open mapping means the misspelling reads as a policy that was never enforced.
+ACCEPTANCE_KEYS = {
+    "min_owner_pass": int,
+    "allow_l3_fail": bool,
+    "allow_open_dissent": bool,
+    "dissent": str,
+}
+
+
+def _check_write_policy(bundle: Bundle, r: Report):
+    """`write_policy` is a trust boundary, so it is an enum, not a string.
+
+    The pre-commit hook compares it to the exact literal `proposals`. Anything
+    else — `proposal`, `PROPOSALS`, a trailing space — left the gate inert while
+    the bundle read as gated. Only a non-empty value was ever required, which
+    made the typo invisible at every strictness level."""
+    p = bundle.get("meta/purpose")
+    if p is None:
+        return                                   # _check_meta already reported it
+    v = p.meta.get("write_policy")
+    if v in (None, "", []):
+        return                                   # _check_meta reports the absence
+    if str(v) not in WRITE_POLICIES:
+        r.add("error", "E_WRITE_POLICY", p.id,
+              f"write_policy must be one of {list(WRITE_POLICIES)}, got {v!r} — "
+              "the pre-commit hook matches the literal, so a near-miss disables "
+              "the gate without disabling the claim")
+
+
+def _check_acceptance(bundle: Bundle, r: Report):
+    """`acceptance` is the bundle's own release policy, so it is validated like
+    one: closed key set, declared types, and `min_owner_pass` inside the range
+    the eval can actually satisfy. A policy nobody checks is a comment."""
+    p = bundle.get("meta/purpose")
+    if p is None:
+        return
+    acc = p.meta.get("acceptance")
+    if acc is None:
+        return
+    if not isinstance(acc, dict):
+        r.add("error", "E_ACCEPTANCE_SHAPE", p.id,
+              f"acceptance must be a mapping, got {type(acc).__name__}")
+        return
+    queries = p.meta.get("test_queries") or []
+    for k, v in acc.items():
+        if k not in ACCEPTANCE_KEYS:
+            r.add("error", "E_ACCEPTANCE_KEY", p.id,
+                  f"unknown acceptance key {k!r} (known: "
+                  f"{sorted(ACCEPTANCE_KEYS)}) — an unrecognised key is a "
+                  "policy that silently does nothing")
+            continue
+        want = ACCEPTANCE_KEYS[k]
+        # bool is a subclass of int; an accidental `min_owner_pass: true` must
+        # not read as 1
+        if want is int and (isinstance(v, bool) or not isinstance(v, int)):
+            r.add("error", "E_ACCEPTANCE_TYPE", p.id,
+                  f"acceptance.{k} must be an integer, got {v!r}")
+            continue
+        if want is bool and not isinstance(v, bool):
+            r.add("error", "E_ACCEPTANCE_TYPE", p.id,
+                  f"acceptance.{k} must be true or false, got {v!r}")
+            continue
+        if want is str and not isinstance(v, str):
+            r.add("error", "E_ACCEPTANCE_TYPE", p.id,
+                  f"acceptance.{k} must be a string, got {v!r}")
+            continue
+        if k == "min_owner_pass" and not 1 <= v <= max(len(queries), 1):
+            r.add("error", "E_ACCEPTANCE_RANGE", p.id,
+                  f"acceptance.min_owner_pass={v} is outside 1..{len(queries)} "
+                  "(the number of test_queries) — a bar below 1 accepts a "
+                  "bundle whose every query failed, and one above the query "
+                  "count can never be met")
+
+
+def _check_types(bundle: Bundle, concepts, archetype, r: Report,
+                 strict: bool = False):
+    """Every concept type must be a declared type.
+
+    Archetypes ship `canonical_types` and `/okfy:new` may adapt the set per
+    bundle — so the authority is `types` in meta/extraction-plan.md when it is
+    declared, and the archetype's canonical list otherwise. Without this there
+    was no difference between a deliberate custom type and a typo: `Strategyy`
+    validated clean, contributed no required fields, and required no sections."""
+    if archetype is None:
+        return
+    plan = bundle.plan()
+    declared = (plan.meta.get("types") if plan else None)
+    # `/okfy:new` writes `types` as a mapping of name -> extraction rule, which
+    # is what every real bundle carries; a bare list is accepted too. Reading
+    # only one of the two shapes would silently fall through to canonical_types
+    # and ignore the declaration — the same fail-open this check exists to close.
+    allowed = ({str(t) for t in declared}
+               if isinstance(declared, (dict, list)) else None)
+    if allowed:
+        source = "meta/extraction-plan.md `types`"
+        level, code = "error", "E_UNKNOWN_TYPE"   # an explicit set is a contract
+    else:
+        allowed = set(archetype.canonical_types or [])
+        source = f"archetype {archetype.name} canonical_types"
+        # No declaration means the adaptation was never recorded. That is worth
+        # an error only where the bundle claims to be releasable.
+        level, code = ("error", "E_UNDECLARED_TYPE") if strict else \
+                      ("warning", "W_UNDECLARED_TYPE")
+    if not allowed:
+        return
+    for c in concepts:
+        if c.id.startswith("meta/"):
+            continue
+        t = str(c.meta.get("type"))
+        if t in allowed:
+            continue
+        hint = ("" if declared else
+                " — declare the adapted set as `types:` in "
+                "meta/extraction-plan.md if this type is deliberate")
+        r.add(level, code, c.id, f"type {t!r} is not in {source}{hint}")
 
 
 def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
@@ -406,12 +530,34 @@ def _check_lexicon(concepts, r: Report):
         return
     ids = {c.id for c in concepts}
     for row in rows:
-        term = row.get("term") if isinstance(row, dict) else row
-        status = row.get("status") if isinstance(row, dict) else None
+        if not isinstance(row, dict):
+            r.add("warning", "W_LEXICON_ROW", lex.id,
+                  f"row must be a mapping, got {type(row).__name__}: {row!r}")
+            continue
+        term = row.get("term")
+        status = row.get("status")
+        if not isinstance(term, str) or not term.strip():
+            r.add("warning", "W_LEXICON_ROW", lex.id,
+                  f"row has no usable term: {row!r}")
         if status not in STATUSES:
             r.add("warning", "W_LEXICON_STATUS", lex.id,
                   f"row {term!r}: unknown status {status!r} (use: {sorted(STATUSES)})")
-        maps_to = (row.get("maps_to") if isinstance(row, dict) else None) or []
+        for f in ("language", "note"):
+            if f in row and not isinstance(row[f], str):
+                r.add("warning", "W_LEXICON_ROW", lex.id,
+                      f"row {term!r}: {f} must be a string, got "
+                      f"{type(row[f]).__name__}")
+        # A scalar here is not a near-miss that fails quietly: expand() iterates
+        # it, so a string maps_to becomes one hard retrieval pin PER CHARACTER
+        # and a string canonical_terms appends its letters to the query.
+        for f in ("maps_to", "canonical_terms"):
+            v = row.get(f)
+            if v is not None and not isinstance(v, list):
+                r.add("warning", "W_LEXICON_ROW", lex.id,
+                      f"row {term!r}: {f} must be a list, got "
+                      f"{type(v).__name__} {v!r} — expansion iterates it "
+                      "character by character")
+        maps_to = row.get("maps_to") or []
         for target in maps_to if isinstance(maps_to, list) else [maps_to]:
             if not isinstance(target, str) or target not in ids:
                 r.add("warning", "W_LEXICON_TARGET", lex.id,

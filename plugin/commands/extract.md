@@ -139,12 +139,15 @@ hashes the actual prompt text and inputs.
    any concept change after this point makes the package stale.
 5. FINAL GATE — the full strict validation, after packaging:
    `okfy validate <bundle> --strict-sources --strict-quality
-   --strict-provenance --strict-package --strict-execution` MUST exit 0. This
-   cross-checks the
+   --strict-provenance --strict-package --strict-execution --strict-schema`
+   MUST exit 0. This cross-checks the
    whole release: sources and anchors real, purpose-fitness complete, every
    job artifact/frozen prompt/ledger digest consistent, every concept
-   reachable from index.md, package fresh. If it fails, fix and re-run —
-   repackage if concepts changed.
+   reachable from index.md, package fresh, and every concept type declared in
+   the plan's `types`. If it fails, fix and re-run —
+   repackage if concepts changed. A type error here is usually a typo, but if
+   the type is deliberate the fix is to add it to `types` in
+   `meta/extraction-plan.md`, never to drop the flag.
    Then `okfy release-check <bundle>` MUST exit 0 — the fail-closed
    completeness gate: every done worker segment has a job artifact + a ledger
    row carrying its digest; the latest eval run is owner-complete, its

@@ -64,7 +64,7 @@ def _check_validation(bundle: Bundle, problems: list):
             problems.append(f"E_REL_VALIDATE: unknown archetype {name!r}")
     r2 = validate_integrity(bundle, arch, strict_sources=True,
                             strict_quality=True, strict_provenance=True,
-                            strict_package=True)
+                            strict_package=True, strict_schema=True)
     errors = r.errors + r2.errors
     if errors:
         codes = sorted({f.code for f in errors})
@@ -142,12 +142,50 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
             "concept set, lexicon, test queries or tool changed after the "
             "run; re-run the eval and repeat the owner checkpoint")
     acceptance = bundle.purpose().get("acceptance") or {}
+    # NOT min(min_pass, t["of"]). The clamp silently rewrote the policy to fit
+    # whatever the bundle happened to offer: one test query and one owner pass
+    # satisfied a declared minimum of eight, and a negative minimum accepted a
+    # bundle whose only query failed. A bar that adapts to the evidence is not a
+    # bar. Too few queries to meet the bar is reported below as a surface
+    # problem, which is what it is.
     min_pass = int(acceptance.get("min_owner_pass", DEFAULT_MIN_OWNER_PASS))
-    if t["passes_owner"] < min(min_pass, t["of"]):
+    if t["passes_owner"] < min_pass:
         problems.append(f"E_REL_EVAL_POLICY: {t['passes_owner']}/{t['of']} "
                         f"owner passes < policy minimum {min_pass}")
     notes.append(f"eval {st['run_id']}: {t['passes_owner']}/{t['of']} owner "
                  f"passes (policy min {min_pass})")
+
+
+MIN_TEST_QUERIES = 10
+
+
+def _check_acceptance_surface(bundle: Bundle, problems: list, notes: list):
+    """The acceptance surface itself, before any verdict on it.
+
+    `min_owner_pass` used to be clamped to the query count, so the whole
+    declared contract could be satisfied by shrinking the evidence: a bundle
+    with one test query and one owner pass met a stated bar of eight. Removing
+    the clamp is only half the fix — the other half is refusing a surface too
+    small or too degenerate to hold a bar. Ten is the number every archetype's
+    interview asks for and every accepted bundle here carries."""
+    queries = [str(q) for q in (bundle.purpose().get("test_queries") or [])]
+    blank = sum(1 for q in queries if not q.strip())
+    normalised = {" ".join(q.lower().split()) for q in queries if q.strip()}
+    if len(queries) < MIN_TEST_QUERIES:
+        problems.append(
+            f"E_REL_EVAL_SURFACE: {len(queries)} test_queries in "
+            f"meta/purpose.md, {MIN_TEST_QUERIES} required for release — the "
+            "acceptance bar is meaningless on a surface smaller than itself")
+    if blank:
+        problems.append(f"E_REL_EVAL_SURFACE: {blank} blank test_queries "
+                        "entries — a blank query cannot be judged and only "
+                        "inflates the count")
+    dupes = len([q for q in queries if q.strip()]) - len(normalised)
+    if dupes > 0:
+        problems.append(
+            f"E_REL_EVAL_SURFACE: {dupes} duplicate test_queries entries "
+            "after normalising case and whitespace — repeating a query buys "
+            "owner verdicts without buying coverage")
 
 
 def _check_l3(bundle: Bundle, problems: list, notes: list):
@@ -249,6 +287,7 @@ def release_check(bundle: Bundle) -> dict:
     notes: list[str] = []
     _check_validation(bundle, problems)
     _check_provenance_complete(bundle, problems, notes)
+    _check_acceptance_surface(bundle, problems, notes)
     _check_eval(bundle, problems, notes)
     _check_l3(bundle, problems, notes)
     _check_dissent(bundle, problems, notes)

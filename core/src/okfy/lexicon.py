@@ -21,6 +21,17 @@ def load_rows(bundle: Bundle) -> list[dict]:
             term = r.get("term") if isinstance(r, dict) else r
             raise ValueError(f"lexicon row for term {term!r}: bad status {status!r} "
                              f"(use: {sorted(STATUSES)})")
+        # expand() iterates these. A scalar does not degrade gracefully: a string
+        # maps_to yields one hard pin per character and a string canonical_terms
+        # appends its letters to the query, so refuse it here rather than serve
+        # a query nobody can explain.
+        for f in ("maps_to", "canonical_terms"):
+            v = r.get(f)
+            if v is not None and not isinstance(v, list):
+                raise ValueError(
+                    f"lexicon row for term {r.get('term')!r}: {f} must be a "
+                    f"list, got {type(v).__name__} {v!r} — a scalar expands "
+                    "character by character")
     return rows
 
 

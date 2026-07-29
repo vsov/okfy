@@ -22,7 +22,8 @@ def cmd_validate(a) -> int:
                             strict_quality=a.strict_quality,
                             strict_provenance=a.strict_provenance,
                             strict_package=a.strict_package,
-                            strict_execution=a.strict_execution)
+                            strict_execution=a.strict_execution,
+                            strict_schema=a.strict_schema)
     r.findings.extend(r2.findings)
     r.sources = r2.sources
     if not a.quiet:

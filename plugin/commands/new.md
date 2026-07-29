@@ -60,6 +60,11 @@ Interview the user, one question at a time, in their language:
   `archetype`, `archetype_version`, `types` (name → one-line extraction rule),
   `layout` (type → directory), `segmentation` (include/exclude/budget),
   `segments: []`; body: prose rationale — what the bundle will look like and why.
+  `types` is **not optional and not decoration**: it is the closed set of concept
+  types this bundle may contain, and `okfy validate --strict-schema` holds every
+  concept to it. Write it even when you adapted nothing — then it is the
+  archetype's `canonical_types` verbatim. Omitting it is what made a typo
+  (`Strategyy`) indistinguishable from a deliberate custom type.
 - Run `okfy validate <bundle> --no-archetype` — meta completeness must pass.
 - Commit: `git -C <bundle> add . && git -C <bundle> commit -m "plan: purpose + extraction plan"`
 - Present the plan to the user: types table, layout, segment count estimate,

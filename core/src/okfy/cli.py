@@ -61,6 +61,10 @@ def main(argv=None) -> int:
     p.add_argument("--strict-execution", action="store_true",
                    help="every job artifact must attest model/provider/sampling/"
                         "harness_version (new extractions; pre-v0.10 bundles warn)")
+    p.add_argument("--strict-schema", action="store_true",
+                   help="every concept type must be declared — in "
+                        "meta/extraction-plan.md `types` if the archetype was "
+                        "adapted, else the archetype's canonical_types")
     p.add_argument("--quiet", action="store_true")
 
     p = sub.add_parser(

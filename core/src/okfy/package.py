@@ -9,19 +9,32 @@ from okfy.bundle import Bundle
 PRECOMMIT = """#!/bin/sh
 # okfy pre-commit: write-policy gate (ADR-0007) + Spec §9 conformance.
 # Sanctioned mutators (okfy review accept / okfy refine) commit --no-verify.
-POLICY=$(sed -n 's/^write_policy:[[:space:]]*//p' meta/purpose.md 2>/dev/null | head -1 | tr -d '\\r')
-if [ "$POLICY" = "proposals" ]; then
-  BLOCKED=$(git diff --cached --name-only --diff-filter=ACMRD -- '*.md' \\
-    | grep -vE '^(proposals|drafts)/' \\
-    | grep -vE '^(index|log|README|AGENTS|CLAUDE)\\.md$')
-  if [ -n "$BLOCKED" ]; then
-    echo "write_policy=proposals: direct concept edits are refused:" >&2
-    echo "$BLOCKED" >&2
-    echo "Agents: okfy propose. Owner: okfy refine / okfy review accept." >&2
+POLICY=$(sed -n 's/^write_policy:[[:space:]]*//p' meta/purpose.md 2>/dev/null | head -1 | tr -d '\\r"'"'"' ')
+# Fail-closed on anything that is not one of the two policies. This used to be a
+# bare `= proposals` test with no else-branch, so `proposal`, `PROPOSALS` or a
+# missing value left the gate inert while the bundle still read as gated.
+case "$POLICY" in
+  direct)
+    ;;                        # the owner opted into direct edits
+  proposals)
+    BLOCKED=$(git diff --cached --name-only --diff-filter=ACMRD -- '*.md' \\
+      | grep -vE '^(proposals|drafts)/' \\
+      | grep -vE '^(index|log|README|AGENTS|CLAUDE)\\.md$')
+    if [ -n "$BLOCKED" ]; then
+      echo "write_policy=proposals: direct concept edits are refused:" >&2
+      echo "$BLOCKED" >&2
+      echo "Agents: okfy propose. Owner: okfy refine / okfy review accept." >&2
+      echo "Deliberate bypass: git commit --no-verify" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "write_policy in meta/purpose.md is '$POLICY', not proposals|direct —" >&2
+    echo "refusing the commit rather than guessing which gate you meant." >&2
     echo "Deliberate bypass: git commit --no-verify" >&2
     exit 1
-  fi
-fi
+    ;;
+esac
 if command -v okfy >/dev/null 2>&1; then
   okfy validate . --quiet || { echo "okfy validate failed — fix or --no-verify"; exit 1; }
 fi
