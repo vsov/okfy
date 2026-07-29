@@ -122,8 +122,20 @@ def _check_provenance_complete(bundle: Bundle, problems: list, notes: list):
 
 
 def _check_eval(bundle: Bundle, problems: list, notes: list):
+    import json as _json
+
     from okfy.evaluation import eval_status, load_evals
-    runs = load_evals(bundle).get("runs") or []
+    try:
+        runs = load_evals(bundle).get("runs") or []
+    except (_json.JSONDecodeError, AttributeError, TypeError) as e:
+        # The eval record IS the acceptance evidence. Unreadable evidence is a
+        # failure of the record, and it has to say so rather than crash the
+        # predicate: "cannot check" must never reach the caller as an exception
+        # that a wrapper might swallow into a pass.
+        problems.append(f"E_REL_EVAL_INVALID: meta/eval.json cannot be read "
+                        f"({type(e).__name__}: {e}) — the acceptance evidence "
+                        "is unreadable, so no verdict in it can be trusted")
+        return
     if not runs:
         problems.append("E_REL_EVAL_MISSING: no eval runs recorded")
         return
@@ -141,14 +153,18 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
             f"{'is missing' if not recorded else 'does not match'} — the "
             "concept set, lexicon, test queries or tool changed after the "
             "run; re-run the eval and repeat the owner checkpoint")
-    acceptance = bundle.purpose().get("acceptance") or {}
+    acceptance = _acceptance(bundle)
     # NOT min(min_pass, t["of"]). The clamp silently rewrote the policy to fit
     # whatever the bundle happened to offer: one test query and one owner pass
     # satisfied a declared minimum of eight, and a negative minimum accepted a
     # bundle whose only query failed. A bar that adapts to the evidence is not a
     # bar. Too few queries to meet the bar is reported below as a surface
     # problem, which is what it is.
-    min_pass = int(acceptance.get("min_owner_pass", DEFAULT_MIN_OWNER_PASS))
+    raw_min = acceptance.get("min_owner_pass", DEFAULT_MIN_OWNER_PASS)
+    if isinstance(raw_min, bool) or not isinstance(raw_min, int):
+        # _check_acceptance_readable already reported it; do not also crash on it
+        return
+    min_pass = raw_min
     if t["passes_owner"] < min_pass:
         problems.append(f"E_REL_EVAL_POLICY: {t['passes_owner']}/{t['of']} "
                         f"owner passes < policy minimum {min_pass}")
@@ -157,6 +173,45 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
 
 
 MIN_TEST_QUERIES = 10
+
+
+def _acceptance(bundle: Bundle) -> dict:
+    """`acceptance` as a mapping, whatever is actually in the file.
+
+    Malformed evidence must produce a machine-readable FAIL, not a traceback.
+    `acceptance: "required"` used to reach `.get` and raise AttributeError, so
+    the only thing standing between a malformed bundle and a green result was the
+    process dying — which is fail-closed by accident, not by contract. The shape
+    itself is reported by validate (`E_ACCEPTANCE_SHAPE`) and surfaces here as
+    `E_REL_VALIDATE`; this helper only keeps the gates that follow readable."""
+    acc = bundle.purpose().get("acceptance")
+    return acc if isinstance(acc, dict) else {}
+
+
+def _check_acceptance_readable(bundle: Bundle, problems: list, notes: list):
+    """Every acceptance value the gates below will act on must be usable.
+
+    validate reports these too, but release-check must not depend on that: it is
+    the predicate other things call, so it owes them a verdict rather than an
+    exception."""
+    acc = bundle.purpose().get("acceptance")
+    if acc is not None and not isinstance(acc, dict):
+        problems.append(
+            f"E_REL_ACCEPTANCE_INVALID: meta/purpose.md `acceptance` is "
+            f"{type(acc).__name__}, not a mapping — the release policy cannot "
+            "be read, so nothing about it can be checked")
+        return
+    acc = acc or {}
+    v = acc.get("min_owner_pass", DEFAULT_MIN_OWNER_PASS)
+    if isinstance(v, bool) or not isinstance(v, int):
+        problems.append(
+            f"E_REL_ACCEPTANCE_INVALID: acceptance.min_owner_pass is "
+            f"{type(v).__name__} {v!r}, not an integer — the bar is unusable")
+    if acc.get("dissent") is not None and acc.get("dissent") != "required":
+        problems.append(
+            f"E_REL_ACCEPTANCE_INVALID: acceptance.dissent={acc['dissent']!r} "
+            "is not 'required' — the only value the dissent gate recognises, so "
+            "as written the contract is declared and never enforced")
 
 
 def _check_acceptance_surface(bundle: Bundle, problems: list, notes: list):
@@ -195,7 +250,7 @@ def _check_l3(bundle: Bundle, problems: list, notes: list):
         return
     fails = [x for x in (pf.meta.get("rows") or [])
              if isinstance(x, dict) and str(x.get("verdict")) == "fail"]
-    acceptance = bundle.purpose().get("acceptance") or {}
+    acceptance = _acceptance(bundle)
     if fails and not acceptance.get("allow_l3_fail"):
         problems.append(
             f"E_REL_L3_FAIL: {len(fails)} purpose-fitness fail verdict(s) "
@@ -216,7 +271,7 @@ def _check_dissent(bundle: Bundle, problems: list, notes: list):
     satisfies it. That limit is real and is stated in the notes."""
     from okfy.dissent import group_state
     from okfy.merge_audit import merge_groups, recover_drafts
-    acceptance = bundle.purpose().get("acceptance") or {}
+    acceptance = _acceptance(bundle)
     if str(acceptance.get("dissent") or "") != "required":
         return
     state, groups = merge_groups(bundle)
@@ -287,6 +342,7 @@ def release_check(bundle: Bundle) -> dict:
     notes: list[str] = []
     _check_validation(bundle, problems)
     _check_provenance_complete(bundle, problems, notes)
+    _check_acceptance_readable(bundle, problems, notes)
     _check_acceptance_surface(bundle, problems, notes)
     _check_eval(bundle, problems, notes)
     _check_l3(bundle, problems, notes)

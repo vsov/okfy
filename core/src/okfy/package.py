@@ -9,6 +9,13 @@ from okfy.bundle import Bundle
 PRECOMMIT = """#!/bin/sh
 # okfy pre-commit: write-policy gate (ADR-0007) + Spec §9 conformance.
 # Sanctioned mutators (okfy review accept / okfy refine) commit --no-verify.
+POLICY_LINES=$(grep -c '^write_policy:' meta/purpose.md 2>/dev/null || echo 0)
+if [ "$POLICY_LINES" != "1" ]; then
+  echo "meta/purpose.md declares write_policy $POLICY_LINES times — expected 1." >&2
+  echo "YAML keeps the last, this hook reads the first: two readers, two" >&2
+  echo "answers. Fix the frontmatter." >&2
+  exit 1
+fi
 POLICY=$(sed -n 's/^write_policy:[[:space:]]*//p' meta/purpose.md 2>/dev/null | head -1 | tr -d '\\r"'"'"' ')
 # Fail-closed on anything that is not one of the two policies. This used to be a
 # bare `= proposals` test with no else-branch, so `proposal`, `PROPOSALS` or a
@@ -86,10 +93,25 @@ Humans: start at [index.md](index.md). Agents: read [AGENTS.md](AGENTS.md).
 
 
 def render_agents_md(bundle: Bundle, archetype: Archetype) -> str:
+    """The consumption protocol an agent reads instead of the CLI.
+
+    Types and layout come from the PLAN when it declares them, because the plan
+    is what the bundle was actually built to. Rendering the archetype's canonical
+    list meant an adapted bundle shipped an AGENTS.md that omitted its own custom
+    types and advertised archetype types it does not contain — a consumption
+    contract describing a different bundle."""
     p = bundle.purpose()
     tmpl = Template((archetype.root / archetype.consumption_protocol).read_text(encoding="utf-8"))
-    types_rows = "\n".join(f"- **{t}** — files under `{archetype.layout.get(t, './')}`"
-                           for t in archetype.canonical_types)
+    plan = bundle.plan()
+    declared = (plan.meta.get("types") if plan else None)
+    types = ([str(t) for t in declared] if isinstance(declared, (dict, list))
+             else list(archetype.canonical_types))
+    layout = dict(archetype.layout)
+    plan_layout = (plan.meta.get("layout") if plan else None)
+    if isinstance(plan_layout, dict):
+        layout.update({str(k): str(v) for k, v in plan_layout.items()})
+    types_rows = "\n".join(f"- **{t}** — files under `{layout.get(t, './')}`"
+                           for t in types)
     return tmpl.substitute(
         purpose_title=p.get("title", ""), language=p.get("language", "en"),
         write_policy=p.get("write_policy", "proposals"), types_table=types_rows)

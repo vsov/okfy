@@ -7,7 +7,7 @@ from pathlib import Path
 
 from okfy import frontmatter
 from okfy.bundle import Bundle
-from okfy.lexicon import STATUSES
+from okfy.lexicon import row_problems
 from okfy.update import _embedded_prefix, _source_path
 
 DATE_HEADING_RE = re.compile(r"^## (.+)$", re.MULTILINE)
@@ -167,7 +167,11 @@ ACCEPTANCE_KEYS = {
     "min_owner_pass": int,
     "allow_l3_fail": bool,
     "allow_open_dissent": bool,
-    "dissent": str,
+    # a tuple is an enum of permitted VALUES, not just a type. `dissent: str`
+    # closed the key and left the value open, and release.py runs that gate only
+    # on the exact literal `required` — so `requierd` passed the schema and
+    # turned the whole dissent contract off while reading as if it were on.
+    "dissent": ("required",),
 }
 
 
@@ -214,6 +218,13 @@ def _check_acceptance(bundle: Bundle, r: Report):
                   "policy that silently does nothing")
             continue
         want = ACCEPTANCE_KEYS[k]
+        if isinstance(want, tuple):
+            if v not in want:
+                r.add("error", "E_ACCEPTANCE_VALUE", p.id,
+                      f"acceptance.{k}={v!r} is not one of {list(want)} — the "
+                      "release gate keys off the exact value, so a near-miss "
+                      "turns the contract off while it still reads as declared")
+            continue
         # bool is a subclass of int; an accidental `min_owner_pass: true` must
         # not read as 1
         if want is int and (isinstance(v, bool) or not isinstance(v, int)):
@@ -234,6 +245,13 @@ def _check_acceptance(bundle: Bundle, r: Report):
                   "(the number of test_queries) — a bar below 1 accepts a "
                   "bundle whose every query failed, and one above the query "
                   "count can never be met")
+    # An escape hatch for a gate that was never turned on is not an escape
+    # hatch; it is a declaration the reader will trust and nothing will honour.
+    if acc.get("allow_open_dissent") and acc.get("dissent") != "required":
+        r.add("error", "E_ACCEPTANCE_INERT", p.id,
+              "acceptance.allow_open_dissent is set but acceptance.dissent is "
+              "not 'required', so the dissent gate never runs and the waiver "
+              "excuses nothing — declare the contract or drop the hatch")
 
 
 def _check_types(bundle: Bundle, concepts, archetype, r: Report,
@@ -530,33 +548,14 @@ def _check_lexicon(concepts, r: Report):
         return
     ids = {c.id for c in concepts}
     for row in rows:
+        # shape comes from lexicon.row_problems — the same predicate load_rows
+        # enforces, so a row validate calls clean can never make query raise
+        for msg in row_problems(row):
+            code = "W_LEXICON_STATUS" if "bad status" in msg else "W_LEXICON_ROW"
+            r.add("warning", code, lex.id, msg)
         if not isinstance(row, dict):
-            r.add("warning", "W_LEXICON_ROW", lex.id,
-                  f"row must be a mapping, got {type(row).__name__}: {row!r}")
             continue
         term = row.get("term")
-        status = row.get("status")
-        if not isinstance(term, str) or not term.strip():
-            r.add("warning", "W_LEXICON_ROW", lex.id,
-                  f"row has no usable term: {row!r}")
-        if status not in STATUSES:
-            r.add("warning", "W_LEXICON_STATUS", lex.id,
-                  f"row {term!r}: unknown status {status!r} (use: {sorted(STATUSES)})")
-        for f in ("language", "note"):
-            if f in row and not isinstance(row[f], str):
-                r.add("warning", "W_LEXICON_ROW", lex.id,
-                      f"row {term!r}: {f} must be a string, got "
-                      f"{type(row[f]).__name__}")
-        # A scalar here is not a near-miss that fails quietly: expand() iterates
-        # it, so a string maps_to becomes one hard retrieval pin PER CHARACTER
-        # and a string canonical_terms appends its letters to the query.
-        for f in ("maps_to", "canonical_terms"):
-            v = row.get(f)
-            if v is not None and not isinstance(v, list):
-                r.add("warning", "W_LEXICON_ROW", lex.id,
-                      f"row {term!r}: {f} must be a list, got "
-                      f"{type(v).__name__} {v!r} — expansion iterates it "
-                      "character by character")
         maps_to = row.get("maps_to") or []
         for target in maps_to if isinstance(maps_to, list) else [maps_to]:
             if not isinstance(target, str) or target not in ids:

@@ -8,6 +8,53 @@ from okfy.bundle import Bundle
 STATUSES = {"accepted", "ambiguous", "not-covered"}
 
 
+TEXT_FIELDS = ("term", "language", "note")
+LIST_FIELDS = ("maps_to", "canonical_terms")
+
+
+def row_problems(row) -> list[str]:
+    """The row schema, in ONE place.
+
+    `validate` reports these and `load_rows` refuses them, and both must agree —
+    checking the container in one module and the elements in the other is how
+    `canonical_terms: [123]` reached `' '.join(extra)` and made a query raise
+    TypeError on an otherwise accepted bundle. The shape lives here; whether a
+    `maps_to` target actually exists is a bundle-level question and stays in
+    validate, which is the layer that knows the concept ids."""
+    if not isinstance(row, dict):
+        return [f"row must be a mapping, got {type(row).__name__}: {row!r}"]
+    out = []
+    term = row.get("term")
+    if not isinstance(term, str) or not term.strip():
+        out.append(f"row has no usable term: {row!r}")
+    if row.get("status") not in STATUSES:
+        out.append(f"row {term!r}: bad status {row.get('status')!r} "
+                   f"(use: {sorted(STATUSES)})")
+    for f in TEXT_FIELDS[1:]:
+        if f in row and not isinstance(row[f], str):
+            out.append(f"row {term!r}: {f} must be a string, got "
+                       f"{type(row[f]).__name__}")
+    for f in LIST_FIELDS:
+        v = row.get(f)
+        if v is None:
+            continue
+        # expand() iterates these, so a scalar does not degrade gracefully: a
+        # string maps_to yields one hard pin per character
+        if not isinstance(v, list):
+            out.append(f"row {term!r}: {f} must be a list, got "
+                       f"{type(v).__name__} {v!r} — a scalar expands character "
+                       "by character")
+            continue
+        # ...and every element is interpolated into a query or used as a concept
+        # id, so a non-string element is a crash waiting for the query that
+        # matches this term
+        for i, el in enumerate(v):
+            if not isinstance(el, str) or not el.strip():
+                out.append(f"row {term!r}: {f}[{i}] must be a non-empty "
+                           f"string, got {type(el).__name__} {el!r}")
+    return out
+
+
 def load_rows(bundle: Bundle) -> list[dict]:
     c = bundle.get("meta/lexicon")
     if c is None:
@@ -16,22 +63,9 @@ def load_rows(bundle: Bundle) -> list[dict]:
     if not isinstance(rows, list):
         raise ValueError("lexicon rows must be a list")
     for r in rows:
-        status = r.get("status") if isinstance(r, dict) else None
-        if status not in STATUSES:
-            term = r.get("term") if isinstance(r, dict) else r
-            raise ValueError(f"lexicon row for term {term!r}: bad status {status!r} "
-                             f"(use: {sorted(STATUSES)})")
-        # expand() iterates these. A scalar does not degrade gracefully: a string
-        # maps_to yields one hard pin per character and a string canonical_terms
-        # appends its letters to the query, so refuse it here rather than serve
-        # a query nobody can explain.
-        for f in ("maps_to", "canonical_terms"):
-            v = r.get(f)
-            if v is not None and not isinstance(v, list):
-                raise ValueError(
-                    f"lexicon row for term {r.get('term')!r}: {f} must be a "
-                    f"list, got {type(v).__name__} {v!r} — a scalar expands "
-                    "character by character")
+        problems = row_problems(r)
+        if problems:
+            raise ValueError("lexicon: " + "; ".join(problems))
     return rows
 
 
