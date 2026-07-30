@@ -152,8 +152,15 @@ def package(bundle: Bundle, archetype: Archetype) -> None:
     (bundle.root / "meta" / "package.json").write_text(json.dumps(
         {"schema": "okfy-package@1",
          "fingerprint": package_fingerprint(bundle)}) + "\n", encoding="utf-8")
+    # Refresh the retrieval cache here too. Packaging is the point at which the
+    # bundle's contents are declared final, and leaving the cache behind meant
+    # `refine → package → eval run → accept` recorded evidence gathered from a
+    # pre-edit index. `okfy index` and this are the only writers.
+    from okfy.index import build_index, save_index
+    save_index(bundle, build_index(bundle))
     install_precommit(bundle)
-    append_log(bundle, "package: regenerated index.md, README.md, AGENTS.md")
+    append_log(bundle, "package: regenerated index.md, README.md, AGENTS.md, "
+                       "retrieval index")
 
 
 def package_workspace(ws) -> None:

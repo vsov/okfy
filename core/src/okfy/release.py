@@ -9,9 +9,11 @@ completeness predicates:
    it. Bundles extracted before the job chain existed can declare
    `provenance: legacy` in meta/purpose.md — reported, never silent.
 2. Eval currency — the latest eval run must be owner-complete AND carry a
-   retrieval_fingerprint matching the bundle's current retrieval contract
-   (concept set, test queries, lexicon, tool version). A concept/lexicon/
-   purpose edit after the run makes it stale evidence, not acceptance.
+   retrieval_fingerprint matching the bundle's current retrieval contract: the
+   digest of the deterministic live index, the normalised lexicon rows, the
+   test queries, and the bytes of the retrieval modules (`okfy-retrieval@2`).
+   A concept/lexicon/purpose edit after the run makes it stale evidence, not
+   acceptance.
 3. Acceptance policy — owner passes must meet the bundle's own bar
    (meta/purpose.md `acceptance.min_owner_pass`, default 8) and L3
    purpose-fitness must carry no `fail` verdicts unless the policy explicitly
@@ -22,26 +24,65 @@ this module is the machine predicate for accepted."""
 import hashlib
 import json
 
-from okfy import __version__
 from okfy.bundle import Bundle
 
 DEFAULT_MIN_OWNER_PASS = 8
 
 
+FINGERPRINT_SCHEMA = "okfy-retrieval@2"
+# The modules that decide what a query returns. Hashing their bytes replaces
+# `tool_version`, which was both too coarse and too broad: a patch touching the
+# CLI help text invalidated every recorded eval, while a change to ranking inside
+# an unchanged version would not have been noticed at all.
+RETRIEVAL_MODULES = ("bm25.py", "index.py", "lexicon.py", "query.py")
+
+
+def retrieval_code_digest() -> str:
+    from pathlib import Path
+
+    import okfy
+    root = Path(okfy.__file__).parent
+    lines = [f"{n}:{hashlib.sha256((root / n).read_bytes()).hexdigest()}"
+             for n in sorted(RETRIEVAL_MODULES)]
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
 def retrieval_fingerprint(bundle: Bundle) -> str:
-    """Fingerprint of everything that shapes retrieval answers and the test
-    contract: non-meta concept set (package fingerprint), purpose test
-    queries, raw lexicon file, tool version. Any change → old eval is stale."""
-    from okfy.validate import package_fingerprint
-    lex = bundle.root / "meta" / "lexicon.md"
-    lex_sha = (hashlib.sha256(lex.read_bytes()).hexdigest()
-               if lex.is_file() else "")
+    """Fingerprint of everything that decides what a query returns.
+
+    Four inputs, and the reason for each:
+
+    - the digest of the DETERMINISTIC live index (`build_index`, never the
+      gitignored cache), so the evidence is pinned to the retrievable content
+      rather than to a derived file that may be missing or out of date — and
+      narrowed to non-meta concepts, which is what an eval run actually queries;
+    - the NORMALISED lexicon rows, not the file's bytes: reflowing prose or
+      reordering keys no longer invalidates a recorded eval, while a semantic
+      change to expansion still does;
+    - the purpose test queries, which are the contract being judged;
+    - the bytes of the retrieval modules themselves.
+
+    `okfy-retrieval@2` is in the payload, so runs recorded under the old scheme
+    stay stale by construction — they were judged against a different definition
+    of "the same bundle", and silently accepting them would be the fail-open this
+    replaces."""
+    from okfy.index import build_index, retrieval_digest
+    from okfy.lexicon import load_rows
+    idx = build_index(bundle)
+    try:
+        rows = load_rows(bundle)
+        lexicon = [{k: r[k] for k in sorted(r)} for r in rows]
+    except (ValueError, AttributeError, TypeError) as e:
+        # A malformed lexicon still has to yield a stable fingerprint: validate
+        # reports the malformation, and this must not raise inside a predicate.
+        lexicon = [{"__unreadable__": f"{type(e).__name__}: {e}"}]
     payload = json.dumps({
-        "concepts": package_fingerprint(bundle),
+        "fingerprint_schema": FINGERPRINT_SCHEMA,
+        "index": retrieval_digest(idx),
+        "lexicon_rows": lexicon,
         "test_queries": [str(q) for q in
                          (bundle.purpose().get("test_queries") or [])],
-        "lexicon_sha256": lex_sha,
-        "tool_version": __version__,
+        "retrieval_code": retrieval_code_digest(),
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -151,8 +192,10 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
         problems.append(
             "E_REL_EVAL_STALE: latest eval run's retrieval_fingerprint "
             f"{'is missing' if not recorded else 'does not match'} — the "
-            "concept set, lexicon, test queries or tool changed after the "
-            "run; re-run the eval and repeat the owner checkpoint")
+            "live index, lexicon rows, test queries or retrieval code changed "
+            "after the run — or the run predates "
+            f"{FINGERPRINT_SCHEMA}; re-run the eval and repeat the owner "
+            "checkpoint")
     acceptance = _acceptance(bundle)
     # NOT min(min_pass, t["of"]). The clamp silently rewrote the policy to fit
     # whatever the bundle happened to offer: one test query and one owner pass

@@ -1,6 +1,6 @@
 [project]
 name = "okfy-mcp"
-version = "0.11.1"
+version = "0.12.0"
 description = "MCP stdio adapter for OKFy knowledge bundles"
 license = "Apache-2.0"
 requires-python = ">=3.11"

@@ -401,6 +401,25 @@ A `split` **stays open**. It is an unresolved objection, not a justification, so
 
 One limit, stated plainly and repeated by the check itself in its output: **this verifies that adjudication happened, never that it was rigorous.** An adjudicator stamping `no-schism` on every group satisfies the gate completely. Requiring a source anchor on every row raises the cost of a lazy pass, but no machine check can establish that a judgement was made in good faith. Treat a green dissent gate as evidence that the question was asked, not that it was answered well.
 
+### What the eval was judged against: the retrieval contract
+
+An eval run is only evidence if you can say what produced it. For several versions the answer was incomplete in a way that mattered: `retrieval_fingerprint` covered the concept set, the test queries, the lexicon file's bytes and the tool version — and **not the index**, while `okfy query` answered from `.okfy-cache/index.json` without checking it against anything. Two consequences, both reproduced before being fixed. `release-check` was green on a bundle whose index file had been emptied — zero hits for every query — and green with no index file at all. Worse, because nothing but `okfy index` ever rebuilt the cache, the ordinary sequence `okfy refine` → `okfy package` → `okfy eval run` → owner verdicts → `release-check` ended green with the accepted evidence naming a different top answer than a live query would give. No tampering; just a derived file nobody refreshed.
+
+**The cache is not the fix, and must not become evidence.** It is gitignored, never travels with the bundle, and is derived by definition. So what enters the contract is the digest of the *deterministic* `build_index(bundle)`, recomputed from the concepts every time it is needed. The cache is a speed-up that may be refused:
+
+- `build_index` returns an envelope — `schema`, `source_fingerprint`, `content_fingerprint`, `concepts`.
+- `source_fingerprint` hashes the bytes of every file that enters the index, `meta/*` included. It is deliberately not `package_fingerprint`, which skips meta: an index containing meta concepts whose freshness check ignored them would call a cache current after `meta/lexicon.md` changed. Hashing without parsing keeps the check cheaper than the rebuild it protects.
+- `load_index` reports *why* a cache is unusable — `missing`, `corrupt`, `foreign-schema`, `stale` — and builds fresh in memory for anything but `usable`. It never writes. Only `okfy index` and `okfy package` write the cache, so a read command cannot silently repair state under a reader.
+- `okfy package` now saves a fresh index, because packaging is the point where contents are declared final.
+
+`retrieval_fingerprint` is `okfy-retrieval@2`, and each of its four inputs answers a specific failure. The **live index digest**, so the evidence is pinned to retrievable content instead of a file that may be absent. The **normalised lexicon rows** rather than the file's bytes, so reflowing prose or reordering keys is not a retrieval change while a semantic one still is. The **test queries**, which are the contract being judged. And the **bytes of `bm25.py`, `index.py`, `lexicon.py`, `query.py`** — replacing `tool_version`, which was simultaneously too broad (a patch to CLI help text invalidated every recorded eval everywhere) and too narrow (a ranking change inside one version invalidated nothing).
+
+One narrowing is worth stating because it is easy to get backwards. The contract digest covers **non-meta** concepts only. Meta concepts live in the index so `query --include-meta` can reach them, but an eval run queries without it — and digesting them would put `meta/lexicon.md`'s human-readable prose into the acceptance contract, which makes normalising the rows pointless. Pin what the evidence was actually gathered from.
+
+A schema string in the payload means runs recorded under the old definition stay stale rather than being silently honoured. That cost is real — every bundle needs one fresh eval run and one owner checkpoint — and it is the correct cost: those runs were judged against a different definition of "the same bundle". What is bought afterwards is that irrelevant version bumps stop invalidating evidence.
+
+The honest limit: the envelope detects staleness and corruption, not forgery. Someone who can write a self-consistent cache could also edit the concepts, and defending a local derived file against its owner is not the goal. What matters is that the *gate* never reads the cache at all.
+
 ### The declarations are contracts: schema closures
 
 Four of these mechanisms were configured by a *string*, and a string is not a contract. An external audit reproduced all four as working bypasses, and the fix in each case is the same shape: a closed set instead of an open field.
