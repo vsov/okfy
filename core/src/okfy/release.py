@@ -35,6 +35,8 @@ FINGERPRINT_SCHEMA = "okfy-retrieval@2"
 # CLI help text invalidated every recorded eval, while a change to ranking inside
 # an unchanged version would not have been noticed at all.
 RETRIEVAL_MODULES = ("bm25.py", "index.py", "lexicon.py", "query.py")
+# The lexicon fields expand() reads. Everything else in a row is documentation.
+EXPANSION_FIELDS = ("term", "status", "maps_to", "canonical_terms")
 
 
 def retrieval_code_digest() -> str:
@@ -71,7 +73,11 @@ def retrieval_fingerprint(bundle: Bundle) -> str:
     idx = build_index(bundle)
     try:
         rows = load_rows(bundle)
-        lexicon = [{k: r[k] for k in sorted(r)} for r in rows]
+        # Only the fields expansion actually reads. `language`, `note` and any
+        # unknown key are documentation, and letting them into the contract
+        # invalidated a recorded eval for an edit that cannot change an answer.
+        lexicon = [{k: r.get(k) for k in EXPANSION_FIELDS if k in r}
+                   for r in rows]
     except (ValueError, AttributeError, TypeError) as e:
         # A malformed lexicon still has to yield a stable fingerprint: validate
         # reports the malformation, and this must not raise inside a predicate.
@@ -186,7 +192,27 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
         problems.append(f"E_REL_EVAL_PROVISIONAL: latest run "
                         f"{st['run_id']} — {t['owner_confirmed']}/{t['of']} "
                         f"owner verdicts recorded")
-    recorded = runs[-1].get("retrieval_fingerprint")
+    # An eval run has to say how it was invoked. Without it the record cannot be
+    # replayed, and `-n 0` produced ten queries with zero hits each, ten owner
+    # passes over nothing, and a green release.
+    latest = runs[-1]
+    opts = latest.get("query_options")
+    if latest.get("retrieval_schema") == FINGERPRINT_SCHEMA:
+        if not isinstance(opts, dict):
+            problems.append(
+                "E_REL_EVAL_INVALID: the latest eval run records no "
+                "query_options — how it was invoked is part of the evidence, "
+                "and a run that cannot be replayed cannot be acceptance")
+        elif not isinstance(opts.get("n"), int) or isinstance(opts.get("n"), bool) \
+                or opts["n"] < 1:
+            problems.append(
+                f"E_REL_EVAL_INVALID: the latest eval run recorded "
+                f"query_options.n={opts.get('n')!r} — a run that retrieves "
+                "nothing cannot have been judged")
+        else:
+            notes.append(f"eval invocation: {latest.get('suite', 'acceptance')} "
+                         f"suite, {opts['n']} top hits per query")
+    recorded = latest.get("retrieval_fingerprint")
     current = retrieval_fingerprint(bundle)
     if recorded != current:
         problems.append(

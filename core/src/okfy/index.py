@@ -97,19 +97,62 @@ def index_path(bundle: Bundle):
 
 
 def save_index(bundle: Bundle, idx: dict) -> None:
-    """Write the cache. Only `okfy index` and `okfy package` call this — read
-    commands must stay read-only, so a stale cache is worked around in memory
-    rather than silently repaired under a reader."""
+    """Write the cache AND the digests that make it trustable.
+
+    Only `okfy index` and `okfy package` call this — read commands must stay
+    read-only, so a stale cache is worked around in memory rather than silently
+    repaired under a reader.
+
+    The manifest half matters as much as the cache half: the expected digests go
+    into `meta/package.json`, which is tracked, so re-anchoring what the cache is
+    allowed to claim requires a change that shows up in a diff. A cache written
+    without updating the manifest is simply refused."""
     p = index_path(bundle)
     p.parent.mkdir(exist_ok=True)
     p.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+    mp = bundle.root / "meta" / "package.json"
+    if not mp.is_file():
+        return          # `okfy package` will write the whole manifest
+    try:
+        data = json.loads(mp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    data["index_content_fingerprint"] = idx.get("content_fingerprint")
+    data["retrieval_digest"] = retrieval_digest(idx)
+    mp.write_text(json.dumps(data, indent=None) + "\n", encoding="utf-8")
+
+
+def manifest_digests(bundle: Bundle) -> dict:
+    """The index digests recorded in the TRACKED `meta/package.json`.
+
+    The cache's own envelope can only prove internal consistency: a payload of
+    `{"concepts": []}` carrying the correct `content_fingerprint` of that empty
+    list and the correct live `source_fingerprint` satisfied every check the
+    envelope could make, so `okfy query` answered nothing while a fresh
+    `build_index` — which is what `retrieval_fingerprint` hashes — held six
+    concepts. Evidence and fingerprint described different indexes.
+
+    The missing piece is an assertion, made outside the cache, about what
+    `build_index` is SUPPOSED to produce. `meta/package.json` is versioned in the
+    bundle's git history, so putting the expected digests there means a cache can
+    only be trusted against a claim that is itself reviewable in a diff."""
+    p = bundle.root / "meta" / "package.json"
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def cache_state(bundle: Bundle) -> tuple[str, dict | None]:
     """Why the cache can or cannot be used: `usable`, `missing`, `corrupt`,
-    `foreign-schema`, or `stale`. Named states rather than a bool, because
-    'cannot use the cache' is a different fact from 'the bundle is empty' and the
-    two used to be indistinguishable."""
+    `foreign-schema`, `stale`, or `unmanifested`. Named states rather than a
+    bool, because 'cannot use the cache' is a different fact from 'the bundle is
+    empty' and the two used to be indistinguishable."""
     p = index_path(bundle)
     if not p.is_file():
         return "missing", None
@@ -126,6 +169,14 @@ def cache_state(bundle: Bundle) -> tuple[str, dict | None]:
         return "corrupt", None
     if cached.get("source_fingerprint") != source_fingerprint(bundle):
         return "stale", None
+    # ...and the payload must be what the tracked manifest says build_index
+    # produces. Without this the envelope only proved the cache agreed with
+    # itself.
+    expected = manifest_digests(bundle).get("index_content_fingerprint")
+    if not expected:
+        return "unmanifested", None
+    if expected != cached["content_fingerprint"]:
+        return "unmanifested", None
     return "usable", cached
 
 
@@ -137,7 +188,11 @@ def load_index(bundle: Bundle) -> dict:
     answer (`{"concepts": []}` returned zero hits) while `release-check` stayed
     green. The cache is derived and gitignored; it is a speed-up, never
     evidence. Anything but a verified-fresh cache falls back to a fresh
-    in-memory build: slower, and right."""
+    in-memory build: slower, and right.
+
+    Note the consequence, which is deliberate: while `meta/package.json` is
+    absent or out of date, the cache is refused and every read rebuilds. The
+    cache is a speed-up only for a bundle whose package manifest is current."""
     state, cached = cache_state(bundle)
     if state == "usable":
         return cached

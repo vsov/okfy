@@ -1,7 +1,8 @@
 import sys
 
 from okfy.bundle import Bundle
-from okfy.query import links, query, sample_for_review, show
+from okfy.query import links, query, show
+from okfy.sampling import sample_for_review
 from okfy.workspace import Workspace, is_workspace
 
 from .common import _print

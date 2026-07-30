@@ -7,6 +7,13 @@ from okfy.guard import GuardError
 from okfy.segment import DEFAULT_BUDGET
 
 
+def _positive_int(v: str) -> int:
+    n = int(v)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="okfy")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -135,7 +142,9 @@ def main(argv=None) -> int:
     p = sub.add_parser("eval")
     esub = p.add_subparsers(dest="ecmd", required=True)
     e = esub.add_parser("run");     e.add_argument("bundle", type=Path)
-    e.add_argument("-n", type=int, default=10)
+    e.add_argument("-n", type=_positive_int, default=10,
+                   help="top hits recorded per query (>= 1): a run that "
+                        "retrieves nothing cannot be judged")
     e = esub.add_parser("verdict"); e.add_argument("bundle", type=Path)
     e.add_argument("run", help="run_id or 'latest'")
     e.add_argument("q_index", type=int, metavar="q-idx")

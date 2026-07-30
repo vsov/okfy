@@ -663,7 +663,7 @@ def _check_quality(bundle: Bundle, archetype, r: Report, strict: bool = False):
                       f"row for {sid} x {chk}: evidence is empty")
     # replay: if the corpus hasn't moved (seed still current) the deterministic
     # sample must be covered; a moved corpus is not replayable — skip silently.
-    from okfy.query import SELECTOR_VERSION, _selector_seed, sample_for_review
+    from okfy.sampling import SELECTOR_VERSION, _selector_seed, sample_for_review
     if (str(c.meta.get("seed")) == _selector_seed(bundle)
             and c.meta.get("selector_version") == SELECTOR_VERSION):
         rerun = sample_for_review(

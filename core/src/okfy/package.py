@@ -149,15 +149,22 @@ def package(bundle: Bundle, archetype: Archetype) -> None:
     (bundle.root / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
     # fingerprint of the concept set the generated docs describe — any later
     # mutation makes the package provably stale (validate --strict-package)
-    (bundle.root / "meta" / "package.json").write_text(json.dumps(
-        {"schema": "okfy-package@1",
-         "fingerprint": package_fingerprint(bundle)}) + "\n", encoding="utf-8")
     # Refresh the retrieval cache here too. Packaging is the point at which the
     # bundle's contents are declared final, and leaving the cache behind meant
     # `refine → package → eval run → accept` recorded evidence gathered from a
     # pre-edit index. `okfy index` and this are the only writers.
-    from okfy.index import build_index, save_index
-    save_index(bundle, build_index(bundle))
+    from okfy.index import build_index, retrieval_digest, save_index
+    idx = build_index(bundle)
+    # The manifest is tracked, so the digests it records are the reviewable claim
+    # about what build_index produces — which is what makes the gitignored cache
+    # trustable at all. Written before save_index so the cache lands against a
+    # manifest that already describes it.
+    (bundle.root / "meta" / "package.json").write_text(json.dumps(
+        {"schema": "okfy-package@1",
+         "fingerprint": package_fingerprint(bundle),
+         "index_content_fingerprint": idx["content_fingerprint"],
+         "retrieval_digest": retrieval_digest(idx)}) + "\n", encoding="utf-8")
+    save_index(bundle, idx)
     install_precommit(bundle)
     append_log(bundle, "package: regenerated index.md, README.md, AGENTS.md, "
                        "retrieval index")

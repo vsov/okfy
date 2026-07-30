@@ -54,10 +54,25 @@ def _find_run(data: dict, run_id: str) -> dict:
     raise KeyError(f"eval run not found: {run_id}")
 
 
+MIN_TOP_HITS = 1
+
+
 def eval_run(bundle: Bundle, n: int = 10) -> dict:
     """Deterministic half of an Eval Run: purpose.md test queries → expansion
     → top hits, appended to meta/eval.json. Verdicts land later via
-    eval_verdict — the LLM-judge proposes, the owner disposes."""
+    eval_verdict — the LLM-judge proposes, the owner disposes.
+
+    The invocation is recorded, not just its output. `n` used to be accepted and
+    forgotten, so `okfy eval run -n 0` produced ten queries with zero hits each,
+    ten owner passes over nothing, and a green release — the same
+    shrink-the-evidence move that `E_REL_EVAL_SURFACE` closed on the query count.
+    A run that cannot say how it was invoked is not replayable, and evidence that
+    is not replayable is not evidence."""
+    if not isinstance(n, int) or isinstance(n, bool) or n < MIN_TOP_HITS:
+        raise ValueError(
+            f"eval run needs n >= {MIN_TOP_HITS} top hits per query, got {n!r} — "
+            "a run that retrieves nothing cannot be judged, and owner verdicts "
+            "over empty results are not acceptance evidence")
     queries = bundle.purpose().get("test_queries") or []
     if not queries:
         raise ValueError(
@@ -78,9 +93,17 @@ def eval_run(bundle: Bundle, n: int = 10) -> dict:
     # pin the retrieval contract this run was judged against: a later
     # concept/lexicon/test-query/tool change makes the run stale evidence
     # (release_check compares this against the live bundle)
-    from okfy.release import retrieval_fingerprint
+    from okfy.release import FINGERPRINT_SCHEMA, retrieval_fingerprint
     run = {"run_id": ts, "tool_version": __version__, "created": ts,
+           "retrieval_schema": FINGERPRINT_SCHEMA,
            "retrieval_fingerprint": retrieval_fingerprint(bundle),
+           # how the queries were asked, not only what came back. `suite` names
+           # what this run is evidence FOR — today only the acceptance queries
+           # from purpose.md exist, and an adversarial suite slots in here rather
+           # than in a second ledger.
+           "suite": "acceptance",
+           "query_options": {"n": n, "expand": True, "include_meta": False,
+                             "include_stale": True},
            "results": results}
     data = load_evals(bundle)
     data["runs"].append(run)
