@@ -85,6 +85,48 @@ def _find_run(data: dict, run_id: str, suite: str = "acceptance") -> dict:
 MIN_TOP_HITS = 1
 
 
+ADVERSARIAL_KEYS = {"query", "expect", "concept", "why"}
+
+
+def adversarial_row_problems(row, valid_target=None) -> list[str]:
+    """The adversarial-query schema, in ONE place.
+
+    Bundles name a bare concept id, workspaces a `member:concept-id` ref, so the
+    caller supplies `valid_target`. Everything else — the closed key set, the
+    value enum, `concept` required exactly when `expect` is `covered` — is the
+    same predicate for both, because splitting it is how the lexicon container
+    check and its element check came apart."""
+    if not isinstance(row, dict):
+        return [f"must be a mapping with query/expect/why, got "
+                f"{type(row).__name__} {row!r} — a bare string carries no "
+                "expectation, so nothing about it can be falsified"]
+    out = [f"unknown key {k!r} (known: {sorted(ADVERSARIAL_KEYS)})"
+           for k in sorted(set(row) - ADVERSARIAL_KEYS)]
+    for f in ("query", "why"):
+        if not isinstance(row.get(f), str) or not row.get(f, "").strip():
+            out.append(f"{f} must be a non-empty string" +
+                       ("" if f == "query" else
+                        " — state why this query is adversarial, or the suite "
+                        "records an answer to a question nobody framed"))
+    expect = row.get("expect")
+    if expect not in EXPECTATIONS:
+        out.append(f"expect must be one of {list(EXPECTATIONS)}, got {expect!r}")
+        return out
+    concept = row.get("concept")
+    if expect == "covered":
+        if not isinstance(concept, str) or not concept.strip():
+            out.append("concept is required when expect is 'covered' — the "
+                       "expectation is that THIS concept comes back")
+        elif valid_target is not None and not valid_target(concept):
+            out.append(f"concept is not reachable in this bundle/workspace: "
+                       f"{concept} — an expectation nothing can satisfy is not "
+                       "a test, it is a guaranteed failure")
+    elif concept is not None:
+        out.append("concept is set but expect is 'not-covered', so it is never "
+                   "read — a field nothing honours reads as a claim")
+    return out
+
+
 def adversarial_outcome(spec: dict, out: dict) -> dict:
     """The DETERMINISTIC half of an adversarial result: did the declared
     expectation hold?

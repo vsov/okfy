@@ -292,7 +292,8 @@ def _check_acceptance_readable(bundle: Bundle, problems: list, notes: list):
             "as written the contract is declared and never enforced")
 
 
-def _surface_problems(queries: list, field: str) -> list:
+def _surface_problems(queries: list, field: str,
+                      where: str = "meta/purpose.md") -> list:
     """Shared shape check for an acceptance surface: enough of them, none blank,
     none a duplicate. Both suites are judged the same way — a bar is meaningless
     on a surface smaller than itself whichever set of questions it covers."""
@@ -301,7 +302,7 @@ def _surface_problems(queries: list, field: str) -> list:
     blank = sum(1 for q in texts if not q.strip())
     normalised = {" ".join(q.lower().split()) for q in texts if q.strip()}
     if len(texts) < MIN_TEST_QUERIES:
-        out.append(f"{len(texts)} {field} in meta/purpose.md, "
+        out.append(f"{len(texts)} {field} in {where}, "
                    f"{MIN_TEST_QUERIES} required for release — the acceptance "
                    "bar is meaningless on a surface smaller than itself")
     if blank:

@@ -32,8 +32,16 @@ def cmd_validate(a) -> int:
 
 
 def cmd_release_check(a) -> int:
-    from okfy.release import release_check
-    out = release_check(Bundle(a.bundle))
+    """Auto-detects a workspace, the same way `okfy query` does — the artifact
+    decides which predicate applies, so a workspace path can never silently get
+    the (weaker, wrong) single-bundle answer."""
+    from okfy.workspace import Workspace, is_workspace
+    if is_workspace(a.bundle):
+        from okfy.ws_release import workspace_release_check
+        out = workspace_release_check(Workspace.load(a.bundle))
+    else:
+        from okfy.release import release_check
+        out = release_check(Bundle(a.bundle))
     _print(out)
     return 0 if out["ok"] else 1
 

@@ -10,9 +10,19 @@ from .common import _print
 
 
 def cmd_eval(a) -> int:
-    b = Bundle(a.bundle)
+    """`eval run` on a workspace replays its cross-bundle queries through the
+    FEDERATED path; verdict and status are shared — they only need `.root`."""
+    from okfy.workspace import Workspace, is_workspace
+    if is_workspace(a.bundle):
+        b = Workspace.load(a.bundle)
+    else:
+        b = Bundle(a.bundle)
     if a.ecmd == "run":
-        _print(eval_run(b, n=a.n, suite=a.suite))
+        if is_workspace(a.bundle):
+            from okfy.ws_release import ws_eval_run
+            _print(ws_eval_run(b, n=a.n, suite=a.suite))
+        else:
+            _print(eval_run(b, n=a.n, suite=a.suite))
     elif a.ecmd == "verdict":
         _print(eval_verdict(b, a.run, a.q_index, a.role, a.verdict,
                             a.reason or "", suite=a.suite))

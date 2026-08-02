@@ -261,9 +261,6 @@ def _check_acceptance(bundle: Bundle, r: Report):
               "excuses nothing — declare the contract or drop the hatch")
 
 
-ADVERSARIAL_KEYS = {"query", "expect", "concept", "why"}
-
-
 def _check_adversarial(bundle: Bundle, concepts, r: Report):
     """`adversarial_queries` is a closed schema, for the same reason every other
     declaration here is one.
@@ -272,8 +269,9 @@ def _check_adversarial(bundle: Bundle, concepts, r: Report):
     the suite from ten more questions judged by the same person in the same
     sitting. If the expectation may be misspelled, absent, or point at a concept
     that does not exist, the criterion evaporates and the suite is back to vibes
-    with extra ceremony."""
-    from okfy.evaluation import EXPECTATIONS
+    with extra ceremony. The predicate itself lives in `evaluation` so the
+    workspace suite cannot drift away from this one."""
+    from okfy.evaluation import adversarial_row_problems
     p = bundle.get("meta/purpose")
     if p is None:
         return
@@ -286,44 +284,11 @@ def _check_adversarial(bundle: Bundle, concepts, r: Report):
         return
     ids = {c.id for c in concepts}
     for i, row in enumerate(rows):
-        where = f"adversarial_queries[{i}]"
-        if not isinstance(row, dict):
-            r.add("error", "E_ADVERSARIAL_SHAPE", p.id,
-                  f"{where} must be a mapping with query/expect/why, got "
-                  f"{type(row).__name__} {row!r} — a bare string carries no "
-                  "expectation, so nothing about it can be falsified")
-            continue
-        for k in sorted(set(row) - ADVERSARIAL_KEYS):
-            r.add("error", "E_ADVERSARIAL_FIELD", p.id,
-                  f"{where}: unknown key {k!r} (known: {sorted(ADVERSARIAL_KEYS)})")
-        for f in ("query", "why"):
-            if not isinstance(row.get(f), str) or not row.get(f, "").strip():
-                r.add("error", "E_ADVERSARIAL_FIELD", p.id,
-                      f"{where}.{f} must be a non-empty string" +
-                      ("" if f == "query" else
-                       " — state why this query is adversarial, or the suite "
-                       "records an answer to a question nobody framed"))
-        expect = row.get("expect")
-        if expect not in EXPECTATIONS:
-            r.add("error", "E_ADVERSARIAL_FIELD", p.id,
-                  f"{where}.expect must be one of {list(EXPECTATIONS)}, got "
-                  f"{expect!r}")
-            continue
-        concept = row.get("concept")
-        if expect == "covered":
-            if not isinstance(concept, str) or not concept.strip():
-                r.add("error", "E_ADVERSARIAL_FIELD", p.id,
-                      f"{where}.concept is required when expect is 'covered' — "
-                      "the expectation is that THIS concept comes back")
-            elif concept not in ids:
-                r.add("error", "E_ADVERSARIAL_TARGET", p.id,
-                      f"{where}.concept is not a concept in this bundle: "
-                      f"{concept} — an expectation nothing can satisfy is not a "
-                      "test, it is a guaranteed failure")
-        elif concept is not None:
-            r.add("error", "E_ADVERSARIAL_FIELD", p.id,
-                  f"{where}.concept is set but expect is 'not-covered', so it is "
-                  "never read — a field nothing honours reads as a claim")
+        for msg in adversarial_row_problems(row, valid_target=ids.__contains__):
+            code = ("E_ADVERSARIAL_SHAPE" if "must be a mapping" in msg
+                    else "E_ADVERSARIAL_TARGET" if "not reachable" in msg
+                    else "E_ADVERSARIAL_FIELD")
+            r.add("error", code, p.id, f"adversarial_queries[{i}]: {msg}")
 
 
 def _check_types(bundle: Bundle, concepts, archetype, r: Report,
