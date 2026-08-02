@@ -1,0 +1,167 @@
+name: CI
+
+# What this can and cannot prove, stated up front because the difference matters.
+#
+# The published repository exports `src`, not `tests` — development material stays
+# local by the owner's publication policy. So on the public repo this workflow does
+# NOT run the unit suite; the `tests` step below is conditional and skips when the
+# directory is absent, so the same file keeps working unchanged if that policy ever
+# changes.
+#
+# What remains is not a consolation prize: it is the half a source-tree test run
+# cannot reach. Wheels that build, install clean on an OS and Python the author
+# does not use, and console scripts that still work afterwards. A module missing
+# from the wheel, an archetype template not packaged as data, an entry-point typo
+# — every one of those is invisible to `pytest` in the repo and fatal to a user
+# running `uv tool install`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install-and-smoke:
+    name: ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Build and install both packages from wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv venv --python ${{ matrix.python }} .venv
+          # Non-editable by default (editable needs -e), so this installs the BUILT
+          # artifact rather than the source tree: a file the packaging config
+          # forgets fails here instead of surprising whoever runs `uv tool install`.
+          uv pip install --python .venv ./core ./adapters/mcp
+
+      - name: End-to-end smoke test against the installed commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then export PATH="$PWD/.venv/Scripts:$PATH"
+          else export PATH="$PWD/.venv/bin:$PATH"; fi
+          okfy --help > /dev/null
+          ./scripts/smoke.sh
+
+      - name: Unit suites (skipped when tests are not part of this export)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d core/tests ]; then
+            echo "core/tests absent — this export ships src only; skipping."
+            exit 0
+          fi
+          (cd core && uv run --python ${{ matrix.python }} pytest -q)
+          if [ -d adapters/mcp/tests ]; then
+            (cd adapters/mcp && uv run --python ${{ matrix.python }} pytest -q)
+          fi
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      # Two traps here, both hit while writing this file.
+      # 1. Per package, from INSIDE it: the ruff configuration lives in each
+      #    pyproject.toml, so `ruff check core adapters/mcp` from the repo root
+      #    ignores both and reports 158 phantom errors.
+      # 2. `uv run ruff`, never `uvx ruff`: uvx fetches the latest release
+      #    (0.16.1 today) while the project pins one (0.15.20), and the newer
+      #    rule set reported 77 errors on a tree that is clean under the pin.
+      #    CI that lints with a different tool than the author is CI that fails
+      #    for reasons the author cannot reproduce.
+      - shell: bash
+        run: |
+          set -euo pipefail
+          (cd core && uv run ruff check .)
+          (cd adapters/mcp && uv run ruff check .)
+
+  lockfile:
+    name: uv lock --check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      # `uv run` silently updates a stale lockfile, so a green local test run hides
+      # the divergence — exactly how adapters/mcp/uv.lock sat at 0.11.1 while both
+      # pyprojects declared 0.12.0. This is the step that makes it visible.
+      - shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f adapters/mcp/uv.lock ]; then
+            (cd adapters/mcp && uv lock --check)
+          fi
+          if [ -f core/uv.lock ]; then
+            (cd core && uv lock --check)
+          fi
+
+  versions-agree:
+    name: version strings agree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      # Five places declare the version and they have drifted before. A mismatch
+      # is cheap to detect and confusing to debug from the outside.
+      - shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import pathlib
+          import re
+
+          def grab(path, pattern):
+              text = pathlib.Path(path).read_text(encoding="utf-8")
+              m = re.search(pattern, text, re.M)
+              assert m, f"no version found in {path}"
+              return m.group(1)
+
+          found = {
+              "core/src/okfy/__init__.py":
+                  grab("core/src/okfy/__init__.py", r'^__version__ = "([^"]+)"'),
+              "core/pyproject.toml":
+                  grab("core/pyproject.toml", r'^version = "([^"]+)"'),
+              "adapters/mcp/src/okfy_mcp/__init__.py":
+                  grab("adapters/mcp/src/okfy_mcp/__init__.py",
+                       r'^__version__ = "([^"]+)"'),
+              "adapters/mcp/pyproject.toml":
+                  grab("adapters/mcp/pyproject.toml", r'^version = "([^"]+)"'),
+              "plugin/.claude-plugin/plugin.json":
+                  json.loads(pathlib.Path(
+                      "plugin/.claude-plugin/plugin.json").read_text())["version"],
+          }
+          if len(set(found.values())) != 1:
+              for k, v in found.items():
+                  print(f"{v:12} {k}")
+              raise SystemExit("version strings disagree")
+          print("all five agree:", next(iter(found.values())))
+          PY

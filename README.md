@@ -83,6 +83,8 @@ a verdict. [docs/USAGE-merge-audit.md](docs/USAGE-merge-audit.md) is the
 operating manual for both, along with `okfy merge-audit` and the execution
 attestation.
 
+[CI](.github/workflows/ci.yml) runs on Ubuntu and macOS across Python 3.11-3.13: it builds both wheels, installs them clean, and runs [scripts/smoke.sh](scripts/smoke.sh) against the *installed* commands — the path a source-tree test run cannot reach. You can run that same smoke test yourself after installing, to check your own environment.
+
 The [User Guide](docs/guide/GUIDE.md) walks both tracks end to end — §6 is the
 step-by-step procedure for OKFying a text corpus and a codebase, §11 explains
 how bundle quality is verified and why the owner, not the model, signs off.

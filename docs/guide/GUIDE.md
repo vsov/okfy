@@ -494,6 +494,22 @@ For several versions the strongest claim in the project rested on prose. `~/bund
 
 `okfy-ws-retrieval@1` pins what actually shapes a federated answer, and two of its inputs are worth naming. Each member contributes its own **`retrieval_fingerprint`**, not its git SHA — a SHA moves when a README changes and a federated answer does not. And the **roster carries roles**, because re-roling a member from `knowledge` to `constraints` changes every answer without touching a single concept. The accepted crosswalk rows are in for the same reason: `same-as` merges results and `constrains` drives the auto-pull that makes federation worth having at all.
 
+### Continuous integration, and what it can honestly check
+
+The last item on the audit's list, and the one with a constraint worth stating rather than working around. This repository's export ships `src`, not `tests` — development material stays local by the owner's publication policy — and the public repository is the only one with a remote, so it is the only place CI can run. Which means **CI here does not run the unit suite**, and the workflow says so in its own header rather than implying a coverage it does not have. The test step is conditional on `core/tests` existing, so the same file starts running them the day that policy changes, with no edit.
+
+What remains is not a consolation prize. It is precisely the half a source-tree `pytest` run cannot reach: that the wheels build, install clean on an operating system and a Python the author never uses, and that the console scripts still work afterwards. A module missing from the wheel, an archetype template not packaged as data, an entry-point typo — every one of those is invisible to 448 passing tests in the repo and fatal to the first person who runs `uv tool install`. `scripts/smoke.sh` exercises that path end to end against the *installed* commands: init, survey, segment, index, query, show, links, package, and a `release-check` that must exit 1 **and still emit a verdict**, because a crash instead of a JSON verdict is the exact defect audit round 10 found.
+
+Six matrix cells (Ubuntu and macOS × Python 3.11, 3.12, 3.13), plus three cheap jobs that each exist because the corresponding thing already went wrong once: `ruff`, `uv lock --check` (a stale lockfile sat at `0.11.1` while both pyprojects declared `0.12.0`, because `uv run` updates it silently and a green local run hid the divergence), and a check that all five version declarations agree.
+
+Two traps surfaced while writing this, and both are the same shape — *CI that does not run what the author runs*.
+
+Running `ruff check core adapters/mcp` from the repository root ignores both packages' configuration, which lives in their own `pyproject.toml`, and reports 158 phantom errors on a clean tree. It has to run from inside each package.
+
+Worse: `uvx ruff` fetches the latest release while the tree is clean under an older one — 77 errors from a rule set the project does not use. The fix was not to pin a version in the workflow, which would put the number in a second place to drift; it was to notice that **ruff was declared nowhere at all**. Every local run had been finding it on the author's `PATH`. A clean runner cannot, and the lint job would simply have failed with `Failed to spawn: ruff`. It is now a declared dev dependency in both packages, pinned by the lockfiles that CI checks — so the linter, its version, and the check that the version is recorded are one chain instead of three habits.
+
+That defect was found by running each CI job inside the *export*, under `env -i` with only `uv` on `PATH`, rather than by reasoning that it ought to work. Shipping an unverified CI configuration into a repository this concerned with fail-closed evidence would have been its own small joke.
+
 ### Probing a finished bundle: `/okfy:challenge`
 
 Every check above asks whether the bundle is internally consistent with its own record. None of them asks the harder question: *what does this bundle answer confidently and wrongly?* `/okfy:challenge <bundle>` is the adversarial pass that does. It authors questions from `meta/purpose.md` **without reading the concept index first** — the point is to ask what a user would ask, not what the bundle happens to contain — runs them, and hands back the ones where the answer was confident and unsupported.
