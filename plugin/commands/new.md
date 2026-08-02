@@ -15,6 +15,9 @@ Interview the user, one question at a time, in their language:
 2. What decisions or outputs should the consuming model produce?
 3. **Exactly 10 test queries** — real questions the bundle must answer.
    Push until you have 10 concrete ones; refuse vague entries ("stuff about X").
+   (The 10 **adversarial** queries come later, in step 4 — they need the schema
+   to point at concepts, and asking for twenty questions at once gets ten good
+   ones and ten filler.)
 4. Canonical language (default: en — models read/write it best; user may override).
 5. Write policy (default: proposals).
 6. A short lexicon pass: ask for the user's habitual terms for the domain's
@@ -54,7 +57,36 @@ Interview the user, one question at a time, in their language:
 ## 4. Write the plan and stop
 
 - Fill `meta/purpose.md`: title, statement body, language, write_policy,
-  test_queries (all 10).
+  test_queries (all 10), adversarial_queries (all 10).
+
+  `adversarial_queries` is the second acceptance layer and it is REQUIRED for
+  release. Ten test queries prove the bundle answers what it was built for; they
+  cannot show what it answers confidently and wrongly. Interview for these
+  separately, AFTER the schema is designed and BEFORE any extraction, and write
+  each as a mapping:
+
+  ```yaml
+  adversarial_queries:
+    - query: "Apply the narrow-based index test to a crypto index future."
+      expect: not-covered
+      why: "crypto is out of scope; a confident hit here is a false positive"
+    - query: "How much cash do I need to put down to buy a single stock future?"
+      expect: covered
+      concept: provisions/type-form-and-use-of-margin
+      why: "plain-English phrasing that never says the word margin"
+  ```
+
+  `expect: not-covered` means the bundle should signal that it does not cover
+  this — a lexicon coverage note. `expect: covered` names the concept that must
+  come back, and it must be a real concept id. `why` states the hypothesis; a
+  query without one records an answer to a question nobody framed.
+
+  Aim the ten at the ways retrieval actually fails: a topic adjacent to the
+  corpus but outside it; the same out-of-scope topic under a SYNONYM (coverage
+  guards are keyed to phrasings, not topics, so the synonym is the one that
+  slips); a plain-English rephrasing of an in-scope question that avoids the
+  corpus's own vocabulary; a keyword-shaped query rather than a sentence. Do NOT
+  reuse a test query with different wording — that measures nothing new.
 - Write `meta/lexicon.md` (`type: Lexicon`) from the lexicon pass.
 - Write `meta/extraction-plan.md` (`type: ExtractionPlan`) with frontmatter:
   `archetype`, `archetype_version`, `types` (name → one-line extraction rule),
@@ -68,5 +100,5 @@ Interview the user, one question at a time, in their language:
 - Run `okfy validate <bundle> --no-archetype` — meta completeness must pass.
 - Commit: `git -C <bundle> add . && git -C <bundle> commit -m "plan: purpose + extraction plan"`
 - Present the plan to the user: types table, layout, segment count estimate,
-  the 10 test queries. Say exactly: **"Plan approved? Run `/okfy:extract <bundle-path>`
+  the 10 test queries, and the 10 adversarial queries with what each expects. Say exactly: **"Plan approved? Run `/okfy:extract <bundle-path>`
   to execute stages 4-6."** Do NOT start extraction in this session.

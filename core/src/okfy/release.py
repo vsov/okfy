@@ -11,7 +11,8 @@ completeness predicates:
 2. Eval currency — the latest eval run must be owner-complete AND carry a
    retrieval_fingerprint matching the bundle's current retrieval contract: the
    digest of the deterministic live index, the normalised lexicon rows, the
-   test queries, and the bytes of the retrieval modules (`okfy-retrieval@2`).
+   test and adversarial queries, and the bytes of the retrieval modules
+   (`okfy-retrieval@3`).
    A concept/lexicon/purpose edit after the run makes it stale evidence, not
    acceptance.
 3. Acceptance policy — owner passes must meet the bundle's own bar
@@ -29,7 +30,7 @@ from okfy.bundle import Bundle
 DEFAULT_MIN_OWNER_PASS = 8
 
 
-FINGERPRINT_SCHEMA = "okfy-retrieval@2"
+FINGERPRINT_SCHEMA = "okfy-retrieval@3"
 # The modules that decide what a query returns. Hashing their bytes replaces
 # `tool_version`, which was both too coarse and too broad: a patch touching the
 # CLI help text invalidated every recorded eval, while a change to ranking inside
@@ -61,10 +62,11 @@ def retrieval_fingerprint(bundle: Bundle) -> str:
     - the NORMALISED lexicon rows, not the file's bytes: reflowing prose or
       reordering keys no longer invalidates a recorded eval, while a semantic
       change to expansion still does;
-    - the purpose test queries, which are the contract being judged;
+    - the purpose test queries AND the adversarial queries with their declared
+      expectations, which together are the contract being judged;
     - the bytes of the retrieval modules themselves.
 
-    `okfy-retrieval@2` is in the payload, so runs recorded under the old scheme
+    `okfy-retrieval@3` is in the payload, so runs recorded under an old scheme
     stay stale by construction — they were judged against a different definition
     of "the same bundle", and silently accepting them would be the fail-open this
     replaces."""
@@ -88,6 +90,13 @@ def retrieval_fingerprint(bundle: Bundle) -> str:
         "lexicon_rows": lexicon,
         "test_queries": [str(q) for q in
                          (bundle.purpose().get("test_queries") or [])],
+        # the adversarial queries and their declared expectations are part of the
+        # judged contract too: change what you expect, and the recorded verdicts
+        # were given about a different question
+        "adversarial_queries": sorted(
+            json.dumps(q, sort_keys=True, ensure_ascii=False) if isinstance(q, dict)
+            else str(q)
+            for q in (bundle.purpose().get("adversarial_queries") or [])),
         "retrieval_code": retrieval_code_digest(),
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -283,6 +292,29 @@ def _check_acceptance_readable(bundle: Bundle, problems: list, notes: list):
             "as written the contract is declared and never enforced")
 
 
+def _surface_problems(queries: list, field: str) -> list:
+    """Shared shape check for an acceptance surface: enough of them, none blank,
+    none a duplicate. Both suites are judged the same way — a bar is meaningless
+    on a surface smaller than itself whichever set of questions it covers."""
+    out = []
+    texts = [str(q.get("query") if isinstance(q, dict) else q) for q in queries]
+    blank = sum(1 for q in texts if not q.strip())
+    normalised = {" ".join(q.lower().split()) for q in texts if q.strip()}
+    if len(texts) < MIN_TEST_QUERIES:
+        out.append(f"{len(texts)} {field} in meta/purpose.md, "
+                   f"{MIN_TEST_QUERIES} required for release — the acceptance "
+                   "bar is meaningless on a surface smaller than itself")
+    if blank:
+        out.append(f"{blank} blank {field} entries — a blank query cannot be "
+                   "judged and only inflates the count")
+    dupes = len([q for q in texts if q.strip()]) - len(normalised)
+    if dupes > 0:
+        out.append(f"{dupes} duplicate {field} entries after normalising case "
+                   "and whitespace — repeating a query buys owner verdicts "
+                   "without buying coverage")
+    return out
+
+
 def _check_acceptance_surface(bundle: Bundle, problems: list, notes: list):
     """The acceptance surface itself, before any verdict on it.
 
@@ -292,24 +324,78 @@ def _check_acceptance_surface(bundle: Bundle, problems: list, notes: list):
     the clamp is only half the fix — the other half is refusing a surface too
     small or too degenerate to hold a bar. Ten is the number every archetype's
     interview asks for and every accepted bundle here carries."""
-    queries = [str(q) for q in (bundle.purpose().get("test_queries") or [])]
-    blank = sum(1 for q in queries if not q.strip())
-    normalised = {" ".join(q.lower().split()) for q in queries if q.strip()}
-    if len(queries) < MIN_TEST_QUERIES:
+    for msg in _surface_problems(bundle.purpose().get("test_queries") or [],
+                                 "test_queries"):
+        problems.append(f"E_REL_EVAL_SURFACE: {msg}")
+    for msg in _surface_problems(bundle.purpose().get("adversarial_queries") or [],
+                                 "adversarial_queries"):
+        problems.append(f"E_REL_ADVERSARIAL_SURFACE: {msg}")
+
+
+def _check_adversarial(bundle: Bundle, problems: list, notes: list):
+    """The second acceptance layer, and the reason it is mandatory.
+
+    Ten owner passes on the acceptance suite prove that ten phrasings chosen
+    alongside the bundle work. They cannot show what the bundle answers
+    confidently and wrongly, and measurements on real bundles here are blunt
+    about it: a plain-English rephrasing of an accepted query returned zero
+    relevant concepts in the top ten, and an out-of-scope product got the
+    highest-scoring hit of an entire run with no coverage signal. Those defects
+    were recorded as characterisation tests that PASS, so nothing in the repo
+    ever failed while they held — honest, and completely without pressure.
+
+    This suite supplies the pressure, inside the eval format rather than beside
+    it: same runs, same verdict machinery, same fingerprint, `suite:
+    adversarial`. What it adds is that each query declares its expectation up
+    front, so the run carries a deterministic `met`/`unmet` outcome and an owner
+    pass over an `unmet` outcome is visible as the override it is."""
+    from okfy.evaluation import eval_status, load_evals, run_suite
+    try:
+        runs = [r for r in (load_evals(bundle).get("runs") or [])
+                if run_suite(r) == "adversarial"]
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        return                       # _check_eval already reported the file
+    if not runs:
         problems.append(
-            f"E_REL_EVAL_SURFACE: {len(queries)} test_queries in "
-            f"meta/purpose.md, {MIN_TEST_QUERIES} required for release — the "
-            "acceptance bar is meaningless on a surface smaller than itself")
-    if blank:
-        problems.append(f"E_REL_EVAL_SURFACE: {blank} blank test_queries "
-                        "entries — a blank query cannot be judged and only "
-                        "inflates the count")
-    dupes = len([q for q in queries if q.strip()]) - len(normalised)
-    if dupes > 0:
+            "E_REL_ADVERSARIAL_MISSING: no adversarial eval run — ten owner "
+            "passes on the queries the bundle was built for cannot show what it "
+            "answers confidently and wrongly; run `okfy eval run <bundle> "
+            "--suite adversarial` and judge it")
+        return
+    st = eval_status(bundle, "latest", suite="adversarial")
+    t = st["totals"]
+    if st["provisional"]:
         problems.append(
-            f"E_REL_EVAL_SURFACE: {dupes} duplicate test_queries entries "
-            "after normalising case and whitespace — repeating a query buys "
-            "owner verdicts without buying coverage")
+            f"E_REL_ADVERSARIAL_PROVISIONAL: adversarial run {st['run_id']} — "
+            f"{t['owner_confirmed']}/{t['of']} owner verdicts recorded")
+    recorded = runs[-1].get("retrieval_fingerprint")
+    if recorded != retrieval_fingerprint(bundle):
+        problems.append(
+            "E_REL_ADVERSARIAL_STALE: the adversarial run was judged against a "
+            "different retrieval contract than the live bundle — re-run it "
+            "alongside the acceptance suite")
+    acceptance = _acceptance(bundle)
+    raw_min = acceptance.get("min_adversarial_pass", DEFAULT_MIN_OWNER_PASS)
+    if isinstance(raw_min, bool) or not isinstance(raw_min, int):
+        problems.append(
+            f"E_REL_ACCEPTANCE_INVALID: acceptance.min_adversarial_pass is "
+            f"{type(raw_min).__name__} {raw_min!r}, not an integer")
+        return
+    if t["passes_owner"] < raw_min:
+        problems.append(
+            f"E_REL_ADVERSARIAL_POLICY: {t['passes_owner']}/{t['of']} owner "
+            f"passes on the adversarial suite < policy minimum {raw_min}")
+    # An owner pass over an unmet expectation is legitimate — the expectation may
+    # simply have been wrong — but it is an override, and an override that leaves
+    # no trace is indistinguishable from not looking.
+    if t.get("outcomes_unmet"):
+        notes.append(
+            f"adversarial: {t['outcomes_unmet']}/{t['of']} declared expectations "
+            "were NOT met; every owner pass among them is an explicit override "
+            "of a stated criterion")
+    notes.append(f"adversarial {st['run_id']}: {t['passes_owner']}/{t['of']} "
+                 f"owner passes (policy min {raw_min}), "
+                 f"{t.get('outcomes_met', 0)} expectation(s) met")
 
 
 def _check_l3(bundle: Bundle, problems: list, notes: list):
@@ -415,6 +501,7 @@ def release_check(bundle: Bundle) -> dict:
     _check_acceptance_surface(bundle, problems, notes)
     _check_eval(bundle, problems, notes)
     _check_l3(bundle, problems, notes)
+    _check_adversarial(bundle, problems, notes)
     _check_dissent(bundle, problems, notes)
     return {"ok": not problems, "problems": problems, "notes": notes,
             "retrieval_fingerprint": retrieval_fingerprint(bundle)}

@@ -451,6 +451,35 @@ That last one has a lesson attached. The first implementation read `types` as a 
 
 **One honest limit on schema adaptation.** `types` in the plan closes the set of type *names*. It does not yet give a custom type its own required fields or sections: `_check_archetype` reads those from the archetype, so a custom type is held only to the archetype's `_all` rules. `AGENTS.md` now renders its type table from `plan.types` and `plan.layout`, so an adapted bundle no longer ships a consumption protocol that omits its own types — but the archetype's discipline *prose* still names canonical types, so dropping one leaves a sentence referring to it. Adaptation is a checked allowlist today, not a schema language. That is a deliberate stopping point, not an oversight, and it is stated here rather than implied away.
 
+### The second layer: the adversarial suite
+
+Ten owner passes prove that ten phrasings chosen alongside the bundle work. They cannot show what the bundle answers **confidently and wrongly**, and the measurements on real bundles here are blunt about the difference. A plain-English rephrasing of an accepted margin question returned zero margin concepts in the top ten. An out-of-scope crypto question drew the highest-scoring hit of an entire twenty-query run, with no coverage signal at all. The coverage guard that did fire for "mixed swap" stayed silent for "security-based swaps" — the same topic, a different phrasing, because the guard is keyed to phrasings and not to topics.
+
+Those defects were recorded honestly, as characterisation tests that **pass**. Which means nothing in the repository ever failed while they held. Honest, and completely without pressure.
+
+The adversarial suite supplies the pressure, and it lives inside the eval format rather than beside it: same runs, same verdict machinery, same fingerprint, `suite: adversarial`. `meta/purpose.md` gains ten `adversarial_queries` next to its ten `test_queries`, and a release needs both suites owner-judged.
+
+What makes it more than ten more questions is that each one **declares its expectation before the answer is seen**:
+
+```yaml
+adversarial_queries:
+  - query: "Apply the narrow-based index test to a crypto index future."
+    expect: not-covered
+    why: "crypto is out of scope; a confident hit here is a false positive"
+  - query: "How much cash do I need to put down to buy a single stock future?"
+    expect: covered
+    concept: provisions/type-form-and-use-of-margin
+    why: "plain-English phrasing that never says the word margin"
+```
+
+`expect: covered` names the concept that must come back and must be a real concept id. `expect: not-covered` means the bundle should say so — a lexicon coverage note. `why` states the hypothesis, because a query without one records an answer to a question nobody framed. The schema is closed and the enum is an enum, for the reasons the rest of this chapter is about: an expectation that may be misspelled, absent, or pointing at a concept that does not exist is not a criterion.
+
+Each run then carries a **deterministic** `met` / `unmet` per query, computed by the core, alongside the owner's verdict. That is the part the acceptance suite never had. An owner may still pass a query whose expectation was unmet — the expectation itself may have been wrong, and saying so is a reasoned judgement — but it is an override of a criterion stated in advance, `release-check` counts them in its notes, and `/okfy:eval` is required to present it as an override rather than a tick.
+
+Two policies, one bar each: `acceptance.min_owner_pass` and `acceptance.min_adversarial_pass`, both defaulting to eight of ten, both compared unclamped, both range-checked against their own surface. The adversarial queries and their expectations are inside `retrieval_fingerprint` (`okfy-retrieval@3`), so changing what you expect makes the recorded verdicts stale — they were given about a different question.
+
+The limit, since every gate here gets one stated: this proves an adversarial pass **happened**, against criteria the owner wrote. It cannot prove the ten queries were well chosen. A bundle whose adversarial suite rephrases its acceptance queries will sail through and measure nothing, which is why `/okfy:new` interviews for them separately, after the schema exists, and aims them at the four failure shapes actually observed — an adjacent out-of-scope topic, the same topic under a synonym, a plain-English rephrasing that avoids the corpus vocabulary, and a keyword-shaped query rather than a sentence.
+
 ### Probing a finished bundle: `/okfy:challenge`
 
 Every check above asks whether the bundle is internally consistent with its own record. None of them asks the harder question: *what does this bundle answer confidently and wrongly?* `/okfy:challenge <bundle>` is the adversarial pass that does. It authors questions from `meta/purpose.md` **without reading the concept index first** — the point is to ask what a user would ask, not what the bundle happens to contain — runs them, and hands back the ones where the answer was confident and unsupported.

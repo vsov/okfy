@@ -12,12 +12,12 @@ from .common import _print
 def cmd_eval(a) -> int:
     b = Bundle(a.bundle)
     if a.ecmd == "run":
-        _print(eval_run(b, n=a.n))
+        _print(eval_run(b, n=a.n, suite=a.suite))
     elif a.ecmd == "verdict":
         _print(eval_verdict(b, a.run, a.q_index, a.role, a.verdict,
-                            a.reason or ""))
+                            a.reason or "", suite=a.suite))
     else:
-        st = eval_status(b, a.run)
+        st = eval_status(b, a.run, suite=a.suite)
         _print(st)
         if st["provisional"]:              # ADR-0013: say it loudly
             t = st["totals"]

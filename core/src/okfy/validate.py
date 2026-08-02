@@ -114,6 +114,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_meta(bundle, r)
     _check_write_policy(bundle, r)
     _check_acceptance(bundle, r)
+    _check_adversarial(bundle, concepts, r)
     _check_types(bundle, concepts, archetype, r, strict=strict_schema)
     _check_corpus_snapshot(bundle, r, strict=strict_sources)
     _check_execution(bundle, r, strict=strict_execution)
@@ -167,6 +168,7 @@ ACCEPTANCE_KEYS = {
     "min_owner_pass": int,
     "allow_l3_fail": bool,
     "allow_open_dissent": bool,
+    "min_adversarial_pass": int,
     # a tuple is an enum of permitted VALUES, not just a type. `dissent: str`
     # closed the key and left the value open, and release.py runs that gate only
     # on the exact literal `required` — so `requierd` passed the schema and
@@ -210,6 +212,7 @@ def _check_acceptance(bundle: Bundle, r: Report):
               f"acceptance must be a mapping, got {type(acc).__name__}")
         return
     queries = p.meta.get("test_queries") or []
+    adversarial = p.meta.get("adversarial_queries") or []
     for k, v in acc.items():
         if k not in ACCEPTANCE_KEYS:
             r.add("error", "E_ACCEPTANCE_KEY", p.id,
@@ -239,12 +242,16 @@ def _check_acceptance(bundle: Bundle, r: Report):
             r.add("error", "E_ACCEPTANCE_TYPE", p.id,
                   f"acceptance.{k} must be a string, got {v!r}")
             continue
-        if k == "min_owner_pass" and not 1 <= v <= max(len(queries), 1):
-            r.add("error", "E_ACCEPTANCE_RANGE", p.id,
-                  f"acceptance.min_owner_pass={v} is outside 1..{len(queries)} "
-                  "(the number of test_queries) — a bar below 1 accepts a "
-                  "bundle whose every query failed, and one above the query "
-                  "count can never be met")
+        surface = {"min_owner_pass": ("test_queries", queries),
+                   "min_adversarial_pass": ("adversarial_queries", adversarial)}
+        if k in surface:
+            field, pool = surface[k]
+            if not 1 <= v <= max(len(pool), 1):
+                r.add("error", "E_ACCEPTANCE_RANGE", p.id,
+                      f"acceptance.{k}={v} is outside 1..{len(pool)} "
+                      f"(the number of {field}) — a bar below 1 accepts a "
+                      "bundle whose every query failed, and one above the query "
+                      "count can never be met")
     # An escape hatch for a gate that was never turned on is not an escape
     # hatch; it is a declaration the reader will trust and nothing will honour.
     if acc.get("allow_open_dissent") and acc.get("dissent") != "required":
@@ -252,6 +259,71 @@ def _check_acceptance(bundle: Bundle, r: Report):
               "acceptance.allow_open_dissent is set but acceptance.dissent is "
               "not 'required', so the dissent gate never runs and the waiver "
               "excuses nothing — declare the contract or drop the hatch")
+
+
+ADVERSARIAL_KEYS = {"query", "expect", "concept", "why"}
+
+
+def _check_adversarial(bundle: Bundle, concepts, r: Report):
+    """`adversarial_queries` is a closed schema, for the same reason every other
+    declaration here is one.
+
+    An adversarial query carries a stated expectation — that is what separates
+    the suite from ten more questions judged by the same person in the same
+    sitting. If the expectation may be misspelled, absent, or point at a concept
+    that does not exist, the criterion evaporates and the suite is back to vibes
+    with extra ceremony."""
+    from okfy.evaluation import EXPECTATIONS
+    p = bundle.get("meta/purpose")
+    if p is None:
+        return
+    rows = p.meta.get("adversarial_queries")
+    if rows is None:
+        return
+    if not isinstance(rows, list):
+        r.add("error", "E_ADVERSARIAL_SHAPE", p.id,
+              f"adversarial_queries must be a list, got {type(rows).__name__}")
+        return
+    ids = {c.id for c in concepts}
+    for i, row in enumerate(rows):
+        where = f"adversarial_queries[{i}]"
+        if not isinstance(row, dict):
+            r.add("error", "E_ADVERSARIAL_SHAPE", p.id,
+                  f"{where} must be a mapping with query/expect/why, got "
+                  f"{type(row).__name__} {row!r} — a bare string carries no "
+                  "expectation, so nothing about it can be falsified")
+            continue
+        for k in sorted(set(row) - ADVERSARIAL_KEYS):
+            r.add("error", "E_ADVERSARIAL_FIELD", p.id,
+                  f"{where}: unknown key {k!r} (known: {sorted(ADVERSARIAL_KEYS)})")
+        for f in ("query", "why"):
+            if not isinstance(row.get(f), str) or not row.get(f, "").strip():
+                r.add("error", "E_ADVERSARIAL_FIELD", p.id,
+                      f"{where}.{f} must be a non-empty string" +
+                      ("" if f == "query" else
+                       " — state why this query is adversarial, or the suite "
+                       "records an answer to a question nobody framed"))
+        expect = row.get("expect")
+        if expect not in EXPECTATIONS:
+            r.add("error", "E_ADVERSARIAL_FIELD", p.id,
+                  f"{where}.expect must be one of {list(EXPECTATIONS)}, got "
+                  f"{expect!r}")
+            continue
+        concept = row.get("concept")
+        if expect == "covered":
+            if not isinstance(concept, str) or not concept.strip():
+                r.add("error", "E_ADVERSARIAL_FIELD", p.id,
+                      f"{where}.concept is required when expect is 'covered' — "
+                      "the expectation is that THIS concept comes back")
+            elif concept not in ids:
+                r.add("error", "E_ADVERSARIAL_TARGET", p.id,
+                      f"{where}.concept is not a concept in this bundle: "
+                      f"{concept} — an expectation nothing can satisfy is not a "
+                      "test, it is a guaranteed failure")
+        elif concept is not None:
+            r.add("error", "E_ADVERSARIAL_FIELD", p.id,
+                  f"{where}.concept is set but expect is 'not-covered', so it is "
+                  "never read — a field nothing honours reads as a claim")
 
 
 def _check_types(bundle: Bundle, concepts, archetype, r: Report,

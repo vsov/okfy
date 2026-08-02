@@ -145,8 +145,16 @@ def main(argv=None) -> int:
     e.add_argument("-n", type=_positive_int, default=10,
                    help="top hits recorded per query (>= 1): a run that "
                         "retrieves nothing cannot be judged")
+    e.add_argument("--suite", choices=["acceptance", "adversarial"],
+                   default="acceptance",
+                   help="acceptance replays purpose.md test_queries; "
+                        "adversarial replays adversarial_queries and records "
+                        "whether each declared expectation held")
     e = esub.add_parser("verdict"); e.add_argument("bundle", type=Path)
     e.add_argument("run", help="run_id or 'latest'")
+    e.add_argument("--suite", choices=["acceptance", "adversarial"],
+                   default="acceptance",
+                   help="which suite 'latest' refers to")
     e.add_argument("q_index", type=int, metavar="q-idx")
     e.add_argument("verdict", choices=["pass", "fail", "partial"])
     g = e.add_mutually_exclusive_group(required=True)
@@ -157,6 +165,8 @@ def main(argv=None) -> int:
     e.add_argument("--reason", default=None)
     e.add_argument("--note", dest="reason", help="alias for --reason (owner wording)")
     e = esub.add_parser("status");  e.add_argument("bundle", type=Path)
+    e.add_argument("--suite", choices=["acceptance", "adversarial"],
+                   default="acceptance")
     e.add_argument("run", nargs="?", default="latest")
 
     p = sub.add_parser("job", help="freeze a segment's worker inputs into a "

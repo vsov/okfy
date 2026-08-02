@@ -148,6 +148,10 @@ hashes the actual prompt text and inputs.
    repackage if concepts changed. A type error here is usually a typo, but if
    the type is deliberate the fix is to add it to `types` in
    `meta/extraction-plan.md`, never to drop the flag.
+   Both eval suites must exist and be owner-judged before release-check can
+   pass: `/okfy:eval <bundle>` runs and judges `acceptance` AND `adversarial`.
+   Do not run one and defer the other — they are pinned to a single retrieval
+   fingerprint, so an edit between them leaves the first stale.
    Then `okfy release-check <bundle>` MUST exit 0 — the fail-closed
    completeness gate: every done worker segment has a job artifact + a ledger
    row carrying its digest; the latest eval run is owner-complete, its
