@@ -44,12 +44,21 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python }}
+          # The post-job cache step errors outright when nothing was downloaded
+          # ("Cache path ... does not exist on disk"), which turned three green
+          # jobs red. This CI is small; the cache is not worth a failure mode.
+          enable-cache: false
 
       - name: Build and install both packages from wheels
         shell: bash
         run: |
           set -euo pipefail
-          uv venv --python ${{ matrix.python }} .venv
+          # --clear because setup-uv's python-version input ALREADY created a
+          # .venv here and exported VIRTUAL_ENV; without it uv aborts with
+          # "A virtual environment already exists at: .venv". Recreating it
+          # explicitly keeps this step deterministic rather than depending on
+          # whatever the action happened to provision.
+          uv venv --clear --python ${{ matrix.python }} .venv
           # Non-editable by default (editable needs -e), so this installs the BUILT
           # artifact rather than the source tree: a file the packaging config
           # forgets fails here instead of surprising whoever runs `uv tool install`.
@@ -85,6 +94,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
+          enable-cache: false
       # Two traps here, both hit while writing this file.
       # 1. Per package, from INSIDE it: the ruff configuration lives in each
       #    pyproject.toml, so `ruff check core adapters/mcp` from the repo root
@@ -108,6 +118,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.13"
+          enable-cache: false
       # `uv run` silently updates a stale lockfile, so a green local test run hides
       # the divergence — exactly how adapters/mcp/uv.lock sat at 0.11.1 while both
       # pyprojects declared 0.12.0. This is the step that makes it visible.
@@ -126,9 +137,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
-        with:
-          python-version: "3.13"
+      # No uv here on purpose: this job only reads files with the runner's own
+      # python3, and installing a toolchain it does not use was what made its
+      # post-job cache step fail.
       # Five places declare the version and they have drifted before. A mismatch
       # is cheap to detect and confusing to debug from the outside.
       - shell: bash
