@@ -9,7 +9,29 @@ from okfy.guard import assert_safe_bundle_path
 
 
 def _git(bundle: Path, *args) -> None:
-    subprocess.run(["git", "-C", str(bundle), *args], check=True, capture_output=True)
+    """Run git in the bundle, surfacing git's own words on failure.
+
+    `check=True, capture_output=True` swallowed stderr and raised a bare
+    CalledProcessError, so the commonest first-run failure — a machine with no
+    configured git identity, which is every fresh CI runner and plenty of fresh
+    laptops — reached the user as a traceback ending in `exit status 128` and no
+    hint of what to do. Found by the CI matrix: the same command passed on macOS
+    runners and failed on Ubuntu ones for exactly this reason."""
+    r = subprocess.run(["git", "-C", str(bundle), *args],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        return
+    err = (r.stderr or r.stdout or "").strip()
+    hint = ""
+    if "Please tell me who you are" in err or "unable to auto-detect" in err \
+            or "empty ident name" in err:
+        hint = ("\n\ngit has no configured identity on this machine, so it "
+                "cannot record the bundle's first commit. Set one:\n"
+                '  git config --global user.name "Your Name"\n'
+                '  git config --global user.email "you@example.com"\n'
+                "or export GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL / "
+                "GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL for this run.")
+    raise RuntimeError(f"git {' '.join(args)} failed in {bundle}: {err}{hint}")
 
 
 def _corpus_git_sha(corpus: Path) -> str | None:

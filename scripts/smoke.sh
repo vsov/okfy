@@ -19,6 +19,13 @@ CORPUS="$WORK/corpus"
 BUNDLE="$WORK/widget-okf"
 mkdir -p "$CORPUS"
 
+# A fresh CI runner has no git identity, and `okfy init` records the bundle's
+# first commit. A real user has one configured; supply it here rather than
+# skipping the verb, and note that the CLI now explains this failure instead of
+# raising a bare exit-128 traceback (which is how CI found it).
+export GIT_AUTHOR_NAME="okfy smoke" GIT_AUTHOR_EMAIL="smoke@example.invalid"
+export GIT_COMMITTER_NAME="okfy smoke" GIT_COMMITTER_EMAIL="smoke@example.invalid"
+
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 step() { printf '\n=== %s\n' "$1"; }
 
