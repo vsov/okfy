@@ -35,4 +35,17 @@ purpose_checks:
       For Module/Convention concepts: does it state what a change must preserve
       (interfaces, invariants, conventions) concretely enough that an agent
       editing the code would know the rules? Vague guidance is a failure.
+# OPTIONAL and ADVISORY, derived the same way as decision-support's, from the
+# measured distribution of the real codebase-map bundle (298 concepts).
+# Depth is earned with content, not with a bigger number: a thin concept should
+# be reported thin, never padded to reach the floor.
+budgets:
+  types:
+    Convention: {target_min: 300, target_max: 900}
+    DataModel:  {target_min: 350, target_max: 950}
+    Decision:   {target_min: 300, target_max: 850}
+    Flow:       {target_min: 350, target_max: 850}
+    Module:     {target_min: 400, target_max: 1300}
+  resident_max: 12000
+
 consumption_protocol: protocols/agents.tmpl

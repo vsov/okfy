@@ -20,6 +20,11 @@ class Archetype:
     # {type: {field: [allowed values]}} — closed vocabularies the validator
     # enforces (E_FIELD_ENUM); free text in an enum field is machine-invisible
     field_enums: dict[str, dict[str, list[str]]]
+    # OPTIONAL token-size guidance: {"types": {T: {target_min, target_max}},
+    # "resident_max": int}. Advisory only — `okfy budget` reports against it and
+    # nothing gates on it. An archetype without the block is not defective; its
+    # report simply shows no targets.
+    budgets: dict
     consumption_protocol: str
     root: Path
 
@@ -44,6 +49,7 @@ def load_archetype(name: str) -> Archetype:
         link_rules=d.get("link_rules", []),
         nonempty_sections=d.get("nonempty_sections", {}),
         field_enums=d.get("field_enums", {}),
+        budgets=d.get("budgets", {}) or {},
         consumption_protocol=d.get("consumption_protocol", ""),
         root=root,
     )

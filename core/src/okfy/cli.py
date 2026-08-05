@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from okfy.commands import HANDLERS
+from okfy.cost import DEFAULT_N as COST_N
 from okfy.guard import GuardError
 from okfy.segment import DEFAULT_BUDGET
 
@@ -51,6 +52,28 @@ def main(argv=None) -> int:
     p.add_argument("--quiet", action="store_true",
                    help="summary only, no per-group detail")
 
+    p = sub.add_parser(
+        "cost",
+        help="read-only context-economics report: tokens entering context to "
+             "answer one question three ways (not a gate, never fails a build)")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("--query", default=None,
+                   help="one question to cost (default: purpose.md test_queries)")
+    p.add_argument("-n", type=int, default=COST_N,
+                   help="results per query for the retrieval strategy")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--quiet", action="store_true", help="totals only")
+
+    p = sub.add_parser(
+        "budget",
+        help="advisory size report: concept sizes per type against the "
+             "archetype's declared targets, and the always-resident total "
+             "(never a gate, no strict flag, exits 0)")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("--no-archetype", action="store_true")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--quiet", action="store_true", help="no thin-concept list")
+
     p = sub.add_parser("validate"); p.add_argument("bundle", type=Path)
     p.add_argument("--all", action="store_true", help="include drafts and proposals")
     p.add_argument("--no-archetype", action="store_true")
@@ -72,6 +95,9 @@ def main(argv=None) -> int:
                    help="every concept type must be declared — in "
                         "meta/extraction-plan.md `types` if the archetype was "
                         "adapted, else the archetype's canonical_types")
+    p.add_argument("--strict-injection", action="store_true",
+                   help="corpus-borne instructions (injection scan) become "
+                        "errors instead of warnings — what release-check uses")
     p.add_argument("--quiet", action="store_true")
 
     p = sub.add_parser(

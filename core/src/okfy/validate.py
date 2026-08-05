@@ -103,7 +103,7 @@ def resolve_link(bundle: Bundle, concept_path, target: str) -> str | None:
 def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
                        strict_quality=False, strict_provenance=False,
                        strict_package=False, strict_execution=False,
-                       strict_schema=False) -> Report:
+                       strict_schema=False, strict_injection=False) -> Report:
     r = Report()
     concepts = []
     for p in bundle.iter_md_files():
@@ -128,6 +128,8 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_quality(bundle, archetype, r, strict=strict_quality)
     _check_provenance(bundle, r, strict=strict_provenance)
     _check_package(bundle, r, strict=strict_package)
+    _check_injection(bundle, r, strict=strict_injection)
+    _check_budget(bundle, archetype, r)
     for c in concepts:
         if not c.id.startswith("meta/"):
             if not c.meta.get("sources") and _sources_expected(c, archetype):
@@ -135,6 +137,48 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
             if archetype:
                 _check_archetype(c, archetype, r)
     return r
+
+
+def _check_injection(bundle: Bundle, r: Report, strict: bool = False):
+    """Instructions smuggled in from the corpus (ADR-0013 idiom: signal by
+    default, gate under strict).
+
+    Warnings by default because the phrase rules are heuristics and a corpus
+    that quotes an instruction is not an attack. Errors under
+    `--strict-injection`, which is what `release-check` composes. A file that
+    could not be scanned is reported at the same level as a finding: an
+    unscanned file is not a clean one."""
+    from okfy.injection import scan_bundle
+    level, code = ("error", "E_INJECTION") if strict else ("warning", "W_INJECTION")
+    out = scan_bundle(bundle)
+    for f in out["findings"]:
+        r.add(level, code, f["path"],
+              f"{f['path']}:{f['line']} [{f['rule']}/{f['kind']}] {f['excerpt']}")
+    for s in out["skipped"]:
+        r.add(level, code, s["path"],
+              f"{s['path']}: not scanned for injection ({s['reason']})")
+
+
+def _check_budget(bundle: Bundle, archetype, r: Report):
+    """The always-resident total against the archetype's advisory target.
+
+    Note the signature: there is NO `strict` parameter, deliberately. This is
+    advisory by the owner's decision, so the code has no path that turns it into
+    an error at any strictness level and `release_check` never composes it. A
+    flag that could flip it would eventually be flipped."""
+    budgets = getattr(archetype, "budgets", None) or {}
+    cap = budgets.get("resident_max")
+    if not cap:
+        return
+    from okfy.budget import resident_core
+    res = resident_core(bundle)
+    if res["missing"] or res["tokens"] <= cap:
+        return
+    r.add("warning", "W_BUDGET_RESIDENT", "AGENTS.md+index.md",
+          f"always-resident files are {res['tokens']:,} tokens against the "
+          f"{archetype.name} target of {cap:,} — this is the only cost billed "
+          "on every turn. Advisory: shrink index.md or accept it, but do not "
+          "pad anything to change the number")
 
 
 def _sources_expected(c, archetype) -> bool:
@@ -169,6 +213,7 @@ ACCEPTANCE_KEYS = {
     "allow_l3_fail": bool,
     "allow_open_dissent": bool,
     "min_adversarial_pass": int,
+    "allow_injection": bool,
     # a tuple is an enum of permitted VALUES, not just a type. `dissent: str`
     # closed the key and left the value open, and release.py runs that gate only
     # on the exact literal `required` — so `requierd` passed the schema and

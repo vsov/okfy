@@ -32,4 +32,23 @@ purpose_checks:
       For Strategy/Playbook concepts: are entry conditions, risks, and exit
       criteria concrete enough to act on? Vague advice ("manage risk carefully")
       is a failure.
+# OPTIONAL and ADVISORY. Derived from the MEASURED distribution of the three
+# real decision-support bundles (656 concepts): target_min sits near the
+# observed floor, target_max near the observed p90. `okfy budget` reports
+# against these; nothing gates on them.
+#
+# Depth is earned with content, not with a bigger number. A concept that
+# genuinely has less to say should land below target_min and be reported thin —
+# padding it to reach the floor is the wrong fix and makes the bundle worse.
+budgets:
+  types:
+    GlossaryTerm:  {target_min: 120, target_max: 400}
+    MarketRegime:  {target_min: 300, target_max: 1200}
+    Playbook:      {target_min: 250, target_max: 900}
+    RiskFactor:    {target_min: 250, target_max: 1000}
+    Strategy:      {target_min: 800, target_max: 2100}
+  # AGENTS.md + index.md are read on EVERY turn; concepts are on demand. This
+  # is the only figure billed repeatedly, which is why it has its own target.
+  resident_max: 12000
+
 consumption_protocol: protocols/agents.tmpl

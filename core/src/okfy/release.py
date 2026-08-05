@@ -130,6 +130,52 @@ def _check_validation(bundle: Bundle, problems: list):
             "run okfy validate with all strict flags for detail")
 
 
+def _check_injection(bundle: Bundle, problems: list, notes: list):
+    """Corpus-borne instructions block a release unless the owner declared
+    otherwise — and the declaration never makes the count disappear.
+
+    `acceptance.allow_injection: true` is the hatch, and it is deliberately
+    NARROWER than it looks: it excuses the PHRASE rules, which are heuristics an
+    owner can reasonably overrule after reading them, and it does NOT excuse
+    `invisible-unicode`. A zero-width character or a bidi override inside an
+    extracted concept has no benign reading — it is not a heuristic that fired,
+    it is a fact about the bytes — so no acceptance key turns it off. That
+    asymmetry is the whole reason the scan reports `kind` separately.
+
+    A hatch that hid the count would repeat the `allow_open_dissent` mistake:
+    the note names how many findings were waived and what kinds they were."""
+    from okfy.injection import scan_bundle
+    out = scan_bundle(bundle)
+    if out["skipped"]:
+        problems.append(
+            f"E_REL_INJECTION: {len(out['skipped'])} file(s) could not be "
+            f"scanned for injection ({out['skipped'][0]['reason']}) — an "
+            "unscanned file is not a clean one")
+    findings = out["findings"]
+    if not findings:
+        return
+    phrase_n, unicode_n = out["by_kind"]["phrase"], out["by_kind"]["unicode"]
+    rules = ", ".join(f"{k} {v}" for k, v in sorted(out["by_rule"].items()) if v)
+    p = bundle.get("meta/purpose")
+    acc = (p.meta.get("acceptance") if p else None) or {}
+    if acc.get("allow_injection") is True:
+        notes.append(
+            f"acceptance.allow_injection: {phrase_n} phrase finding(s) waived "
+            f"by the owner ({rules}) — run okfy validate --strict-injection "
+            "to read them")
+        if unicode_n:
+            problems.append(
+                f"E_REL_INJECTION: {unicode_n} invisible-unicode finding(s) — "
+                "allow_injection excuses the phrase heuristics, never an "
+                "invisible codepoint in an extracted concept")
+        return
+    problems.append(
+        f"E_REL_INJECTION: {len(findings)} injection finding(s) "
+        f"({phrase_n} phrase, {unicode_n} unicode; {rules}) — run okfy "
+        "validate --strict-injection for the lines, then fix them or declare "
+        "acceptance.allow_injection")
+
+
 def _check_provenance_complete(bundle: Bundle, problems: list, notes: list):
     from okfy.job import job_digest
     from okfy.ledger import read_rows
@@ -497,6 +543,7 @@ def release_check(bundle: Bundle) -> dict:
     problems: list[str] = []
     notes: list[str] = []
     _check_validation(bundle, problems)
+    _check_injection(bundle, problems, notes)
     _check_provenance_complete(bundle, problems, notes)
     _check_acceptance_readable(bundle, problems, notes)
     _check_acceptance_surface(bundle, problems, notes)
