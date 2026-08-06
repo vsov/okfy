@@ -10,7 +10,7 @@ from pathlib import Path
 from okfy import frontmatter
 from okfy.bundle import PROPOSAL_DIR, Bundle, Concept
 from okfy.package import append_log
-from okfy.validate import Report, _check_archetype
+from okfy.validate import Report, _check_archetype, archetype_applies
 
 ACTIONS = {"create", "update", "delete"}
 
@@ -127,7 +127,12 @@ def accept(bundle: Bundle, proposal_id: str, archetype=None) -> str:
     meta.pop("proposal", None)
     if not str(meta.get("type", "")).strip():
         raise ValueError("proposed concept has no type")
-    if archetype is not None:
+    # Same predicate the validator uses. Applying the archetype schema to a
+    # `meta/*` target refused every proposal against purpose.md, corpus.md or
+    # the extraction plan for a missing `description` that `okfy validate` does
+    # not require — which locked a `write_policy: proposals` bundle out of the
+    # one flow its own pre-commit hook tells the owner to use.
+    if archetype is not None and archetype_applies(target):
         r = Report()
         probe = Concept(target, bundle.root / f"{target}.md", meta, c.body)
         _check_archetype(probe, archetype, r)

@@ -131,12 +131,31 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_injection(bundle, r, strict=strict_injection)
     _check_budget(bundle, archetype, r)
     for c in concepts:
-        if not c.id.startswith("meta/"):
+        if archetype_applies(c.id):
             if not c.meta.get("sources") and _sources_expected(c, archetype):
                 r.add("warning", "W_NO_SOURCES", c.id, "extracted concept without sources")
             if archetype:
                 _check_archetype(c, archetype, r)
     return r
+
+
+def archetype_applies(concept_id: str) -> bool:
+    """Does the archetype's concept schema govern this concept?
+
+    No for `meta/*`: purpose, corpus snapshot, extraction plan, lexicon and the
+    rest describe the bundle, they are not domain concepts, and no shipped
+    archetype declares fields for them — none carries `description`, which every
+    archetype's `_all` requires.
+
+    Exported as a shared predicate on purpose. `validate_integrity` skipped
+    meta and `proposals.accept` did not, so a bundle with
+    `write_policy: proposals` could not update its own `meta/purpose.md` through
+    the flow the pre-commit hook tells the owner to use: the proposal was
+    refused for a missing `description` the validator never asks for. Two
+    callers, two answers to one question — the drift shape the audit rounds keep
+    finding. One predicate, both callers.
+    """
+    return not concept_id.startswith("meta/")
 
 
 def _check_injection(bundle: Bundle, r: Report, strict: bool = False):
