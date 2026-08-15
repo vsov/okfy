@@ -304,6 +304,24 @@ This is never an error, at any strictness. A file legitimately yields no concept
 
 One related finding runs the other way. A concept may cite a real corpus file that **no segment ever assigned** (`W_SOURCE_OUTSIDE_SCOPE`): either the scope drifted, or a worker read past the manifest that was supposed to bound it. Paths that are not in the corpus at all are deliberately *not* repeated here — `W_BAD_SOURCE` already reports those, and a check that restates another check's finding trains you to ignore both.
 
+### Looking again: `okfy glean`
+
+A coverage figure tells you what was missed; it does nothing about it. `okfy glean` queues the second pass. It appends pending `glean-NN` segments holding exactly the entries of the uncited files — the `lines`/`chars` spans copied verbatim, so the gleaner is handed the same window the first Worker saw rather than a whole file the segment budget exists to keep out.
+
+The design decision worth stating is what gleaning deliberately *is not*: a new mechanism. A second pass that invented its own provenance shape would need its own job artifact rule, its own ledger convention, and an exception carved into a gate that is supposed to be fail-closed. Making a glean pass **another segment** means the entire Stage 4 machine runs over it unchanged — freeze the contract with `okfy job`, run the worker, mark it `done`, ledger the row — and `release-check` needs to know nothing about gleaning at all. Numbering continues across rounds, because `glean-01` already owns an artifact and a ledger row under that id.
+
+The prompt is where the real risk lives, and it is the opposite of the obvious one. A worker handed a file and told *the first pass missed something here* will find something. So `plugin/prompts/glean-worker.md` states, in its second paragraph, that **an empty answer is a correct answer and the expected one for many of these files**, names the cases where silence is right (a licence, an empty `__init__.py`, a table of contents, a fixture), and requires the worker to report every file it deliberately left empty *with a reason*. That list is the valuable output. A file that comes back empty from a pass whose entire purpose was to look again has had its silence judged twice, which is a far stronger statement than the first silence was. A fabricated concept, meanwhile, is worse than the miss it replaces: the miss shows up in the next coverage report, while the fabrication enters the bundle as fact.
+
+There is a ceiling, recorded rather than hidden: gleaning works at file granularity, matching what coverage measures. A file split across several spans counts as cited when *any* span yielded a concept, so its silent spans are never re-read. Closing that would need concepts to carry per-span source anchors reliably, which they do not yet.
+
+### What was measured and did not ship
+
+The same release considered a third borrowed technique and rejected it on its own evidence. **Verbatim grounding** — flagging a concept whose title or aliases appear nowhere in the sources it cites — is a sound check in the system it came from, and the plan committed to a threshold *before* looking at any data: above 20% of concepts flagged, it would not ship in any form.
+
+It flagged **32.6%** across 1,227 concepts in the reference bundles, ranging from 0% to 68%, and every flag inspected by hand was a false positive. The reason is structural rather than fixable. The source system extracts *named entities* — things a document names, which therefore appear in it verbatim. OKFy extracts *propositions*: "Do not execute on a closed KDB connection" is a correct title for a code contract whose source says `is_closed`, and "CAPM and Fama-French factors cannot explain the negative variance risk premia" is a correct title for a finding assembled from a paper that never writes that sentence. ADR-0005 asks for exactly this, so the check was penalising the bundles for obeying the spec. Titles alone flagged 81%.
+
+It is recorded here rather than quietly dropped because the negative result is the useful part: a technique can be sound, well-implemented, and still be a category error in a system that extracts a different kind of thing. The threshold was declared first precisely so that this outcome could not be renegotiated afterwards by trying variants until one squeaked under the bar.
+
 ### The extraction paper trail
 
 Extraction is LLM work — workers read segments, drafts get consolidated, judgment happens in prompts. That is by design (the core stays deterministic; the model does the reading), but it left a hole: when a concept turned out wrong six weeks later, there was no way to ask *which worker, reading which files, under which prompt, produced this?* The **extraction ledger** closes that hole without pretending the LLM steps are reproducible. Every pipeline transition appends one row to `meta/ledger.jsonl`:

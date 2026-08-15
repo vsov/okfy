@@ -9,9 +9,9 @@ the enclosing repo is the user's corpus repo and `-A` would stage their
 unrelated changes.
 
 Prompt versions (stamp these into every ledger row so provenance is
-reproducible): worker drafts = `extract-worker@1`, consolidation =
-`consolidate@1`. Bump the number here whenever you change the corresponding
-prompt. The human label is not the real version: for worker rows the ledger
+reproducible): worker drafts = `extract-worker@1`, gleaning drafts =
+`glean-worker@1`, consolidation = `consolidate@1`. Bump the number here
+whenever you change the corresponding prompt. The human label is not the real version: for worker rows the ledger
 also records the digest of a core-built job artifact (see Stage 4) that
 hashes the actual prompt text and inputs.
 
@@ -70,6 +70,31 @@ hashes the actual prompt text and inputs.
      `meta/jobs/<segment-id>.json` and computes the digest itself — never
      hand-copy a digest.
 
+## Stage 4a — Glean (only when Stage 6 step 1 reports substantive misses)
+
+You reach this stage from Stage 6, not in sequence — it needs the coverage
+report, which needs an indexed, validated bundle. It is listed here because it
+IS Stage 4, run again with a different prompt.
+
+`okfy glean <bundle>` appends pending `glean-NN` segments holding exactly the
+entries — spans included — of the assigned corpus files no concept cites. A
+glean pass is not a new provenance mechanism: it is another segment, so Stage 4
+runs over it unchanged and `release-check` needs no exception. Run Stage 4
+step 3 on the new segments with **`plugin/prompts/glean-worker.md`** in place of
+`extract-worker.md`, ledger them with `--prompt-version glean-worker@1`, then
+re-run Stage 5 over the new drafts and return to Stage 6 step 1.
+
+Two rules the gleaning prompt depends on you honouring:
+- The glean worker is licensed to return NOTHING for a file, and its report
+  lists every file it deliberately left empty, with a reason. That list is
+  evidence — pass it to the user. A file that comes back empty from a pass whose
+  entire purpose was to look again has had its silence judged twice, and that is
+  a much stronger statement than the first silence was.
+- Do not run the pass a third time on the same files hoping for a different
+  answer. If coverage still lists them, they are empty or the plan's `types` do
+  not cover them. Both are the owner's finding, not a reason to keep spawning
+  workers.
+
 ## Stage 5 — Consolidate
 
 1. `okfy cluster <bundle>` → clusters of draft ids.
@@ -116,11 +141,14 @@ hashes the actual prompt text and inputs.
    first, with `files_pct` and `bytes_pct` beside them. Judge the list, do not
    total it: an empty `__init__.py`, a licence and a source register are
    legitimately concept-free, while a 20 kB chapter is a segment that produced
-   nothing. Re-run the worker on the segments owning the substantive misses
-   before moving to Layer 3, and REPORT the list to the user either way —
-   including the ones you decided were legitimately empty, and why. Do not
-   silently accept a low `bytes_pct`: it means the extraction skipped volume,
-   and only the owner can say whether that volume mattered.
+   nothing. REPORT the list to the user either way — including the ones you
+   decided were legitimately empty, and why. Do not silently accept a low
+   `bytes_pct`: it means the extraction skipped volume, and only the owner can
+   say whether that volume mattered.
+
+   If the list holds substantive misses, run the GLEANING pass (Stage 4a) before
+   Layer 3. If it does not, say so explicitly — "coverage 94%/99%, the six
+   uncited files are licences and package inits" is a finding; silence is not.
 
    `W_SOURCE_OUTSIDE_SCOPE` is a different finding: a worker cited a real corpus
    file that no segment assigned it. Report it, do not "fix" it by editing the

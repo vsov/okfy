@@ -183,6 +183,83 @@ def make_segments(files: list[dict], budget: int = DEFAULT_BUDGET,
     return segments
 
 
+def _entry_tokens(entry, corpus: Path | None) -> int:
+    if isinstance(entry, dict):
+        return int(entry.get("tokens_est") or 1)
+    p = (Path(corpus) / str(entry)) if corpus else None
+    return max(1, p.stat().st_size // 4) if p and p.is_file() else 1
+
+
+def make_glean_segments(plan_segments: list[dict], uncited: list[str],
+                        corpus: Path | None = None,
+                        budget: int = DEFAULT_BUDGET) -> list[dict]:
+    """Pending segments holding exactly the entries of `done` segments whose file
+    produced no concept — `okfy validate`'s `coverage.uncited`.
+
+    A glean pass is not a new provenance mechanism: it is another segment. That
+    keeps the whole Stage 4 machine unchanged — job artifact, worker, ledger row,
+    `segment-status done` — and `release-check` (fail-closed on job+ledger per
+    done segment) needs no exception for it.
+
+    Entries are copied VERBATIM, spans included, so the gleaner is handed the
+    same window the first worker saw and not the whole file — the segment budget
+    exists precisely because these files do not fit.
+
+    File granularity, matching what coverage measures: a file split across
+    several spans counts as cited when ANY span yielded a concept, so its silent
+    spans are never gleaned.
+    # ponytail: file granularity; go per-span once concepts carry span anchors
+    """
+    # A file already queued in a glean segment that has not run yet is not
+    # gleaned again: it is still uncited only because nobody has looked, and a
+    # second call before the workers run would otherwise duplicate the whole
+    # round into segments that each demand their own job artifact and ledger row.
+    # A `done` glean segment is not excluded — a file still uncited after being
+    # looked at twice is a finding, and refusing to re-queue it is the protocol's
+    # call to make, not the core's.
+    queued = {e["path"] if isinstance(e, dict) else str(e)
+              for s in plan_segments
+              if str(s.get("id", "")).startswith("glean-") and s.get("status") != "done"
+              for e in (s.get("files") or [])}
+    want = set(uncited) - queued
+    entries = [e for s in plan_segments if s.get("status") == "done"
+               for e in (s.get("files") or [])
+               if (e["path"] if isinstance(e, dict) else str(e)) in want]
+    if not entries:
+        return []
+    # Continue the numbering: a second round must not reuse `glean-01`, whose
+    # job artifact and ledger row already exist under that id.
+    start = sum(1 for s in plan_segments
+                if str(s.get("id", "")).startswith("glean-"))
+    out: list[dict] = []
+    cur: list = []
+    cur_tokens = 0
+
+    def flush():
+        nonlocal cur, cur_tokens
+        if cur:
+            out.append({"id": f"glean-{start + len(out) + 1:02d}", "files": cur,
+                        "tokens_est": cur_tokens, "status": "pending"})
+            cur, cur_tokens = [], 0
+
+    for e in entries:
+        t = _entry_tokens(e, corpus)
+        if cur and cur_tokens + t > budget:
+            flush()
+        cur.append(e)
+        cur_tokens += t
+    flush()
+    return out
+
+
+def append_segments_to_plan(bundle: Bundle, segments: list[dict]) -> None:
+    plan = bundle.plan()
+    if plan is None:
+        raise FileNotFoundError("meta/extraction-plan.md missing — run /okfy:new first")
+    plan.meta["segments"] = (plan.meta.get("segments") or []) + segments
+    plan.path.write_text(frontmatter.serialize(plan.meta, plan.body), encoding="utf-8")
+
+
 def write_segments_to_plan(bundle: Bundle, segments: list[dict]) -> None:
     plan = bundle.plan()
     if plan is None:

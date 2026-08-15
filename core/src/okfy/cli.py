@@ -36,6 +36,12 @@ def main(argv=None) -> int:
     p = sub.add_parser("segment-status"); p.add_argument("bundle", type=Path)
     p.add_argument("segment_id"); p.add_argument("status")
 
+    p = sub.add_parser("glean", help="queue a second pass: append pending "
+                       "glean-NN segments holding the assigned corpus files no "
+                       "concept cites (validate's coverage.uncited)")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("--budget", type=int, default=DEFAULT_BUDGET)
+
     p = sub.add_parser("cluster");  p.add_argument("bundle", type=Path)
 
     p = sub.add_parser(

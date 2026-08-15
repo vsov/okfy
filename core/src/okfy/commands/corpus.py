@@ -3,9 +3,11 @@ from pathlib import Path
 from okfy.bundle import Bundle
 from okfy.cluster import cluster_drafts
 from okfy.repair import repair_links
-from okfy.segment import (make_segments, set_segment_status, survey,
+from okfy.segment import (append_segments_to_plan, make_glean_segments,
+                          make_segments, set_segment_status, survey,
                           write_segments_to_plan)
 from okfy.update import refresh_snapshot, update_plan
+from okfy.validate import validate_integrity
 
 from .common import _print
 
@@ -23,6 +25,31 @@ def cmd_segment(a) -> int:
                          corpus=Path(s["corpus"]))
     write_segments_to_plan(b, segs)
     _print(segs)
+    return 0
+
+
+def cmd_glean(a) -> int:
+    """Queue a second pass over the corpus files the first pass left silent.
+
+    The uncited list comes from `validate_integrity` rather than being recomputed
+    here, so `okfy glean` and `okfy validate` can never disagree about what was
+    missed.
+    """
+    b = Bundle(a.bundle)
+    cov = validate_integrity(b).coverage
+    if cov is None:
+        _print({"segments": [], "files": 0,
+                "note": "no coverage — the plan has no done segments"})
+        return 0
+    snap = b.get("meta/corpus")
+    corpus = Path(str(snap.meta.get("corpus"))) if snap else None
+    segs = make_glean_segments(b.plan().meta.get("segments") or [],
+                               cov["uncited"], corpus=corpus, budget=a.budget)
+    if segs:
+        append_segments_to_plan(b, segs)
+    _print({"segments": segs, "files": sum(len(s["files"]) for s in segs),
+            "uncited_files": cov["uncited_files"], "files_pct": cov["files_pct"],
+            "bytes_pct": cov["bytes_pct"], "bytes_state": cov["bytes_state"]})
     return 0
 
 

@@ -6,8 +6,8 @@ the per-verb logic, grouped by domain.
 """
 from .bundle import (cmd_index, cmd_init, cmd_log, cmd_package,
                      cmd_release_check, cmd_validate)
-from .corpus import (cmd_cluster, cmd_diff, cmd_repair_links, cmd_segment,
-                     cmd_segment_status, cmd_snapshot, cmd_survey)
+from .corpus import (cmd_cluster, cmd_diff, cmd_glean, cmd_repair_links,
+                     cmd_segment, cmd_segment_status, cmd_snapshot, cmd_survey)
 from .economics import cmd_budget, cmd_cost
 from .quality import (cmd_dissent, cmd_eval, cmd_job, cmd_ledger, cmd_merge_audit,
                       cmd_stale)
@@ -20,6 +20,7 @@ HANDLERS = {
     "survey": cmd_survey,
     "segment": cmd_segment,
     "segment-status": cmd_segment_status,
+    "glean": cmd_glean,
     "cluster": cmd_cluster,
     "merge-audit": cmd_merge_audit,
     "cost": cmd_cost,
