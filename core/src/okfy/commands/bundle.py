@@ -27,6 +27,7 @@ def cmd_validate(a) -> int:
                             strict_injection=a.strict_injection)
     r.findings.extend(r2.findings)
     r.sources = r2.sources
+    r.coverage = r2.coverage
     if not a.quiet:
         _print(r.to_dict())
     return 0 if r.ok else 1

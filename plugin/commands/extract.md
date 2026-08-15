@@ -109,6 +109,23 @@ hashes the actual prompt text and inputs.
    — MUST exit 0. New bundles are born strict: broken `sources` paths are errors
    here, not warnings. Fix errors (missing fields/sections, dead sources) and
    re-run until green.
+
+   Then READ the `coverage` block of that same output — it never fails the run,
+   so nothing forces you to look, and that is exactly why it is easy to skip.
+   `coverage.uncited` lists assigned corpus files no concept cites, largest
+   first, with `files_pct` and `bytes_pct` beside them. Judge the list, do not
+   total it: an empty `__init__.py`, a licence and a source register are
+   legitimately concept-free, while a 20 kB chapter is a segment that produced
+   nothing. Re-run the worker on the segments owning the substantive misses
+   before moving to Layer 3, and REPORT the list to the user either way —
+   including the ones you decided were legitimately empty, and why. Do not
+   silently accept a low `bytes_pct`: it means the extraction skipped volume,
+   and only the owner can say whether that volume mattered.
+
+   `W_SOURCE_OUTSIDE_SCOPE` is a different finding: a worker cited a real corpus
+   file that no segment assigned it. Report it, do not "fix" it by editing the
+   plan — the worker's job artifact is the authoritative manifest (ADR-0008),
+   and a worker reading past it is a discipline failure the owner needs to see.
 2. Layer 3 (purpose fitness): `okfy sample <bundle>` → returns JSON
    `{selector_version, seed, sampled, reasons, notes}` — a risk-oriented
    deterministic sample (changed sources, stale, rare types, weak coverage

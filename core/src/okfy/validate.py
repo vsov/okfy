@@ -25,6 +25,7 @@ class Finding:
 class Report:
     findings: list[Finding] = field(default_factory=list)
     sources: dict | None = None  # coverage summary, set when source checks ran
+    coverage: dict | None = None  # reverse coverage, set when the plan has segments
 
     def add(self, level, code, path, message):
         self.findings.append(Finding(level, code, str(path), message))
@@ -45,6 +46,8 @@ class Report:
         d = {"ok": self.ok, "errors": len(self.errors), "warnings": len(self.warnings)}
         if self.sources is not None:
             d["sources"] = self.sources
+        if self.coverage is not None:
+            d["coverage"] = self.coverage
         d["findings"] = [f.__dict__ for f in self.findings]
         return d
 
@@ -121,6 +124,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_collisions(concepts, r)
     _check_stale(concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
+    _check_coverage(bundle, concepts, r)
     _check_anchors(bundle, concepts, r, strict=strict_sources)
     _check_lexicon(concepts, r)
     linked_ids = _check_links(bundle, concepts, r)
@@ -559,6 +563,113 @@ def _check_sources(bundle: Bundle, concepts, r: Report, strict=False):
             r.add(level, code, c.id, f"concept {c.id}: source not in corpus: {p}")
     r.sources = {"concepts_with_sources": with_sources,
                  "all_valid": with_sources - broken, "with_broken_paths": broken}
+
+
+def _cited_paths(concepts) -> set[str]:
+    """Every corpus path any non-meta concept cites, anchors stripped."""
+    out = set()
+    for c in concepts:
+        if c.id.startswith("meta/"):
+            continue
+        srcs = c.meta.get("sources") or []
+        for s in (srcs if isinstance(srcs, list) else [srcs]):
+            out.add(_source_path(str(s)))
+    return out
+
+
+def _check_coverage(bundle: Bundle, concepts, r: Report):
+    """Reverse source coverage: corpus files the extraction was ASSIGNED that no
+    concept cites. `_check_sources` measures only the forward direction — every
+    cited path resolves — which stays green when a whole segment yielded nothing.
+
+    The denominator is the plan's `done` segments, not the corpus manifest: the
+    manifest is a raw rglob (images, lockfiles), while segments encode the
+    deliberate scope, `--include`/`--exclude` included. Files of segments not yet
+    `done` are not gaps — extraction has not run — so they are excluded and
+    counted as `pending_files`.
+
+    Never an error, at any strictness (same rule as `_check_budget`): a file
+    legitimately yields no concept — an empty `__init__.py`, a licence, a source
+    register — and no threshold separates that from a real gap. Both files and
+    bytes are reported because they disagree informatively: measured over the
+    eight real bundles, rayforce-api-okf reads 91% by file but 99% by byte (seven
+    tiny examples), while rayforce-py-okf reads 75% and 88% — whole modules
+    missing. Bytes need a readable corpus tree; without one they read
+    `unavailable`, never 0.
+    """
+    try:
+        plan = bundle.plan()
+        snap = bundle.get("meta/corpus")
+        purpose = bundle.purpose()
+    except frontmatter.FrontmatterError:
+        return  # layer 1's problem
+    if plan is None or purpose.get("exported") or (snap and snap.meta.get("exported")):
+        return
+    assigned: set[str] = set()
+    planned: set[str] = set()          # any status — the outside-scope basis
+    pending_files = 0
+    for s in plan.meta.get("segments") or []:
+        files = s.get("files") or []
+        paths = {f["path"] if isinstance(f, dict) else str(f) for f in files}
+        planned |= paths
+        if s.get("status") == "done":
+            assigned |= paths
+        else:
+            pending_files += len(paths)
+    if not assigned:
+        return  # nothing extracted yet, or a bundle built without segments
+
+    cited = _cited_paths(concepts)
+    uncited = sorted(assigned - cited)
+
+    # Outside-scope is narrowed to paths that ARE in the corpus. Measured over
+    # the eight real bundles the unnarrowed rule found three: two were
+    # `meta/lexicon.md` — a bundle file cited as corpus evidence, already
+    # reported by `_check_sources` as W_BAD_SOURCE — and one was
+    # `src/store/splay.h`, a real corpus file no segment ever assigned. Only the
+    # third is news; the others were this check restating a finding the reader
+    # already has. Without a manifest or a readable corpus tree the two cases
+    # are indistinguishable, so the list reads `unavailable` instead of guessing.
+    in_corpus = _source_checker(bundle)
+    outside_state = "measured" if in_corpus else "unavailable"
+    outside = sorted(p for p in cited - planned if in_corpus(p)) if in_corpus else []
+
+    corpus = Path(str(snap.meta.get("corpus") or "")) if snap else Path("")
+    measurable = corpus.is_dir()
+
+    def _size(p: str) -> int:
+        f = (corpus / p).resolve()
+        return f.stat().st_size if f.is_relative_to(corpus.resolve()) and f.is_file() else 0
+
+    files_pct = round(100 * (len(assigned) - len(uncited)) / len(assigned))
+    cov = {"assigned_files": len(assigned), "uncited_files": len(uncited),
+           "files_pct": files_pct, "pending_files": pending_files,
+           "bytes_state": "measured" if measurable else "unavailable",
+           "assigned_bytes": None, "uncited_bytes": None, "bytes_pct": None,
+           "uncited": uncited, "outside_scope": outside,
+           "outside_scope_state": outside_state}
+    byte_note = ""
+    if measurable:
+        total = sum(_size(p) for p in assigned)
+        missed = sum(_size(p) for p in uncited)
+        cov["assigned_bytes"] = total
+        cov["uncited_bytes"] = missed
+        cov["bytes_pct"] = round(100 * (total - missed) / total) if total else None
+        # Largest first: the ranking IS the triage — a 23 kB uncited chapter and
+        # a 0 B `__init__.py` are the same finding by count and nothing alike.
+        cov["uncited"] = sorted(uncited, key=lambda p: (-_size(p), p))
+        if cov["bytes_pct"] is not None:
+            byte_note = f", {cov['bytes_pct']}% by byte"
+    r.coverage = cov
+
+    if uncited:
+        r.add("warning", "W_CORPUS_COVERAGE", "meta/extraction-plan.md",
+              f"{len(uncited)} of {len(assigned)} assigned corpus files are cited by "
+              f"no concept ({files_pct}% covered by file{byte_note}) — "
+              "a file may legitimately yield nothing; see coverage.uncited")
+    for p in outside:
+        r.add("warning", "W_SOURCE_OUTSIDE_SCOPE", "meta/extraction-plan.md",
+              f"in the corpus but assigned to no segment, yet cited as a source: {p}")
 
 
 ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L(\d+))?$")
