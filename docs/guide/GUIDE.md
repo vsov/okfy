@@ -322,14 +322,50 @@ It flagged **32.6%** across 1,227 concepts in the reference bundles, ranging fro
 
 It is recorded here rather than quietly dropped because the negative result is the useful part: a technique can be sound, well-implemented, and still be a category error in a system that extracts a different kind of thing. The threshold was declared first precisely so that this outcome could not be renegotiated afterwards by trying variants until one squeaked under the bar.
 
+### What the workers say they looked at: span outcomes
+
+The coverage check above is **measured** — it derives from the bundle and needs no worker's cooperation. It answers "which assigned files does no concept cite?". It cannot answer the question an owner actually asks first: *was all the assigned material even looked at?* A green ledger row proves a worker wrote something, not that it read everything it was handed.
+
+v0.19 adds the other half. Every span in a worker's job artifact gets exactly one recorded outcome, written with the drafts:
+
+```
+$ okfy ledger add ./bundle --run <run> --segment segment-03 ... \
+    --job segment-03 --spans-file /tmp/spans-segment-03.json
+$ okfy ledger list ./bundle
+2026-07-08 segment-03 [ok] extract-worker@2 in=2 out=1 @a1b2c3d spans=c2/e1/d0
+```
+
+The report is keyed by the span in the anchor grammar concepts already cite — `src/vec/fuse.c`, `guide.md#L1-40`, `big.js#C1-4000` — and every span lands in exactly one of three classes:
+
+- **`covered`** — read, and it produced these drafts.
+- **`reviewed_empty`** — read, and it supports no concept under the plan's types. A licence header, an empty `__init__.py`, a table of contents. This is a legitimate answer and it **never blocks a release**. Completeness does not mean every paragraph owes a concept, and a worker punished for saying "nothing here" stops saying it.
+- **`dropped`** — *not* read: out of context, unreadable, truncated. This **blocks release** (`E_REL_SPAN_DROPPED`), because assigned material nobody looked at is exactly what a release must not carry silently.
+
+`okfy validate` checks the one thing that can be checked: the report must partition the job artifact **exactly** — a missing span is `E_SPAN_UNACCOUNTED`, an invented one `E_SPAN_UNKNOWN`, a span in two classes `E_SPAN_DOUBLE`. Bundles built before v0.19 have no span data at all; that is a warning (`W_SPAN_COVERAGE_MISSING`), never an error, and `release-check` accepts the existing `provenance: legacy` declaration with the condition reported in its notes rather than waved through.
+
+What the core **cannot** check is whether a worker read anything. A `reviewed_empty` claim for a span nobody opened passes every check here, which is why the summary is labelled `"source": "attested"` and carries the sentence *"span outcomes are reported by the worker, not measured"* wherever the numbers appear. This is the same discipline as `--strict-execution`: record the claim, cover it by the ledger, and never let the output read as a measurement. The one substitution that destroys the whole mechanism is writing `reviewed_empty` for a span that should be `dropped`, and both worker prompts say so in those words.
+
+The payoff is where the two halves **disagree**. A span declared `covered` whose file appears in `coverage.uncited` is a contradiction neither check finds alone — the ledger has no idea what the concepts cite, and the coverage check has no idea what was claimed. `W_SPAN_COVERAGE_CONTRADICTION` reports it, once per (segment, path) no matter how many spans the file was split into. It is a warning at every strictness, because the benign reading is common: a worker may have folded that span's content into a concept citing a sibling path. It gives a reader something to judge, not a verdict to obey.
+
+### Proving a PDF citation: `okfy sourcemap`
+
+Raw documents cannot be handed to a worker, so they are converted to Markdown and the corpus holds the Markdown. That conversion is normally where provenance dies: a concept cites `handbook.md#L811-L824` and nothing connects those lines to page 47 of the PDF they came from.
+
+`meta/source-map.jsonl` is the optional sidecar that connects them — one row per normalized span, carrying the raw file and its hash, the normalized span in the *same* anchor grammar the concept cites, the hash of that span's text, and which converter produced it at which version with which options. `okfy sourcemap <bundle>` validates it, recomputes every text hash from the corpus, and reports `E_SOURCEMAP_TEXT_DRIFT` when a normalized file changed after conversion. It writes nothing, ever, and a bundle with no sidecar exits 0 — the file is optional and its absence is not a defect.
+
+Two limits are stated rather than implied. `page` and `bbox` are **carried, never verified**: verifying them means opening a PDF, which means a PDF library, and the core has exactly one runtime dependency (PyYAML) and keeps it. And when the corpus tree is not readable, rows report `unverifiable` — never `pass`. A hash cannot be recomputed from a file that is not there, and reporting that as verified is the failure `okfy cost` already refuses.
+
+The converter itself lives outside core entirely, in `adapters/normalize`. Its default `passthrough` backend needs no third-party package at all, which is what makes the whole path testable; `docling` is one optional backend among several possible ones, imported lazily, and naming it without it installed prints an install line rather than an ImportError. The sidecar schema does not care which tool produced the Markdown — marker, pymupdf and pandoc fit the same rows — so OKFy never hard-depends on any converter.
+
 ### The extraction paper trail
 
 Extraction is LLM work — workers read segments, drafts get consolidated, judgment happens in prompts. That is by design (the core stays deterministic; the model does the reading), but it left a hole: when a concept turned out wrong six weeks later, there was no way to ask *which worker, reading which files, under which prompt, produced this?* The **extraction ledger** closes that hole without pretending the LLM steps are reproducible. Every pipeline transition appends one row to `meta/ledger.jsonl`:
 
 ```
 $ okfy ledger add ./bundle --run 2026-07-08T12-00 --segment segment-03 \
-    --inputs src/vec/fuse.c,src/vec/pipe.c --prompt-version extract-worker@1 \
-    --outputs drafts/segment-03/operator-fusion.md --validation ok
+    --inputs src/vec/fuse.c,src/vec/pipe.c --prompt-version extract-worker@2 \
+    --outputs drafts/segment-03/operator-fusion.md --validation ok \
+    --job segment-03 --spans-file /tmp/spans-segment-03.json
 $ okfy ledger list ./bundle --run 2026-07-08T12-00
 ```
 

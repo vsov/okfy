@@ -8,6 +8,10 @@ completeness predicates:
    must have a frozen job artifact AND a ledger row whose job_digest matches
    it. Bundles extracted before the job chain existed can declare
    `provenance: legacy` in meta/purpose.md — reported, never silent.
+1b. Span outcome completeness (v0.19) — every done segment must record what
+   happened to each span it was assigned, and no span may be `dropped`.
+   `reviewed_empty` never blocks. The same `provenance: legacy` escape applies,
+   and is likewise reported.
 2. Eval currency — the latest eval run must be owner-complete AND carry a
    retrieval_fingerprint matching the bundle's current retrieval contract: the
    digest of the deterministic live index, the normalised lexicon rows, the
@@ -221,6 +225,50 @@ def _check_provenance_complete(bundle: Bundle, problems: list, notes: list):
         if not ledgered:
             problems.append(f"E_REL_LEDGER_JOB: no ledger row for segment "
                             f"{seg} carries the job artifact's digest")
+
+
+def _check_span_outcomes(bundle: Bundle, problems: list, notes: list):
+    """Completeness of the span outcome report, the fail-closed half of what
+    `_check_span_coverage` warns about. `validate` cannot demand evidence that
+    was never produced; this can.
+
+    Only `dropped` gates. `reviewed_empty` never blocks at any strictness:
+    completeness does not mean every paragraph owes a concept, and a worker that
+    is punished for saying "nothing here" will stop saying it. `dropped` is
+    unambiguous — assigned material that was never looked at — so it is the one
+    outcome a release cannot carry."""
+    from okfy.ledger import latest_span_outcomes
+    if str(bundle.purpose().get("provenance", "")).strip() == "legacy":
+        notes.append("provenance: legacy declared in meta/purpose.md — span "
+                     "outcome completeness not enforced; nothing records what "
+                     "happened to this bundle's assigned spans")
+        return
+    plan = bundle.plan()
+    done = [str(s.get("id")) for s in (plan.meta.get("segments") if plan else []) or []
+            if isinstance(s, dict) and s.get("status") == "done"]
+    if not done:
+        return  # _check_provenance_complete already failed on the plan itself
+    latest = latest_span_outcomes(bundle)
+    missing = [s for s in done if s not in latest]
+    if missing:
+        problems.append(
+            f"E_REL_SPAN_COVERAGE_MISSING: {len(missing)} done segment(s) carry "
+            f"no span outcome report ({', '.join(missing)}) — a green ledger row "
+            "proves a worker wrote something, not that it looked at everything "
+            "it was given; record outcomes with `okfy ledger add --spans-file`, "
+            "or declare provenance: legacy if this bundle predates them")
+    for seg in done:
+        dropped = (latest.get(seg) or {}).get("dropped") or {}
+        if dropped:
+            problems.append(
+                f"E_REL_SPAN_DROPPED: segment {seg} records {len(dropped)} "
+                f"dropped span(s) ({', '.join(sorted(dropped)[:3])}) — assigned "
+                "material nobody looked at cannot be released as covered")
+    total_empty = sum(len((v.get("reviewed_empty") or {})) for v in latest.values())
+    if total_empty:
+        notes.append(f"spans: {total_empty} reviewed-empty span(s) reported by "
+                     "workers and not blocking — the report is the worker's own, "
+                     "not a measurement")
 
 
 def _check_eval(bundle: Bundle, problems: list, notes: list):
@@ -545,6 +593,7 @@ def release_check(bundle: Bundle) -> dict:
     _check_validation(bundle, problems)
     _check_injection(bundle, problems, notes)
     _check_provenance_complete(bundle, problems, notes)
+    _check_span_outcomes(bundle, problems, notes)
     _check_acceptance_readable(bundle, problems, notes)
     _check_acceptance_surface(bundle, problems, notes)
     _check_eval(bundle, problems, notes)

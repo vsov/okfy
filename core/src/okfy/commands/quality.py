@@ -52,6 +52,7 @@ def cmd_job(a) -> int:
 
 
 def cmd_ledger(a) -> int:
+    import json as _json
     b = Bundle(a.bundle)
     if a.dcmd == "add":
         inputs = [s for s in (x.strip() for x in a.inputs.split(",")) if s]
@@ -65,14 +66,23 @@ def cmd_ledger(a) -> int:
                 raise ValueError(f"job artifact is for segment "
                                  f"{job.get('segment')!r}, row is for {a.segment!r}")
             jd = job_digest(job)
+        spans = None
+        if getattr(a, "spans_file", None):
+            # the worker's own report; read verbatim, validated by check_spans
+            spans = _json.loads(a.spans_file.read_text(encoding="utf-8"))
         row = add_row(b, a.run, a.segment, inputs, a.prompt_version, outputs,
                       a.validation, merge_map=parse_merge_map(a.merge_map),
-                      job_digest=jd)
+                      job_digest=jd, spans=spans)
         _print(row)
     else:
         for r in read_rows(b, run_id=a.run):
             mm = r.get("merge_map")
             extra = f" merge={len(mm)}" if mm else ""
+            sp = r.get("spans")
+            if sp:
+                extra += (f" spans=c{len(sp.get('covered') or {})}"
+                          f"/e{len(sp.get('reviewed_empty') or {})}"
+                          f"/d{len(sp.get('dropped') or {})}")
             print(f"{r['run_id']} {r['segment']} [{r['validation']}] "
                   f"{r['prompt_version']} in={len(r['inputs'])} "
                   f"out={len(r['outputs'])} @{r['commit'][:7]}{extra}")

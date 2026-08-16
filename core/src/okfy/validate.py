@@ -26,6 +26,7 @@ class Report:
     findings: list[Finding] = field(default_factory=list)
     sources: dict | None = None  # coverage summary, set when source checks ran
     coverage: dict | None = None  # reverse coverage, set when the plan has segments
+    spans: dict | None = None    # attested span outcomes, set when a plan has done segments
 
     def add(self, level, code, path, message):
         self.findings.append(Finding(level, code, str(path), message))
@@ -48,6 +49,8 @@ class Report:
             d["sources"] = self.sources
         if self.coverage is not None:
             d["coverage"] = self.coverage
+        if self.spans is not None:
+            d["spans"] = self.spans
         d["findings"] = [f.__dict__ for f in self.findings]
         return d
 
@@ -125,6 +128,8 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_stale(concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
     _check_coverage(bundle, concepts, r)
+    _check_span_coverage(bundle, r)
+    _check_span_contradiction(bundle, r)  # needs both halves above
     _check_anchors(bundle, concepts, r, strict=strict_sources)
     _check_lexicon(concepts, r)
     linked_ids = _check_links(bundle, concepts, r)
@@ -670,6 +675,132 @@ def _check_coverage(bundle: Bundle, concepts, r: Report):
     for p in outside:
         r.add("warning", "W_SOURCE_OUTSIDE_SCOPE", "meta/extraction-plan.md",
               f"in the corpus but assigned to no segment, yet cited as a source: {p}")
+
+
+SPAN_ATTESTED_NOTE = ("span outcomes are reported by the worker, not measured — "
+                      "the core cannot observe what a worker actually read, only "
+                      "that its report partitions the frozen job artifact")
+
+
+def _check_span_coverage(bundle: Bundle, r: Report):
+    """The ATTESTED half of coverage (v0.19). `_check_coverage` above measures
+    which assigned files no concept cites; this one reads what the worker SAID
+    happened to each span it was handed. The two are different categories and
+    neither replaces the other — see `_check_span_contradiction` for what their
+    disagreement buys.
+
+    What is checked here is the only thing that CAN be checked: the report must
+    partition the job artifact's input span set exactly — no span missing, none
+    invented, none in two classes at once. Those are errors, because the job
+    artifact is frozen and the comparison is arithmetic. Whether a span called
+    `reviewed_empty` was ever opened is unknowable to the core, so the content of
+    the claim is never graded, and the summary says so in those words. Same
+    discipline as `_check_execution`.
+
+    A `done` segment with no span data is a WARNING at every strictness: eight
+    real bundles predate this block entirely and must not turn red. The release
+    gate is where it becomes an obligation.
+    """
+    from okfy.ledger import SPAN_CLASSES, job_span_keys, latest_span_outcomes
+    try:
+        plan = bundle.plan()
+        purpose = bundle.purpose()
+    except frontmatter.FrontmatterError:
+        return  # layer 1's problem
+    if plan is None or purpose.get("exported"):
+        return
+    done = [str(s.get("id")) for s in (plan.meta.get("segments") or [])
+            if isinstance(s, dict) and s.get("status") == "done"]
+    if not done:
+        return
+
+    latest = latest_span_outcomes(bundle)
+    totals = dict.fromkeys(SPAN_CLASSES, 0)
+    without = []
+    for seg in done:
+        spans = latest.get(seg)
+        if spans is None:
+            without.append(seg)
+            continue
+        for cls in SPAN_CLASSES:
+            totals[cls] += len(spans.get(cls) or {})
+        jf = bundle.root / "meta" / "jobs" / f"{seg}.json"
+        if not jf.is_file():
+            continue  # a missing artifact is _check_provenance's finding, not a
+            # second copy of it here — but without it there is no denominator
+        try:
+            job = json.loads(jf.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        where = f"meta/ledger.jsonl ({seg})"
+        assigned = set(job_span_keys(job))
+        seen: dict[str, list[str]] = {}
+        for cls in SPAN_CLASSES:
+            for key in spans.get(cls) or {}:
+                seen.setdefault(key, []).append(cls)
+        doubled = sorted(k for k, cs in seen.items() if len(cs) > 1)
+        for key in doubled:
+            r.add("error", "E_SPAN_DOUBLE", where,
+                  f"span {key} is declared {' and '.join(seen[key])} at once — "
+                  "an outcome is a partition, not a set of labels")
+        missing = sorted(assigned - set(seen))
+        if missing:
+            r.add("error", "E_SPAN_UNACCOUNTED", where,
+                  f"{len(missing)} assigned span(s) have no recorded outcome "
+                  f"(e.g. {', '.join(missing[:3])}) — the report is incomplete, "
+                  "which is exactly the gap it exists to close")
+        extra = sorted(set(seen) - assigned)
+        if extra:
+            r.add("error", "E_SPAN_UNKNOWN", where,
+                  f"{len(extra)} span(s) are not in the job artifact "
+                  f"(e.g. {', '.join(extra[:3])}) — the artifact is the "
+                  "denominator; a span outside it was never assigned")
+
+    for seg in without:
+        r.add("warning", "W_SPAN_COVERAGE_MISSING", f"meta/ledger.jsonl ({seg})",
+              "done segment has no span outcome report — nothing records what "
+              "happened to the material it was assigned")
+
+    r.spans = {"source": "attested", "note": SPAN_ATTESTED_NOTE,
+               "done_segments": len(done), "with_spans": len(done) - len(without),
+               "segments_without_spans": without,
+               "covered": totals["covered"],
+               "reviewed_empty": totals["reviewed_empty"],
+               "dropped": totals["dropped"]}
+
+
+def _check_span_contradiction(bundle: Bundle, r: Report):
+    """Where the attested and the measured halves disagree. A span the worker
+    declared `covered` — "I produced a concept from this" — whose file appears in
+    `coverage.uncited` — "no concept cites this file" — is a claim the bundle
+    itself contradicts. Neither check finds it alone: the ledger has no idea what
+    the concepts cite, and the coverage check has no idea what was claimed.
+
+    A WARNING at every strictness, on purpose. The honest alternative reading is
+    common and legitimate: a worker may have folded a span's content into a
+    concept that cites a sibling path, or cited the file at a different anchor
+    than the one it was handed. The finding gives a reader something to judge; it
+    is not a verdict, and it never blocks.
+
+    One finding per (segment, path), never per span. A file handed out as forty
+    line ranges would otherwise produce forty copies of one observation, which is
+    how a useful signal becomes noise nobody reads.
+    """
+    from okfy.ledger import latest_span_outcomes
+    if r.coverage is None:
+        return  # nothing measured to contradict
+    uncited = set(r.coverage.get("uncited") or [])
+    if not uncited:
+        return
+    for seg, spans in sorted(latest_span_outcomes(bundle).items()):
+        paths = {k.split("#", 1)[0] for k in (spans.get("covered") or {})}
+        for path in sorted(paths & uncited):
+            r.add("warning", "W_SPAN_COVERAGE_CONTRADICTION",
+                  f"meta/ledger.jsonl ({seg})",
+                  f"segment {seg} declares {path} covered, but no concept cites "
+                  "it — the worker may have folded it into a concept citing a "
+                  "sibling path, or the material may have been lost; the ledger "
+                  "is the worker's report and the citation is the measurement")
 
 
 ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L(\d+))?$")

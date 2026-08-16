@@ -9,8 +9,8 @@ the enclosing repo is the user's corpus repo and `-A` would stage their
 unrelated changes.
 
 Prompt versions (stamp these into every ledger row so provenance is
-reproducible): worker drafts = `extract-worker@1`, gleaning drafts =
-`glean-worker@1`, consolidation = `consolidate@1`. Bump the number here
+reproducible): worker drafts = `extract-worker@2`, gleaning drafts =
+`glean-worker@2`, consolidation = `consolidate@1`. Bump the number here
 whenever you change the corresponding prompt. The human label is not the real version: for worker rows the ledger
 also records the digest of a core-built job artifact (see Stage 4) that
 hashes the actual prompt text and inputs.
@@ -62,13 +62,24 @@ hashes the actual prompt text and inputs.
      re-running the worker on its segment if broken);
    - `okfy segment-status <bundle> <segment-id> done`
    - `git -C <bundle> add . && git -C <bundle> commit -m "extract: <segment-id>"`
+   - Save the worker's SPAN OUTCOME BLOCK verbatim to a scratch file, e.g.
+     `/tmp/spans-<segment-id>.json`. Do not edit it to make anything pass. If
+     it does not partition the job artifact, that is a finding about the run,
+     and the fix is to re-run the worker — never to rewrite its report, the
+     plan, or the job artifact.
    - `okfy ledger add <bundle> --run <run-id> --segment <segment-id>
-     --inputs <corpus-paths-the-worker-used> --prompt-version extract-worker@1
+     --inputs <corpus-paths-the-worker-used> --prompt-version extract-worker@2
      --outputs <draft-ids-written> --validation <pass|fail>
-     --job <segment-id>` — one row per worker, after its drafts commit.
+     --job <segment-id> --spans-file /tmp/spans-<segment-id>.json` — one row
+     per worker, after its drafts commit.
      `--job` takes the SEGMENT ID: the core loads the frozen artifact in
      `meta/jobs/<segment-id>.json` and computes the digest itself — never
      hand-copy a digest.
+     `--spans-file` records what the worker says happened to each span it was
+     assigned. `dropped` blocks release; `reviewed_empty` never does. The
+     block is the worker's own report, not a measurement — the core verifies
+     that it accounts for every assigned span, and cannot verify that anything
+     was read.
 
 ## Stage 4a — Glean (only when Stage 6 step 1 reports substantive misses)
 
@@ -81,15 +92,17 @@ entries — spans included — of the assigned corpus files no concept cites. A
 glean pass is not a new provenance mechanism: it is another segment, so Stage 4
 runs over it unchanged and `release-check` needs no exception. Run Stage 4
 step 3 on the new segments with **`plugin/prompts/glean-worker.md`** in place of
-`extract-worker.md`, ledger them with `--prompt-version glean-worker@1`, then
-re-run Stage 5 over the new drafts and return to Stage 6 step 1.
+`extract-worker.md`, ledger them with `--prompt-version glean-worker@2` and
+`--spans-file`, then re-run Stage 5 over the new drafts and return to Stage 6
+step 1.
 
 Two rules the gleaning prompt depends on you honouring:
 - The glean worker is licensed to return NOTHING for a file, and its report
   lists every file it deliberately left empty, with a reason. That list is
-  evidence — pass it to the user. A file that comes back empty from a pass whose
-  entire purpose was to look again has had its silence judged twice, and that is
-  a much stronger statement than the first silence was.
+  evidence — pass it to the user, and it is also where the `reviewed_empty`
+  rows of the span outcome block come from. A file that comes back empty from a
+  pass whose entire purpose was to look again has had its silence judged twice,
+  and that is a much stronger statement than the first silence was.
 - Do not run the pass a third time on the same files hoping for a different
   answer. If coverage still lists them, they are empty or the plan's `types` do
   not cover them. Both are the owner's finding, not a reason to keep spawning
@@ -154,6 +167,27 @@ Two rules the gleaning prompt depends on you honouring:
    file that no segment assigned it. Report it, do not "fix" it by editing the
    plan — the worker's job artifact is the authoritative manifest (ADR-0008),
    and a worker reading past it is a discipline failure the owner needs to see.
+
+   Then read the `spans` block of the same output. It summarises what the
+   workers SAID happened to the material they were handed, and it is labelled
+   `"source": "attested"` because that is what it is: the workers' own report,
+   not a measurement. The core verifies that each report accounts for every
+   assigned span — it cannot verify that anything was read. Report the numbers
+   with that qualification attached; a `covered` count presented as coverage is
+   a false claim.
+
+   `W_SPAN_COVERAGE_CONTRADICTION` is the finding worth stopping on. It fires
+   where the two halves disagree: a span a worker declared `covered` whose file
+   `coverage.uncited` says no concept cites. One of the two is wrong and only a
+   human can say which. The benign reading is common — the worker folded that
+   span's content into a concept that cites a sibling path — so this is a
+   warning at every strictness and never blocks. Report each one with the
+   segment and the path, and say which reading you think applies and why.
+
+   `W_SPAN_COVERAGE_MISSING` means a done segment recorded no outcomes at all.
+   For a bundle extracted before v0.19 that is expected; for a run you just
+   performed it means Stage 4's `--spans-file` was skipped, and the fix is to
+   re-run that worker — not to hand-write a report on its behalf.
 2. Layer 3 (purpose fitness): `okfy sample <bundle>` → returns JSON
    `{selector_version, seed, sampled, reasons, notes}` — a risk-oriented
    deterministic sample (changed sources, stale, rare types, weak coverage

@@ -28,9 +28,31 @@ def cmd_validate(a) -> int:
     r.findings.extend(r2.findings)
     r.sources = r2.sources
     r.coverage = r2.coverage
+    r.spans = r2.spans
     if not a.quiet:
         _print(r.to_dict())
     return 0 if r.ok else 1
+
+
+def cmd_sourcemap(a) -> int:
+    """Read-only: proves a normalized citation maps back to the raw document it
+    was converted from. Absence of the sidecar is not a defect."""
+    from okfy.sourcemap import check_source_map
+    out = check_source_map(Bundle(a.bundle))
+    if a.json:
+        _print(out)
+        return 0 if out["ok"] else 1
+    if out["state"] == "absent":
+        print(f"sourcemap: {out['note']} (meta/source-map.jsonl)")
+        return 0
+    print(f"sourcemap: {out['rows']} row(s) — {out['verified']} verified, "
+          f"{out['unverifiable']} unverifiable, {len(out['problems'])} problem(s)")
+    if not out["corpus_readable"]:
+        print("corpus tree not readable — rows are unverifiable, not verified")
+    print(out["note"])
+    for p in out["problems"]:
+        print(f"  line {p.get('line', '?')}: {p['code']} {p['message']}")
+    return 0 if out["ok"] else 1
 
 
 def cmd_release_check(a) -> int:

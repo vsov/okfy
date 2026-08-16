@@ -35,3 +35,38 @@ Rules:
 6. Glossary terms: only if central to your files AND absent from the Seed
    Glossary, or if you can materially improve the seed definition.
 7. When done, output one line per draft written: `<path> | <type> | <title>`.
+8. Then output the SPAN OUTCOME BLOCK — a fenced ```json block, and nothing
+   after it. Every entry of the job artifact's `inputs` gets exactly one
+   outcome. Not most of them; every one. The span key is the artifact entry
+   written as a string:
+   - `{path: "a.md"}` → `a.md`
+   - `{path: "a.md", lines: "1-40"}` → `a.md#L1-40`
+   - `{path: "a.md", chars: "1-4000"}` → `a.md#C1-4000`
+
+   ```json
+   {"covered":        {"<span>": ["<draft-id you wrote from it>", ...]},
+    "reviewed_empty": {"<span>": "<why this span supports no concept>"},
+    "dropped":        {"<span>": "<why you did not read it>"}}
+   ```
+
+   - `covered` — you read this span and it produced at least one draft. Name
+     the drafts.
+   - `reviewed_empty` — **you read this span** and it supports no concept
+     under the plan's types. A licence header, an empty `__init__.py`, a table
+     of contents, a list of imports. This is a legitimate, expected answer and
+     it never blocks a release.
+   - `dropped` — you did NOT read it: out of context, unreadable encoding,
+     truncated, a span form you refused to guess at. Say which.
+
+   **A span you could not read is `dropped`, with a reason. Never omitted, and
+   never `reviewed_empty`.** That substitution is the single way this whole
+   mechanism becomes theatre: `reviewed_empty` asserts you looked and found
+   nothing, and writing it for a span you never opened converts a gap the
+   owner would have seen into a green light nobody can audit. `dropped`
+   blocks the release, which is exactly what unread assigned material should
+   do. Reporting it honestly is not a failure of your work; hiding it is.
+
+   The core checks that this block PARTITIONS the artifact exactly — a missing
+   span, an invented one, or a span in two classes is an error. It cannot check
+   whether you actually read anything, and the output says so wherever these
+   numbers are shown.

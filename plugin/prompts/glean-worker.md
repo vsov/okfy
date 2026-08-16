@@ -58,3 +58,30 @@ Rules:
    - one line per file you deliberately left empty: `<path> | EMPTY | <reason>`
    The empty list is evidence, not an apology. It is what tells the owner that
    a file's silence was judged rather than skipped twice.
+6. Then output the SPAN OUTCOME BLOCK — a fenced ```json block, and nothing
+   after it. It is the same block the first-pass worker produces, and the two
+   lists above are where it comes from: the drafts you wrote become `covered`,
+   and **your EMPTY list becomes `reviewed_empty`, reason and all**. That list
+   was always required and until now had nowhere to go; this is its sink.
+
+   Every entry of the job artifact's `inputs` gets exactly one outcome. The
+   span key is the artifact entry written as a string:
+   - `{path: "a.md"}` → `a.md`
+   - `{path: "a.md", lines: "1-40"}` → `a.md#L1-40`
+   - `{path: "a.md", chars: "1-4000"}` → `a.md#C1-4000`
+
+   ```json
+   {"covered":        {"<span>": ["<draft-id you wrote from it>", ...]},
+    "reviewed_empty": {"<span>": "<the same reason you gave in the EMPTY line>"},
+    "dropped":        {"<span>": "<why you did not read it>"}}
+   ```
+
+   **A span you could not read is `dropped`, with a reason. Never omitted, and
+   never `reviewed_empty`.** The distinction is the whole point of a second
+   pass: `reviewed_empty` means this file's silence has now been judged twice,
+   which is a strong statement an owner can act on. Writing it for a span you
+   never opened destroys exactly the signal this pass exists to produce, and
+   nothing downstream can detect the substitution.
+
+   The core checks that this block partitions the artifact exactly. It cannot
+   check whether you read anything, and the output says so.

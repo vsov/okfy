@@ -208,7 +208,12 @@ def make_glean_segments(plan_segments: list[dict], uncited: list[str],
     File granularity, matching what coverage measures: a file split across
     several spans counts as cited when ANY span yielded a concept, so its silent
     spans are never gleaned.
-    # ponytail: file granularity; go per-span once concepts carry span anchors
+    # ponytail: file granularity. The stated upgrade path — "once concepts carry
+    # span anchors" — is dead: concepts may cite `path#L10-20`, but `_cited_paths`
+    # strips anchors deliberately, so coverage will never report a span. The live
+    # route is the v0.19 ledger, whose `covered` map IS keyed by span. Not built:
+    # it would glean spans a worker declared `reviewed_empty`, which is the third
+    # pass the protocol forbids, and `dropped` already blocks release.
     """
     # A file already queued in a glean segment that has not run yet is not
     # gleaned again: it is still uncited only because nobody has looked, and a

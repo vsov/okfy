@@ -112,6 +112,13 @@ def main(argv=None) -> int:
              "currency (retrieval fingerprint), acceptance policy")
     p.add_argument("bundle", type=Path)
 
+    p = sub.add_parser("sourcemap", help="validate meta/source-map.jsonl: every "
+                       "normalized span maps back to a raw document and its text "
+                       "hash still matches (read-only; an absent sidecar is not "
+                       "a defect)")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("index");    p.add_argument("bundle", type=Path)
 
     p = sub.add_parser("query");    p.add_argument("bundle", type=Path)
@@ -249,6 +256,11 @@ def main(argv=None) -> int:
     d.add_argument("--job", default=None, metavar="SEGMENT_ID",
                    help="segment id of the worker-job artifact; the digest is "
                         "computed from meta/jobs/<id>.json, never hand-passed")
+    d.add_argument("--spans-file", dest="spans_file", type=Path, default=None,
+                   help="JSON with covered/reviewed_empty/dropped keyed by span "
+                        "(path, path#L1-40, path#C1-4000) — the WORKER'S OWN "
+                        "report of what it did with each assigned span, not a "
+                        "measurement the core made")
     d = dsub.add_parser("list");    d.add_argument("bundle", type=Path)
     d.add_argument("--run", default=None)
 
