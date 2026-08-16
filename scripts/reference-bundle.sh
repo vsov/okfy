@@ -1,0 +1,606 @@
+#!/usr/bin/env bash
+# Build the reference bundle: a synthetic bundle that passes the WHOLE release
+# contract, from the installed `okfy` CLI and nothing else.
+#
+# WHY THIS IS A SHELL SCRIPT. The unit suite does not ship in the export, so a
+# pytest fixture proving the contract holds would prove it only on this machine.
+# This runs where the export runs. It is the published repository's only
+# end-to-end evidence that the contract is satisfiable at all — an external audit
+# of v0.19 found that not one bundle in existence passed it, and a contract no
+# artifact meets is a specification, not a gate.
+#
+# WHAT IT IS NOT. Every byte here is synthetic: the corpus is three invented
+# files about an invented instrument, and the owner verdicts are written by this
+# script. They are FIXTURE DATA, not a record of anyone's judgement, and they
+# prove exactly one thing — that the machine-checkable half of the contract can
+# be satisfied end to end. They say nothing about whether a real extraction is
+# any good. Never point this at a real corpus and never run it inside a real
+# bundle.
+#
+#   bash scripts/reference-bundle.sh <workdir>
+#
+# Leaves <workdir>/widget-okf behind for the caller to inspect. Exits non-zero
+# the moment any step or the final release-check fails.
+set -euo pipefail
+
+WORK="${1:-}"
+[ -n "$WORK" ] || { echo "usage: reference-bundle.sh <workdir>" >&2; exit 2; }
+mkdir -p "$WORK"
+WORK="$(cd "$WORK" && pwd)"
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FIXTURE="$HERE/reference-corpus"
+[ -d "$FIXTURE" ] || { echo "missing fixture corpus: $FIXTURE" >&2; exit 2; }
+
+# The fixture is COPIED out of the repo before any bundle points at it. Two
+# reasons, both load-bearing. A bundle records its corpus path, so a bundle built
+# here would otherwise carry a path into a checkout that will not exist on the
+# next machine. And the L3 sample seed is the corpus's git sha: with the fixture
+# read in place that sha is OKFy's own HEAD, so the recorded sample would go
+# stale on every unrelated commit and the replay check would silently skip.
+CORPUS="$WORK/corpus"
+rm -rf "$CORPUS"
+mkdir -p "$CORPUS"
+cp "$FIXTURE"/*.md "$CORPUS/"
+
+BUNDLE="$WORK/widget-okf"
+[ -e "$BUNDLE" ] && { echo "refusing: $BUNDLE already exists" >&2; exit 2; }
+
+# A CI runner has no git identity and every okfy verb that writes also commits.
+export GIT_AUTHOR_NAME="okfy reference" GIT_AUTHOR_EMAIL="ref@example.invalid"
+export GIT_COMMITTER_NAME="okfy reference" GIT_COMMITTER_EMAIL="ref@example.invalid"
+
+step() { printf '\n=== %s\n' "$1"; }
+fail() { echo "REFERENCE FAIL: $*" >&2; exit 1; }
+
+step "init"
+okfy init "$BUNDLE" --corpus "$CORPUS" --language en >/dev/null || fail "okfy init"
+
+# --- the interview's output, supplied as data ------------------------------
+# `okfy init` writes a skeleton; purpose.md and the extraction plan are the
+# Purpose Interview's job, and there is no CLI verb that authors them. That is
+# by design — they are judgement, not mechanism — so the script supplies them
+# the way an interview would, as files.
+step "purpose + plan"
+cat > "$BUNDLE/meta/purpose.md" <<'EOF'
+---
+type: Purpose
+title: Widget options desk reference
+language: en
+write_policy: proposals
+acceptance:
+  dissent: required
+  min_owner_pass: 10
+  min_adversarial_pass: 10
+test_queries:
+  - when do I sell a widget straddle
+  - what closes a short widget straddle
+  - why is gamma the risk in a short straddle
+  - what is the exit rule at twenty-one days
+  - how does a widget collar pay for itself
+  - when should I use a collar instead of a straddle
+  - what does rolling a collar depend on
+  - what does gamma measure
+  - what does delta measure
+  - what is implied volatility actually quoting
+adversarial_queries:
+  - query: what is the rate of change of delta
+    expect: covered
+    concept: glossary/gamma
+    why: names the definition without using the term, so it tests the lexicon rather than a string match
+  - query: which structure caps my upside to pay for downside
+    expect: covered
+    concept: strategies/widget-collar
+    why: describes the trade by its economics, using none of the concept's own words
+  - query: what should I do about a short straddle into earnings
+    expect: covered
+    concept: strategies/widget-straddle
+    why: the rule is stated as a prohibition in the source, and a retrieval that only matches entry criteria will miss it
+  - query: what makes an option position blow up near expiry
+    expect: covered
+    concept: glossary/gamma
+    why: colloquial phrasing of the second-derivative risk, the kind a user actually types
+  - query: what volatility number goes into the model
+    expect: covered
+    concept: glossary/implied-volatility
+    why: distinguishes the quoted input from realised movement, which the corpus deliberately separates
+  - query: what is the widget dividend schedule
+    expect: not-covered
+    why: plausibly adjacent to a derivatives desk and absent from the corpus, so a confident answer would be fabrication
+  - query: how do I hedge a widget position with futures
+    expect: not-covered
+    why: same domain, different instrument, nothing in the corpus supports it
+  - query: what is the margin requirement for a short straddle
+    expect: not-covered
+    why: the obvious next question after the entry rule, and the corpus never addresses it
+  - query: how do I price a widget swaption
+    expect: not-covered
+    why: an instrument the bundle has never seen, phrased with the vocabulary it does know
+  - query: what is the firm's position limit on widgets
+    expect: not-covered
+    why: policy rather than technique; the bundle must not answer from an unrelated concept
+---
+
+Answer a widget options trader's entry, exit and risk questions from the desk's
+own written material, and say plainly when the material does not cover the
+question.
+EOF
+cat > "$BUNDLE/meta/extraction-plan.md" <<'EOF'
+---
+type: ExtractionPlan
+title: Widget desk extraction
+archetype: decision-support
+archetype_version: 1
+types:
+  Strategy: one concept per tradeable structure
+  GlossaryTerm: one concept per term of art
+layout:
+  Strategy: strategies/
+  GlossaryTerm: glossary/
+segments: []
+---
+
+Synthetic plan for the reference bundle.
+EOF
+
+okfy segment "$BUNDLE" --budget 50000 >/dev/null || fail "okfy segment"
+grep -q "segment-01" "$BUNDLE/meta/extraction-plan.md" || fail "segment wrote no segments"
+
+step "job artifact"
+cat > "$WORK/worker-prompt.md" <<'EOF'
+You are an extraction worker. Read only the spans assigned to you and write one
+draft concept per tradeable structure and per term of art. Cite the source file
+for every draft. Report what you did with every span you were given.
+EOF
+okfy job "$BUNDLE" segment-01 --prompt-file "$WORK/worker-prompt.md" >/dev/null \
+  || fail "okfy job"
+
+# --- the worker pass: drafts, committed, then consolidated -----------------
+# Consolidation deletes the drafts; the dissent gate recovers them from history,
+# so they must be committed BEFORE they are removed or every adjudication is
+# unfalsifiable. This is the shape `/okfy:extract` actually leaves behind.
+step "drafts"
+mkdir -p "$BUNDLE/drafts/segment-01"
+cat > "$BUNDLE/drafts/segment-01/straddle-entry.md" <<'EOF'
+---
+type: Strategy
+title: Widget Straddle
+aliases: [short straddle, straddle, at-the-money straddle]
+description: Sell an at-the-money straddle when widget implied volatility is extreme.
+tags: [volatility, short-premium]
+sources: [straddle.md]
+---
+
+## Setup
+
+Sell the at-the-money call and the at-the-money put on the same widget expiry
+when implied volatility sits in the top decile of its trailing year.
+
+## Risk
+
+The position is short volatility and profits when realised movement is smaller
+than the premium collected.
+
+## Exit
+
+Fifty percent of maximum profit.
+EOF
+cat > "$BUNDLE/drafts/segment-01/straddle-exit.md" <<'EOF'
+---
+type: Strategy
+title: Widget Straddle
+description: Exit and prohibition rules for a short widget straddle.
+tags: [volatility, short-premium]
+sources: [straddle.md]
+---
+
+## Setup
+
+The short widget straddle, once open.
+
+## Risk
+
+Gamma near expiry: a widget pinning the strike leaves an exploding delta and no
+time to hedge it.
+
+## Exit
+
+Fifty percent of maximum profit or twenty-one days to expiry, whichever comes
+first. Never hold the position through a scheduled earnings release.
+EOF
+cat > "$BUNDLE/drafts/segment-01/collar.md" <<'EOF'
+---
+type: Strategy
+title: Widget Collar
+aliases: [collar, protective collar, costless collar]
+description: Hold the widget, buy a put below spot, sell a call above it.
+tags: [hedging]
+sources: [collar.md]
+---
+
+## Setup
+
+Hold the widget, buy a protective put below spot, sell a call above it. The sold
+call pays for the bought put, so the structure is close to costless at the price
+of capping the upside.
+
+## Risk
+
+Long volatility on the downside and short volatility on the upside. The risk is
+opportunity cost, not gamma.
+
+## Exit
+
+Roll the collar when either leg reaches ten percent of its original extrinsic
+value.
+EOF
+cat > "$BUNDLE/drafts/segment-01/gamma.md" <<'EOF'
+---
+type: GlossaryTerm
+title: Gamma
+aliases: [gamma, second derivative, rate of change of delta]
+description: The rate of change of delta with respect to the underlying price.
+sources: [greeks.md]
+---
+
+The second derivative of the option price with respect to the underlying. It is
+largest at the money and grows without bound as expiry approaches.
+EOF
+cat > "$BUNDLE/drafts/segment-01/delta.md" <<'EOF'
+---
+type: GlossaryTerm
+title: Delta
+aliases: [delta, first derivative, hedge ratio]
+description: The rate of change of an option's price with respect to the underlying.
+sources: [greeks.md]
+---
+
+The first derivative of the option price with respect to the underlying, quoted
+between minus one and one.
+EOF
+cat > "$BUNDLE/drafts/segment-01/implied-volatility.md" <<'EOF'
+---
+type: GlossaryTerm
+title: Implied Volatility
+aliases: [implied volatility, IV, implied vol]
+description: The volatility input that makes a model return the traded price.
+sources: [greeks.md]
+---
+
+A quoted number, not a measurement of the future: the volatility that makes a
+pricing model reproduce the option's traded price.
+EOF
+git -C "$BUNDLE" add -A
+git -C "$BUNDLE" commit -q -m "extract: 6 drafts from segment-01"
+
+step "ledger: the worker pass"
+cat > "$WORK/spans.json" <<'EOF'
+{"covered": {"straddle.md": ["drafts/segment-01/straddle-entry",
+                             "drafts/segment-01/straddle-exit"],
+             "collar.md": ["drafts/segment-01/collar"],
+             "greeks.md": ["drafts/segment-01/gamma",
+                           "drafts/segment-01/delta",
+                           "drafts/segment-01/implied-volatility"]},
+ "reviewed_empty": {}, "dropped": {}}
+EOF
+okfy ledger add "$BUNDLE" --run run-1 --segment segment-01 \
+  --inputs "straddle.md,collar.md,greeks.md" \
+  --prompt-version worker@1 \
+  --outputs "drafts/segment-01/straddle-entry,drafts/segment-01/straddle-exit,drafts/segment-01/collar,drafts/segment-01/gamma,drafts/segment-01/delta,drafts/segment-01/implied-volatility" \
+  --validation ok --job segment-01 --spans-file "$WORK/spans.json" >/dev/null \
+  || fail "okfy ledger add (worker pass)"
+
+step "consolidation"
+mkdir -p "$BUNDLE/strategies" "$BUNDLE/glossary"
+cat > "$BUNDLE/strategies/widget-straddle.md" <<'EOF'
+---
+type: Strategy
+title: Widget Straddle
+aliases: [short straddle, straddle, at-the-money straddle]
+description: Sell an at-the-money straddle when widget implied volatility is extreme.
+tags: [volatility, short-premium]
+sources: [straddle.md]
+---
+
+## Setup
+
+Sell the at-the-money call and the at-the-money put on the same widget expiry
+when implied volatility sits in the top decile of its trailing year. The
+position is short volatility: it profits when realised movement is smaller than
+the premium collected.
+
+## Risk
+
+[Gamma](../glossary/gamma.md) near expiry. A widget that pins the strike leaves
+the position with an exploding delta and no time to hedge it.
+
+## Exit
+
+Fifty percent of maximum profit or twenty-one days to expiry, whichever comes
+first. Never hold a short straddle through a scheduled earnings release.
+EOF
+cat > "$BUNDLE/strategies/widget-collar.md" <<'EOF'
+---
+type: Strategy
+title: Widget Collar
+aliases: [collar, protective collar, costless collar]
+description: Hold the widget, buy a put below spot, sell a call above it.
+tags: [hedging]
+sources: [collar.md]
+---
+
+## Setup
+
+Hold the widget, buy a protective put below spot, sell a call above it. The sold
+call pays for the bought put, so the structure is close to costless at the price
+of capping the upside. Use it when a position must be carried through a known
+event and the downside is unacceptable.
+
+## Risk
+
+Long volatility on the downside and short volatility on the upside. The risk is
+opportunity cost, not [gamma](../glossary/gamma.md).
+
+## Exit
+
+Roll the collar when either leg reaches ten percent of its original extrinsic
+value.
+EOF
+cat > "$BUNDLE/glossary/gamma.md" <<'EOF'
+---
+type: GlossaryTerm
+title: Gamma
+aliases: [gamma, second derivative, rate of change of delta]
+description: The rate of change of delta with respect to the underlying price.
+sources: [greeks.md]
+---
+
+The rate of change of [delta](delta.md) with respect to the underlying price:
+the second derivative of the option price. It is largest at the money and grows
+without bound as expiry approaches.
+EOF
+cat > "$BUNDLE/glossary/delta.md" <<'EOF'
+---
+type: GlossaryTerm
+title: Delta
+aliases: [delta, first derivative, hedge ratio]
+description: The rate of change of an option's price with respect to the underlying.
+sources: [greeks.md]
+---
+
+The first derivative of the option price with respect to the underlying price,
+quoted between minus one and one.
+EOF
+cat > "$BUNDLE/glossary/implied-volatility.md" <<'EOF'
+---
+type: GlossaryTerm
+title: Implied Volatility
+aliases: [implied volatility, IV, implied vol]
+description: The volatility input that makes a model return the traded price.
+sources: [greeks.md]
+---
+
+The volatility input that makes a pricing model reproduce an option's traded
+price. It is a quoted number, not a measurement of the future.
+EOF
+rm -rf "$BUNDLE/drafts"
+git -C "$BUNDLE" add -A
+git -C "$BUNDLE" commit -q -m "consolidate: 5 concepts from 6 drafts"
+
+okfy ledger add "$BUNDLE" --run run-1 --segment consolidation \
+  --inputs "straddle.md,collar.md,greeks.md" \
+  --prompt-version consolidate@1 \
+  --outputs "strategies/widget-straddle,strategies/widget-collar,glossary/gamma,glossary/delta,glossary/implied-volatility" \
+  --validation ok \
+  --merge-map "drafts/segment-01/straddle-entry=strategies/widget-straddle,drafts/segment-01/straddle-exit=strategies/widget-straddle,drafts/segment-01/collar=strategies/widget-collar,drafts/segment-01/gamma=glossary/gamma,drafts/segment-01/delta=glossary/delta,drafts/segment-01/implied-volatility=glossary/implied-volatility" \
+  >/dev/null || fail "okfy ledger add (consolidation)"
+
+step "dissent"
+okfy dissent add "$BUNDLE" --run run-1 --group strategies/widget-straddle \
+  --draft drafts/segment-01/straddle-entry \
+  --draft drafts/segment-01/straddle-exit \
+  --claim "entry criteria and the exit/prohibition rules could be two concepts" \
+  --anchor "straddle.md#L1-L14" \
+  --verdict no-schism \
+  --overruled-because "both drafts state conditions on one position's lifecycle; splitting them would make the exit rule unreachable from the entry question" \
+  >/dev/null || fail "okfy dissent add"
+
+step "segment done"
+okfy segment-status "$BUNDLE" segment-01 done >/dev/null || fail "okfy segment-status"
+
+# --- the lexicon: the retrieval contract ------------------------------------
+# `not-covered` rows are how a bundle says "I do not answer this" instead of
+# returning its best-scoring irrelevant concept. They are also the ONLY thing
+# that can make an adversarial `not-covered` expectation come out `met`, so
+# without them the reference bundle would need ten owner passes over five unmet
+# expectations — a rubber stamp, and precisely the failure the adversarial suite
+# exists to expose. Note that these rows are PHRASE-KEYED: they fire on the term
+# as written, and a synonym walks straight past them.
+step "lexicon"
+cat > "$BUNDLE/meta/lexicon.md" <<'EOF'
+---
+type: Lexicon
+title: Widget desk lexicon
+rows:
+  - term: gamma
+    status: accepted
+    maps_to: [glossary/gamma]
+    canonical_terms: [gamma, delta]
+  - term: implied volatility
+    status: accepted
+    maps_to: [glossary/implied-volatility]
+    canonical_terms: [implied volatility]
+  - term: collar
+    status: accepted
+    maps_to: [strategies/widget-collar]
+    canonical_terms: [collar]
+  - term: straddle
+    status: accepted
+    maps_to: [strategies/widget-straddle]
+    canonical_terms: [straddle]
+  - term: dividend
+    status: not-covered
+    note: the desk material covers option structure and greeks, never the widget's cash flows
+  - term: futures
+    status: not-covered
+    note: same desk, different instrument; nothing here supports a futures hedge
+  - term: margin
+    status: not-covered
+    note: margin is set by the clearer and is not in this material
+  - term: swaption
+    status: not-covered
+    note: an instrument this bundle has never seen
+  - term: position limit
+    status: not-covered
+    note: firm policy rather than trading technique
+---
+
+Terms this bundle answers to, and the terms it explicitly does not.
+EOF
+
+step "index + package"
+okfy index "$BUNDLE" >/dev/null || fail "okfy index"
+okfy package "$BUNDLE" >/dev/null || fail "okfy package"
+
+# --- L3: the purpose-fitness artifact --------------------------------------
+# `okfy sample` picks the concepts to review deterministically and reports the
+# seed it selected under; the review itself is judgement and has no CLI verb, so
+# the verdicts are written here as fixture data like the eval verdicts below.
+# The seed is read back from the tool rather than hardcoded: a recorded seed that
+# does not match the live one makes validate skip the replay check silently, so
+# hardcoding it would quietly delete the strongest thing this artifact proves.
+step "purpose-fitness (L3)"
+okfy sample "$BUNDLE" > "$WORK/sample.json" || fail "okfy sample"
+SEED="$(grep -o '"seed": "[^"]*"' "$WORK/sample.json" | cut -d'"' -f4)"
+SELECTOR="$(grep -o '"selector_version": [0-9]*' "$WORK/sample.json" \
+            | grep -o '[0-9]*$')"
+[ -n "$SEED" ] && [ -n "$SELECTOR" ] || fail "could not read seed from okfy sample"
+# Five concepts, two archetype checks each. If `okfy sample` ever selects a
+# different set these rows go missing and validate says so by name.
+for id in glossary/delta glossary/gamma glossary/implied-volatility \
+          strategies/widget-collar strategies/widget-straddle; do
+  grep -q "\"$id\"" "$WORK/sample.json" \
+    || fail "sample no longer selects $id — the L3 rows below would be stale"
+done
+{
+  echo "---"
+  echo "type: PurposeFitness"
+  echo "title: Widget desk purpose fitness"
+  echo "date: $(date -u +%Y-%m-%d)"
+  echo "prompt_version: l3@1"
+  echo "selector_version: $SELECTOR"
+  echo "seed: $SEED"
+  echo "fraction: 0.1"
+  echo "minimum: 20"
+  echo "sampled:"
+  echo "  - glossary/delta"
+  echo "  - glossary/gamma"
+  echo "  - glossary/implied-volatility"
+  echo "  - strategies/widget-collar"
+  echo "  - strategies/widget-straddle"
+  echo "rows:"
+  cat <<'ROWS'
+  - concept_id: glossary/delta
+    check_id: standalone-content
+    verdict: pass
+    evidence: states the derivative and its quoted range without referring out
+  - concept_id: glossary/delta
+    check_id: decision-ready
+    verdict: n/a
+    evidence: GlossaryTerm, not a Strategy or Playbook
+  - concept_id: glossary/gamma
+    check_id: standalone-content
+    verdict: pass
+    evidence: defines the term and its behaviour near expiry in the concept body
+  - concept_id: glossary/gamma
+    check_id: decision-ready
+    verdict: n/a
+    evidence: GlossaryTerm, not a Strategy or Playbook
+  - concept_id: glossary/implied-volatility
+    check_id: standalone-content
+    verdict: pass
+    evidence: separates the quoted input from realised movement without a pointer
+  - concept_id: glossary/implied-volatility
+    check_id: decision-ready
+    verdict: n/a
+    evidence: GlossaryTerm, not a Strategy or Playbook
+  - concept_id: strategies/widget-collar
+    check_id: standalone-content
+    verdict: pass
+    evidence: structure, risk and roll rule are all present in the body
+  - concept_id: strategies/widget-collar
+    check_id: decision-ready
+    verdict: pass
+    evidence: roll trigger is a number (ten percent of original extrinsic value)
+  - concept_id: strategies/widget-straddle
+    check_id: standalone-content
+    verdict: pass
+    evidence: entry, risk and exit stated without reference to the source file
+  - concept_id: strategies/widget-straddle
+    check_id: decision-ready
+    verdict: pass
+    evidence: entry is a decile threshold, exit is fifty percent or twenty-one days
+ROWS
+  echo "---"
+  echo
+  echo "Synthetic L3 review for the reference bundle."
+} > "$BUNDLE/meta/purpose-fitness.md"
+
+# --- acceptance: both suites, ten owner verdicts each -----------------------
+# Run LAST. The retrieval fingerprint covers the index, the lexicon rows and the
+# test queries, so a run recorded before any of them settles is stale evidence
+# the moment they move — which is exactly what the audit caught on real bundles.
+step "eval: acceptance suite"
+okfy eval run "$BUNDLE" -n 5 >/dev/null || fail "okfy eval run (acceptance)"
+for i in 0 1 2 3 4 5 6 7 8 9; do
+  okfy eval verdict "$BUNDLE" latest "$i" pass --owner \
+    --note "synthetic fixture verdict, not a record of anyone's judgement" \
+    >/dev/null || fail "okfy eval verdict (acceptance $i)"
+done
+
+step "eval: adversarial suite"
+okfy eval run "$BUNDLE" -n 5 --suite adversarial >/dev/null \
+  || fail "okfy eval run (adversarial)"
+for i in 0 1 2 3 4 5 6 7 8 9; do
+  okfy eval verdict "$BUNDLE" latest "$i" pass --owner --suite adversarial \
+    --note "synthetic fixture verdict, not a record of anyone's judgement" \
+    >/dev/null || fail "okfy eval verdict (adversarial $i)"
+done
+
+step "release-check"
+set +e
+okfy release-check "$BUNDLE" > "$WORK/release.json"
+RC=$?
+set -e
+cat "$WORK/release.json"
+[ "$RC" -eq 0 ] || fail "release-check exited $RC"
+grep -q '"ok": true' "$WORK/release.json" || fail "release-check did not return ok"
+
+# --- the gate is not vacuous -----------------------------------------------
+# A green run proves the contract is satisfiable. It does not prove the gate can
+# still say no — a release-check that returned ok for anything would pass every
+# line above. So break the copy in one place the contract names, and require the
+# red. `awk` rather than an okfy verb because there is deliberately no CLI for
+# un-recording an owner verdict: verdicts are append-only evidence.
+step "the deliberate break"
+BROKEN="$WORK/broken-okf"
+rm -rf "$BROKEN"
+cp -R "$BUNDLE" "$BROKEN"
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/"owner_verdict": "pass"/, "\"owner_verdict\": null")) done = 1
+       print }' "$BUNDLE/meta/eval.json" > "$BROKEN/meta/eval.json"
+cmp -s "$BUNDLE/meta/eval.json" "$BROKEN/meta/eval.json" \
+  && fail "the break edited nothing — the assertion below would be vacuous"
+set +e
+okfy release-check "$BROKEN" > "$WORK/broken.json"
+BRC=$?
+set -e
+cat "$WORK/broken.json"
+[ "$BRC" -ne 0 ] || fail "one owner verdict removed and release-check still exited 0"
+grep -q '"ok": false' "$WORK/broken.json" \
+  || fail "one owner verdict removed and release-check still returned ok"
+grep -q 'E_REL_EVAL_POLICY' "$WORK/broken.json" \
+  || fail "the break was not reported as an acceptance-policy failure"
+rm -rf "$BROKEN"
+
+printf '\nREFERENCE BUNDLE OK: %s\n' "$BUNDLE"

@@ -28,6 +28,7 @@ Imports: stdlib and `okfy` only. `tests/test_tokens.py` asserts this.
 """
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from okfy.bundle import Bundle
@@ -44,8 +45,28 @@ REQUIRED = ("raw_path", "raw_sha256", "normalized_path", "normalized_lines",
 # lined up against the original.
 OPTIONAL = ("page", "bbox", "converter_ref")
 
+# A digest field has to contain a digest. `raw_sha256: x` used to pass, so the
+# module docstring's "carrying the raw file and its hash" was a stronger claim
+# than the contract enforced — the field was checked for being a non-empty
+# string and nothing else.
+#
+# Lowercase only, both patterns. `hashlib.hexdigest()` emits lowercase and the
+# adapter is the only producer; accepting uppercase as well would make one field
+# two formats, and anything joining two source maps would have to normalise
+# before comparing. One format is the cheaper contract.
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# `okfy_normalize.backends.options_digest` truncates a sha256 to this many hex
+# characters. Declared HERE, in core, and asserted by the adapter — never the
+# reverse: core cannot import the adapter, and a constant restated in two places
+# is a constant that will drift. Same reasoning as `span_text` above, where the
+# producer and the validator share one definition of what a span's text is.
+OPTIONS_DIGEST_LEN = 32
+OPTIONS_DIGEST_RE = re.compile(r"^[0-9a-f]{%d}$" % OPTIONS_DIGEST_LEN)
+
 E_JSON = "E_SOURCEMAP_JSON"
 E_FIELD = "E_SOURCEMAP_FIELD"
+E_DIGEST = "E_SOURCEMAP_DIGEST"
 E_LINES = "E_SOURCEMAP_LINES"
 E_NO_FILE = "E_SOURCEMAP_NO_FILE"
 E_TEXT_DRIFT = "E_SOURCEMAP_TEXT_DRIFT"
@@ -80,6 +101,24 @@ def _check_row(row: dict, corpus: Path | None) -> tuple[str, list[dict]]:
         problems.append({"code": E_FIELD,
                          "message": f"unknown field(s): {', '.join(unknown)} "
                                     f"(allowed: {', '.join(REQUIRED + OPTIONAL)})"})
+    if problems:
+        return "error", problems
+
+    # AFTER the presence check, never merged with it: a field that is absent and
+    # a field that holds `x` are different findings, and reporting the second
+    # for the first would send a reader looking for a value that is not there.
+    for field, pattern, shape in (
+            ("raw_sha256", SHA256_RE, "64 lowercase hex characters"),
+            ("text_sha256", SHA256_RE, "64 lowercase hex characters"),
+            ("converter_options_digest", OPTIONS_DIGEST_RE,
+             f"{OPTIONS_DIGEST_LEN} lowercase hex characters")):
+        value = str(row[field])
+        if not pattern.match(value):
+            problems.append({
+                "code": E_DIGEST,
+                "message": f"{field} is {value!r}, not {shape} — the field is "
+                           "documented as pinning a hash, and a value that "
+                           "cannot be one makes that claim unenforceable"})
     if problems:
         return "error", problems
 

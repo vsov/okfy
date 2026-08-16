@@ -204,20 +204,19 @@ def _check_crosswalk(ws: Workspace, problems: list, notes: list):
 
 
 def _check_ws_eval(ws: Workspace, suite: str, problems: list, notes: list):
-    from okfy.evaluation import eval_status, load_evals, run_suite
+    from okfy.evaluation import eval_status, latest_run, load_evals
     tag = "EVAL" if suite == "acceptance" else "ADVERSARIAL"
     field = "test_queries" if suite == "acceptance" else "adversarial_queries"
     for msg in _surface_problems(ws_suite_queries(ws, suite), field,
                                  where="meta/workspace.md"):
         problems.append(f"E_REL_WS_{tag}_SURFACE: {msg}")
     try:
-        runs = [r for r in (load_evals(ws).get("runs") or [])
-                if run_suite(r) == suite]
+        latest = latest_run(load_evals(ws), suite)
     except (json.JSONDecodeError, AttributeError, TypeError) as e:
         problems.append(f"E_REL_WS_EVAL_INVALID: meta/eval.json cannot be read "
                         f"({type(e).__name__}: {e})")
         return
-    if not runs:
+    if latest is None:
         problems.append(
             f"E_REL_WS_{tag}_MISSING: no federated {suite} eval run — the "
             "workspace's own queries are the only evidence that federation "
@@ -230,7 +229,7 @@ def _check_ws_eval(ws: Workspace, suite: str, problems: list, notes: list):
         problems.append(
             f"E_REL_WS_{tag}_PROVISIONAL: federated {suite} run {st['run_id']} "
             f"— {t['owner_confirmed']}/{t['of']} owner verdicts recorded")
-    if runs[-1].get("retrieval_fingerprint") != workspace_retrieval_fingerprint(ws):
+    if latest.get("retrieval_fingerprint") != workspace_retrieval_fingerprint(ws):
         problems.append(
             f"E_REL_WS_{tag}_STALE: the federated {suite} run was judged "
             "against a different federated contract — a member's content, the "

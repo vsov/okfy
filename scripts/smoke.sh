@@ -162,6 +162,59 @@ RC=$?
 set -e
 [ "$RC" -ne 0 ] || fail "eval run -n 0 was accepted"
 
+step "normalize adapter end to end"
+# The third published package. It was in the export from the day it existed and
+# in no CI job, so nothing here ever proved its wheel installs or its console
+# script runs. Convert a raw tree, then hand the sidecar to `okfy sourcemap` —
+# the two halves are deliberately in different packages (core validates with the
+# standard library; the adapter may depend on whatever a converter needs), and
+# this is the only place they meet.
+RAW="$WORK/raw"
+NCORPUS="$WORK/ncorpus"
+mkdir -p "$RAW"
+printf '# Handbook\n\nSection one of the widget handbook.\n' > "$RAW/handbook.md"
+printf 'Loose operator notes, not markdown.\n' > "$RAW/notes.txt"
+okfy-normalize "$RAW" "$NCORPUS" > "$WORK/norm.json" || fail "okfy-normalize"
+grep -q '"converted": 2' "$WORK/norm.json" || fail "normalize converted the wrong count"
+grep -q '"skipped": \[\]' "$WORK/norm.json" || fail "normalize skipped a file it handles"
+[ -f "$NCORPUS/source-map.jsonl" ] || fail "normalize wrote no sidecar"
+
+# A bundle over the NORMALIZED corpus, carrying the sidecar where core reads it.
+NBUNDLE="$WORK/normalized-okf"
+okfy init "$NBUNDLE" --corpus "$NCORPUS" --language en >/dev/null \
+  || fail "okfy init (normalized corpus)"
+cp "$NCORPUS/source-map.jsonl" "$NBUNDLE/meta/source-map.jsonl"
+okfy sourcemap --json "$NBUNDLE" > "$WORK/sourcemap.json" || fail "okfy sourcemap"
+grep -q '"ok": true' "$WORK/sourcemap.json" \
+  || { cat "$WORK/sourcemap.json"; fail "sourcemap rejected the adapter's own output"; }
+grep -q '"state": "measured"' "$WORK/sourcemap.json" \
+  || fail "sourcemap could not recompute the hashes — the join is unverified"
+
+# ...and the negative: a sidecar the corpus contradicts must NOT pass. A verifier
+# that has only ever seen valid input is not known to verify anything.
+# Rewrite INSIDE the mapped span. Appending past its last line is deliberately
+# not drift — the row pins the span's text, not the file's — and using an append
+# here would have made this assertion fail for the right reason and the wrong one.
+printf '# Handbook\n\nSection one, silently rewritten after conversion.\n' \
+  > "$NCORPUS/handbook.md"
+set +e
+okfy sourcemap --json "$NBUNDLE" > "$WORK/sourcemap-drift.json"
+SMRC=$?
+set -e
+[ "$SMRC" -ne 0 ] || fail "sourcemap accepted a corpus that moved after conversion"
+grep -q 'E_SOURCEMAP_TEXT_DRIFT' "$WORK/sourcemap-drift.json" \
+  || { cat "$WORK/sourcemap-drift.json"; fail "drift was not reported as drift"; }
+
+step "reference bundle: the release contract, end to end"
+# The whole point of shipping this script: the unit suite is not in the export,
+# so this is the only evidence public CI can produce that the release contract is
+# satisfiable at all. It builds a synthetic bundle, requires ok=true, and breaks
+# it on purpose to require the red.
+bash "$(dirname "$0")/reference-bundle.sh" "$WORK/reference" > "$WORK/reference.log" 2>&1 \
+  || { tail -40 "$WORK/reference.log"; fail "reference bundle did not go green"; }
+grep -q 'REFERENCE BUNDLE OK' "$WORK/reference.log" \
+  || fail "reference-bundle.sh exited 0 without reporting OK"
+
 step "mcp adapter"
 okfy-mcp --help >/dev/null 2>&1 || python -c "import okfy_mcp" \
   || fail "okfy-mcp not installed"

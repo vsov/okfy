@@ -41,9 +41,14 @@ def options_digest(options: dict) -> str:
     so key order cannot change it, and the real dict so an option change DOES —
     a digest that ignores its input is worse than no digest, because it reads as
     a guarantee."""
+    from okfy.sourcemap import OPTIONS_DIGEST_LEN
     blob = json.dumps(options or {}, sort_keys=True, ensure_ascii=False,
                       separators=(",", ":"))
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+    # The length comes from core's validator, not from a number repeated here.
+    # Core cannot import this adapter, so the constant can only live there; a
+    # producer that restated it would drift the day the validator changed and
+    # would fail with E_SOURCEMAP_DIGEST on output that was never wrong.
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:OPTIONS_DIGEST_LEN]
 
 
 def _passthrough(src: Path, options: dict) -> Converted:

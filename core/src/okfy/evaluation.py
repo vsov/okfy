@@ -66,6 +66,27 @@ def run_suite(run: dict) -> str:
     return str(run.get("suite") or "acceptance")
 
 
+def latest_run(data: dict, suite: str = "acceptance") -> dict | None:
+    """The most recent run of ONE suite, or None if that suite never ran.
+
+    One definition, three callers. Each used to take the last row of the run log
+    directly, which is the same expression meaning three different things
+    depending on what the list had been filtered by first: the bundle acceptance
+    gate read an UNFILTERED log, so it took whichever suite ran last — and since
+    the pipeline appends the adversarial run after the acceptance run, that gate
+    compared the wrong run's fingerprint, query_options and retrieval_schema. A
+    stale acceptance run released clean. The other two call sites pre-filtered
+    and were correct; they route through here so the next reader cannot tell the
+    correct ones from the broken one by luck.
+
+    None rather than a raise: every caller already reports "this suite never
+    ran" in its own words before it needs a run."""
+    try:
+        return _find_run(data, "latest", suite)
+    except KeyError:
+        return None
+
+
 def _find_run(data: dict, run_id: str, suite: str = "acceptance") -> dict:
     runs = data.get("runs") or []
     if run_id == "latest":

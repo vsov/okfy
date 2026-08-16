@@ -49,7 +49,7 @@ jobs:
           # jobs red. This CI is small; the cache is not worth a failure mode.
           enable-cache: false
 
-      - name: Build and install both packages from wheels
+      - name: Build and install all three packages from wheels
         shell: bash
         run: |
           set -euo pipefail
@@ -62,7 +62,7 @@ jobs:
           # Non-editable by default (editable needs -e), so this installs the BUILT
           # artifact rather than the source tree: a file the packaging config
           # forgets fails here instead of surprising whoever runs `uv tool install`.
-          uv pip install --python .venv ./core ./adapters/mcp
+          uv pip install --python .venv ./core ./adapters/mcp ./adapters/normalize
 
       - name: End-to-end smoke test against the installed commands
         shell: bash
@@ -84,6 +84,9 @@ jobs:
           (cd core && uv run --python ${{ matrix.python }} pytest -q)
           if [ -d adapters/mcp/tests ]; then
             (cd adapters/mcp && uv run --python ${{ matrix.python }} pytest -q)
+          fi
+          if [ -d adapters/normalize/tests ]; then
+            (cd adapters/normalize && uv run --python ${{ matrix.python }} pytest -q)
           fi
 
   lint:
@@ -109,6 +112,7 @@ jobs:
           set -euo pipefail
           (cd core && uv run ruff check .)
           (cd adapters/mcp && uv run ruff check .)
+          (cd adapters/normalize && uv run ruff check .)
 
   lockfile:
     name: uv lock --check
@@ -131,6 +135,9 @@ jobs:
           if [ -f core/uv.lock ]; then
             (cd core && uv lock --check)
           fi
+          if [ -f adapters/normalize/uv.lock ]; then
+            (cd adapters/normalize && uv lock --check)
+          fi
 
   versions-agree:
     name: version strings agree
@@ -140,8 +147,11 @@ jobs:
       # No uv here on purpose: this job only reads files with the runner's own
       # python3, and installing a toolchain it does not use was what made its
       # post-job cache step fail.
-      # Five places declare the version and they have drifted before. A mismatch
-      # is cheap to detect and confusing to debug from the outside.
+      # Seven places declare the version and they have drifted before. A
+      # mismatch is cheap to detect and confusing to debug from the outside.
+      # normalize was published by publish.sh from the day it existed and
+      # checked by none of these four jobs, so it could ship a version nothing
+      # else agreed with and nothing would have said so.
       - shell: bash
         run: |
           set -euo pipefail
@@ -166,6 +176,12 @@ jobs:
                        r'^__version__ = "([^"]+)"'),
               "adapters/mcp/pyproject.toml":
                   grab("adapters/mcp/pyproject.toml", r'^version = "([^"]+)"'),
+              "adapters/normalize/src/okfy_normalize/__init__.py":
+                  grab("adapters/normalize/src/okfy_normalize/__init__.py",
+                       r'^__version__ = "([^"]+)"'),
+              "adapters/normalize/pyproject.toml":
+                  grab("adapters/normalize/pyproject.toml",
+                       r'^version = "([^"]+)"'),
               "plugin/.claude-plugin/plugin.json":
                   json.loads(pathlib.Path(
                       "plugin/.claude-plugin/plugin.json").read_text())["version"],
@@ -174,5 +190,5 @@ jobs:
               for k, v in found.items():
                   print(f"{v:12} {k}")
               raise SystemExit("version strings disagree")
-          print("all five agree:", next(iter(found.values())))
+          print(f"all {len(found)} agree:", next(iter(found.values())))
           PY

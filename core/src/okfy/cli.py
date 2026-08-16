@@ -249,7 +249,13 @@ def main(argv=None) -> int:
     d.add_argument("--segment", required=True)
     d.add_argument("--inputs", required=True, help="comma-separated corpus paths")
     d.add_argument("--prompt-version", dest="prompt_version", required=True)
-    d.add_argument("--outputs", required=True, help="comma-separated concept ids")
+    # "concept ids" was wrong and this is the field E_SPAN_OUTPUT now joins
+    # against: all 44 rows across the real bundles hold draft ids
+    # (`drafts/segment-01/breach-escalation`), which is also what
+    # `--spans-file`'s `covered` lists and what extract.md's Stage 4 asks for.
+    d.add_argument("--outputs", required=True,
+                   help="comma-separated draft ids written by this pass "
+                        "(e.g. drafts/segment-01/breach-escalation)")
     d.add_argument("--validation", required=True)
     d.add_argument("--merge-map", dest="merge_map", default=None,
                    help="draft=final,draft2=final2 (consolidation rows)")

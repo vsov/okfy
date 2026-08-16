@@ -134,6 +134,47 @@ def _check_validation(bundle: Bundle, problems: list):
             "run okfy validate with all strict flags for detail")
 
 
+def _check_source_map_release(bundle: Bundle, problems: list, notes: list):
+    """The source map at release strictness. Same three outcomes as validate,
+    one strictness harder — and the middle one is the reason this function is
+    not a one-liner.
+
+    ABSENT is not a defect and never blocks. None of the real bundles carries a
+    sidecar; they are built from authored text and have no raw document to map
+    back to. Blocking on absence would invent a regression the audit never asked
+    for, so absence is silent here rather than a waived note.
+
+    UNVERIFIABLE blocks. A row whose text hash could not be recomputed is not a
+    row that matched, and releasing it as provenance would be the exact failure
+    `okfy cost` and the injection gate already refuse — an unscanned file is not
+    a clean one, and an unchecked mapping is not a verified one.
+
+    FAILED blocks, obviously, and names the first few rows so the owner does not
+    have to re-run the standalone command to learn what broke."""
+    from okfy.sourcemap import check_source_map
+    out = check_source_map(bundle)
+    if out["state"] == "absent":
+        return
+    if out["problems"]:
+        first = "; ".join(f"line {p['line']} {p['code']}"
+                          for p in out["problems"][:3])
+        problems.append(
+            f"E_REL_SOURCEMAP: meta/source-map.jsonl has "
+            f"{len(out['problems'])} problem(s) ({first}) — the sidecar is the "
+            "only thing connecting a cited normalized span back to the raw "
+            "document, and a broken one cannot be that")
+    if out["unverifiable"]:
+        problems.append(
+            f"E_REL_SOURCEMAP_UNVERIFIABLE: {out['unverifiable']} of "
+            f"{out['rows']} source-map row(s) could not be checked against the "
+            "corpus — an unchecked mapping is not a verified one; make the "
+            "corpus readable and re-run")
+    if not out["problems"] and not out["unverifiable"]:
+        notes.append(f"source map: {out['verified']}/{out['rows']} row(s) "
+                     "verified against the corpus; page and bbox are carried, "
+                     "not verified")
+
+
 def _check_injection(bundle: Bundle, problems: list, notes: list):
     """Corpus-borne instructions block a release unless the owner declared
     otherwise — and the declaration never makes the count disappear.
@@ -274,9 +315,9 @@ def _check_span_outcomes(bundle: Bundle, problems: list, notes: list):
 def _check_eval(bundle: Bundle, problems: list, notes: list):
     import json as _json
 
-    from okfy.evaluation import eval_status, load_evals
+    from okfy.evaluation import eval_status, latest_run, load_evals
     try:
-        runs = load_evals(bundle).get("runs") or []
+        data = load_evals(bundle)
     except (_json.JSONDecodeError, AttributeError, TypeError) as e:
         # The eval record IS the acceptance evidence. Unreadable evidence is a
         # failure of the record, and it has to say so rather than crash the
@@ -286,7 +327,10 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
                         f"({type(e).__name__}: {e}) — the acceptance evidence "
                         "is unreadable, so no verdict in it can be trusted")
         return
-    if not runs:
+    # The ACCEPTANCE suite's latest run, not the log's last row. An adversarial
+    # run is appended after it and was masking it here.
+    latest = latest_run(data, "acceptance")
+    if latest is None:
         problems.append("E_REL_EVAL_MISSING: no eval runs recorded")
         return
     st = eval_status(bundle, "latest")
@@ -298,7 +342,6 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
     # An eval run has to say how it was invoked. Without it the record cannot be
     # replayed, and `-n 0` produced ten queries with zero hits each, ten owner
     # passes over nothing, and a green release.
-    latest = runs[-1]
     opts = latest.get("query_options")
     if latest.get("retrieval_schema") == FINGERPRINT_SCHEMA:
         if not isinstance(opts, dict):
@@ -444,13 +487,12 @@ def _check_adversarial(bundle: Bundle, problems: list, notes: list):
     adversarial`. What it adds is that each query declares its expectation up
     front, so the run carries a deterministic `met`/`unmet` outcome and an owner
     pass over an `unmet` outcome is visible as the override it is."""
-    from okfy.evaluation import eval_status, load_evals, run_suite
+    from okfy.evaluation import eval_status, latest_run, load_evals
     try:
-        runs = [r for r in (load_evals(bundle).get("runs") or [])
-                if run_suite(r) == "adversarial"]
+        latest = latest_run(load_evals(bundle), "adversarial")
     except (json.JSONDecodeError, AttributeError, TypeError):
         return                       # _check_eval already reported the file
-    if not runs:
+    if latest is None:
         problems.append(
             "E_REL_ADVERSARIAL_MISSING: no adversarial eval run — ten owner "
             "passes on the queries the bundle was built for cannot show what it "
@@ -463,8 +505,7 @@ def _check_adversarial(bundle: Bundle, problems: list, notes: list):
         problems.append(
             f"E_REL_ADVERSARIAL_PROVISIONAL: adversarial run {st['run_id']} — "
             f"{t['owner_confirmed']}/{t['of']} owner verdicts recorded")
-    recorded = runs[-1].get("retrieval_fingerprint")
-    if recorded != retrieval_fingerprint(bundle):
+    if latest.get("retrieval_fingerprint") != retrieval_fingerprint(bundle):
         problems.append(
             "E_REL_ADVERSARIAL_STALE: the adversarial run was judged against a "
             "different retrieval contract than the live bundle — re-run it "
@@ -592,6 +633,7 @@ def release_check(bundle: Bundle) -> dict:
     notes: list[str] = []
     _check_validation(bundle, problems)
     _check_injection(bundle, problems, notes)
+    _check_source_map_release(bundle, problems, notes)
     _check_provenance_complete(bundle, problems, notes)
     _check_span_outcomes(bundle, problems, notes)
     _check_acceptance_readable(bundle, problems, notes)

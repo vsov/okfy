@@ -83,7 +83,9 @@ a verdict. [docs/USAGE-merge-audit.md](docs/USAGE-merge-audit.md) is the
 operating manual for both, along with `okfy merge-audit` and the execution
 attestation.
 
-[CI](.github/workflows/ci.yml) runs on Ubuntu and macOS across Python 3.11-3.13: it builds both wheels, installs them clean, and runs [scripts/smoke.sh](scripts/smoke.sh) against the *installed* commands — the path a source-tree test run cannot reach. You can run that same smoke test yourself after installing, to check your own environment.
+[CI](.github/workflows/ci.yml) runs on Ubuntu and macOS across Python 3.11-3.13: it builds all three wheels (core, MCP and normalize), installs them clean, and runs [scripts/smoke.sh](scripts/smoke.sh) against the *installed* commands — the path a source-tree test run cannot reach. You can run that same smoke test yourself after installing, to check your own environment.
+
+Smoke also builds the **reference bundle** ([scripts/reference-bundle.sh](scripts/reference-bundle.sh)): a synthetic bundle assembled from the CLI alone that must return `release_check.ok=true`, and which then breaks itself on purpose and must go red. Its corpus is three invented files and its owner verdicts are fixture data, so it proves one thing precisely — that the release contract is satisfiable end to end, and that the gate can still refuse. That is the evidence this repository can run; the unit suite is development material and stays out of the export.
 
 The [User Guide](docs/guide/GUIDE.md) walks both tracks end to end — §6 is the
 step-by-step procedure for OKFying a text corpus and a codebase, §11 explains

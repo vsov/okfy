@@ -138,6 +138,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_provenance(bundle, r, strict=strict_provenance)
     _check_package(bundle, r, strict=strict_package)
     _check_injection(bundle, r, strict=strict_injection)
+    _check_source_map(bundle, r)
     _check_budget(bundle, archetype, r)
     for c in concepts:
         if archetype_applies(c.id):
@@ -165,6 +166,44 @@ def archetype_applies(concept_id: str) -> bool:
     finding. One predicate, both callers.
     """
     return not concept_id.startswith("meta/")
+
+
+def _check_source_map(bundle: Bundle, r: Report):
+    """`meta/source-map.jsonl`, verified as part of validation rather than only
+    by `okfy sourcemap`.
+
+    The verification was correct and complete and simply wired to nothing that
+    gates: a syntactically broken sidecar could be dropped into a green bundle
+    and release-check stayed true. A check that no gate calls is documentation.
+
+    THREE outcomes, kept apart on purpose:
+
+    - absent      -> nothing at all. Most corpora are authored text and will
+                     never have a sidecar; a missing optional artifact must not
+                     read as a gap, and treating it as one would turn every
+                     existing bundle red for a reason nobody asked about.
+    - unverifiable-> reported, because a hash that could not be recomputed is
+                     not a hash that matched. Same reasoning as an unscanned
+                     file not being a clean one.
+    - failed      -> reported with the row's own code and line.
+
+    Warnings here, errors at release: the W_/E_ escalation this module already
+    uses everywhere. The import is local because `okfy.sourcemap` imports
+    `ANCHOR_LINE_RE` from this module — one grammar for line anchors, which is
+    worth a lazy import.
+    """
+    from okfy.sourcemap import SOURCE_MAP, check_source_map
+    out = check_source_map(bundle)
+    if out["state"] == "absent":
+        return
+    for p in out["problems"]:
+        r.add("warning", "W_SOURCEMAP", f"{SOURCE_MAP} (line {p['line']})",
+              f"{p['code']}: {p['message']}")
+    if out["unverifiable"]:
+        r.add("warning", "W_SOURCEMAP_UNVERIFIABLE", SOURCE_MAP,
+              f"{out['unverifiable']} of {out['rows']} row(s) could not be "
+              "checked against the corpus — the raw-to-normalized mapping is "
+              "carried, not verified")
 
 
 def _check_injection(bundle: Bundle, r: Report, strict: bool = False):
@@ -701,7 +740,8 @@ def _check_span_coverage(bundle: Bundle, r: Report):
     real bundles predate this block entirely and must not turn red. The release
     gate is where it becomes an obligation.
     """
-    from okfy.ledger import SPAN_CLASSES, job_span_keys, latest_span_outcomes
+    from okfy.ledger import (SPAN_CLASSES, job_span_keys, latest_span_rows,
+                             unknown_covered_outputs)
     try:
         plan = bundle.plan()
         purpose = bundle.purpose()
@@ -714,14 +754,15 @@ def _check_span_coverage(bundle: Bundle, r: Report):
     if not done:
         return
 
-    latest = latest_span_outcomes(bundle)
+    latest = latest_span_rows(bundle)
     totals = dict.fromkeys(SPAN_CLASSES, 0)
     without = []
     for seg in done:
-        spans = latest.get(seg)
-        if spans is None:
+        row = latest.get(seg)
+        if row is None:
             without.append(seg)
             continue
+        spans = row["spans"]
         for cls in SPAN_CLASSES:
             totals[cls] += len(spans.get(cls) or {})
         jf = bundle.root / "meta" / "jobs" / f"{seg}.json"
@@ -755,6 +796,15 @@ def _check_span_coverage(bundle: Bundle, r: Report):
                   f"{len(extra)} span(s) are not in the job artifact "
                   f"(e.g. {', '.join(extra[:3])}) — the artifact is the "
                   "denominator; a span outside it was never assigned")
+        # The join, for rows already on disk. `add_row` refuses this at write
+        # time, but a ledger is append-only and rows written before the check
+        # existed cannot be refused retroactively — they can only be found.
+        unknown = unknown_covered_outputs(spans, row.get("outputs"))
+        if unknown:
+            r.add("error", "E_SPAN_OUTPUT", where,
+                  f"{len(unknown)} covered span(s) name draft(s) this row does "
+                  f"not list in outputs (e.g. {', '.join(unknown[:3])}) — the "
+                  "two halves of one row disagree about what the pass produced")
 
     for seg in without:
         r.add("warning", "W_SPAN_COVERAGE_MISSING", f"meta/ledger.jsonl ({seg})",

@@ -73,7 +73,14 @@ def init_bundle(path: Path | None, corpus: Path, language: str = "en",
     (path / ".gitignore").write_text(".okfy-cache/\n", encoding="utf-8")
     (meta / "purpose.md").write_text(serialize(
         {"type": "Purpose", "title": "(to be written by Purpose Interview)",
-         "language": language, "write_policy": write_policy, "test_queries": []},
+         "language": language, "write_policy": write_policy, "test_queries": [],
+         # The dissent gate reads this declaration and returns early when it is
+         # absent, so omitting it left the gate off for every bundle created
+         # after v0.10 — default-off by omission rather than by decision. New
+         # bundles opt in at birth; bundles accepted before the ledger existed
+         # stay exempt BY CONSTRUCTION, because they simply do not carry the key
+         # and nothing here rewrites them.
+         "acceptance": {"dissent": "required"}},
         "Purpose statement pending — /okfy:new fills this in.\n"), encoding="utf-8")
     (meta / "corpus-manifest.json").write_text(
         json.dumps(_manifest(corpus), indent=0, sort_keys=True), encoding="utf-8")

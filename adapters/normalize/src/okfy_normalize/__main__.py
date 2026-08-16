@@ -38,6 +38,29 @@ def main(argv=None) -> int:
         print(str(e).strip("'"), file=sys.stderr)
         return 2
     print(json.dumps(out, ensure_ascii=False, indent=2))
+
+    # A shell reads exit 0 as "the corpus is complete". It is not complete when a
+    # document was skipped — that document will not be in the corpus and no span
+    # can ever cite it — and it is empty when nothing converted at all, which is
+    # how a directory of PDFs under the passthrough backend reads as done. The
+    # report is on stdout either way; the reason and the exit code are here.
+    #
+    # ponytail: ANY skip is a refusal. For a mixed tree (documents plus one
+    # image) that is too strict, and the escape hatch is the library call, not a
+    # softer default — so the message names every skipped file and its reason,
+    # and `import okfy_normalize` remains available to a caller who has judged
+    # the skips acceptable.
+    if out["skipped"]:
+        listed = "; ".join(f"{s['path']} ({s['reason']})" for s in out["skipped"])
+        print(f"refusing: {len(out['skipped'])} of "
+              f"{len(out['skipped']) + out['converted']} file(s) were not "
+              f"converted, so the corpus is incomplete: {listed}", file=sys.stderr)
+        return 1
+    if out["converted"] == 0:
+        print(f"refusing: nothing was converted — no readable source files "
+              f"under {a.src}; an empty corpus cannot ground anything",
+              file=sys.stderr)
+        return 1
     return 0
 
 

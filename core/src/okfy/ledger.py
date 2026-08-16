@@ -29,6 +29,24 @@ E_SPAN_BAD_REPORT = "E_SPAN_BAD_REPORT"
 E_SPAN_BLANK_REASON = "E_SPAN_BLANK_REASON"
 E_SPAN_EMPTY_DRAFTS = "E_SPAN_EMPTY_DRAFTS"
 E_SPAN_NO_JOB = "E_SPAN_NO_JOB"
+E_SPAN_OUTPUT = "E_SPAN_OUTPUT"
+
+
+def unknown_covered_outputs(spans: dict, outputs) -> list[str]:
+    """Draft ids a `covered` span names that the row does not list in `outputs`.
+
+    ONE definition, used at write time by `add_row` and at validate time by
+    `_check_span_coverage`, because rows already on disk cannot be fixed by a
+    write-time refusal and two copies of a join drift.
+
+    This grades a JOIN and nothing else: `outputs` is what the row itself says
+    this pass produced, so a `covered` span citing an id that is not there is two
+    halves of one row disagreeing — arithmetic over two lists written in the same
+    call. It says nothing about whether a worker read the span. That remains
+    unknowable to the core and unlabelled as known; see `SPAN_ATTESTED_NOTE`."""
+    known = set(outputs if isinstance(outputs, (list, tuple, set)) else [])
+    named = {i for ids in (spans.get("covered") or {}).values() for i in ids}
+    return sorted(named - known)
 
 
 def span_key(entry) -> str:
@@ -181,6 +199,14 @@ def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: s
                 f"{E_SPAN_NO_JOB}: span outcomes given for segment {segment!r} "
                 f"but meta/jobs/{segment}.json does not exist — the job artifact "
                 "is the denominator these outcomes partition; run `okfy job` first")
+        unknown = unknown_covered_outputs(checked, row["outputs"])
+        if unknown:
+            raise ValueError(
+                f"{E_SPAN_OUTPUT}: {len(unknown)} covered span(s) name draft(s) "
+                f"this row does not list in outputs ({', '.join(unknown[:3])}) — "
+                "outputs is this row's own account of what the pass produced, so "
+                "the two halves of one row disagree. Add them to outputs if they "
+                "were written, or move the span to reviewed_empty if nothing was")
         row["spans"] = checked
 
     path = ledger_path(bundle)
@@ -191,15 +217,24 @@ def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: s
     return row
 
 
-def latest_span_outcomes(bundle: Bundle) -> dict:
-    """The live span report per segment. A segment can be re-run, so the newest
-    row carrying spans wins — an older row's outcomes describe material a later
-    pass has already superseded."""
+def latest_span_rows(bundle: Bundle) -> dict:
+    """The whole live row per segment, not just its span block. A segment can be
+    re-run, so the newest row carrying spans wins — an older row's outcomes
+    describe material a later pass has already superseded.
+
+    Whole rows because the `covered`-to-`outputs` join needs both halves, and
+    they only travel together on the row that wrote them."""
     out: dict[str, dict] = {}
     for row in read_rows(bundle):
         if isinstance(row.get("spans"), dict):
-            out[str(row.get("segment"))] = row["spans"]
+            out[str(row.get("segment"))] = row
     return out
+
+
+def latest_span_outcomes(bundle: Bundle) -> dict:
+    """The live span report per segment. Derived from `latest_span_rows` so the
+    two cannot pick different rows."""
+    return {seg: row["spans"] for seg, row in latest_span_rows(bundle).items()}
 
 
 def read_rows(bundle: Bundle, run_id: str | None = None) -> list:

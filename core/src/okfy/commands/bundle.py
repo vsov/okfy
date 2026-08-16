@@ -10,7 +10,9 @@ from .common import _archetype_for, _print
 def cmd_init(a) -> int:
     b = init_bundle(a.bundle, a.corpus, language=a.language,
                     write_policy=a.write_policy, embed=a.embed)
-    _print({"created": str(b)})
+    # `acceptance` echoed back because the scaffold now declares a policy the
+    # caller did not ask for: a default that is on is only honest if it is said.
+    _print({"created": str(b), "acceptance": {"dissent": "required"}})
     return 0
 
 
