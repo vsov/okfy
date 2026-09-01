@@ -12,6 +12,7 @@ about whether a trailing newline is part of the span — a disagreement that wou
 surface as `E_SOURCEMAP_TEXT_DRIFT` on output that was never wrong.
 """
 import hashlib
+import unicodedata
 import json
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from okfy.sourcemap import span_text
 from okfy_normalize.backends import (BackendUnavailable, get_backend,
                                      options_digest)
 
-__version__ = "0.20.0"
+__version__ = "0.21.0"
 SOURCE_MAP = "source-map.jsonl"
 
 __all__ = ["BackendUnavailable", "normalize_tree", "__version__", "SOURCE_MAP"]
@@ -56,17 +57,53 @@ def normalize_tree(src: Path, dest: Path, backend: str = "passthrough",
     # which is a worse state than either outcome — so the refusal happens first
     # and dest is left absent.
     root = src.parent if src.is_file() else src
-    targets: dict[str, str] = {}
+    targets: dict[str, tuple[str, str]] = {}
     for f in _sources(src):
         rel = str(f.relative_to(root))
         out = str(Path(rel).with_suffix(".md"))
-        if out in targets:
+        # THE KEY IS FOLDED, THE MESSAGE IS NOT. v0.20 compared literal path
+        # strings, which is the comparison the filesystem does NOT do: on
+        # case-insensitive APFS and NTFS, `Same.md` and `same.md` are two keys
+        # and one file, so the second conversion silently replaced the first
+        # and the command exited 0 with `converted: 2, skipped: []`. macOS also
+        # stores names in NFD while most tools emit NFC, so `résumé` written two
+        # ways is the same collision wearing different bytes.
+        #
+        # Conservative on purpose: this refuses a few pairs that a strictly
+        # case-sensitive volume would accept. That trade is deliberate and one
+        # directional — a false refusal costs a rename, a missed collision costs
+        # a document, and the sidecar then carries a text hash describing a file
+        # that is not there.
+        #
+        # NOT handled, and worth naming: a filesystem that folds MORE than
+        # NFC+casefold — some SMB and older HFS+ configurations fold width or
+        # diacritics too. Those would still collide undetected. Widening the key
+        # further starts refusing legitimately distinct names, so this is where
+        # the line sits rather than where the problem ends.
+        key = unicodedata.normalize("NFC", out).casefold()
+        if key in targets:
+            first_src, first_out = targets[key]
+            # Three wordings, because the reader's next action differs. Naming
+            # the two paths is useless when they RENDER identically — an NFC and
+            # an NFD spelling of `résumé.md` print the same and differ only in
+            # bytes, so "'résumé.md' and 'résumé.md'" reads as a bug in the
+            # error message rather than a fact about the files.
+            if first_out == out:
+                same = "the same output path"
+            elif unicodedata.normalize("NFC", first_out) == \
+                    unicodedata.normalize("NFC", out):
+                same = (f"{out!r} written two ways — the names differ only in "
+                        "Unicode normalization form (NFC vs NFD), which is one "
+                        "file on disk though the bytes are not equal")
+            else:
+                same = (f"{first_out!r} and {out!r}, which are one file on a "
+                        "case-insensitive filesystem")
             raise ValueError(
-                f"output path collision: {targets[out]!r} and {rel!r} both "
-                f"normalize to {out!r}. Nothing was written. Rename one of them, "
+                f"output path collision: {first_src!r} and {rel!r} both "
+                f"normalize to {same}. Nothing was written. Rename one of them, "
                 "or convert them into separate dest trees — normalizing both "
                 "would silently replace the first document with the second")
-        targets[out] = rel
+        targets[key] = (rel, out)
 
     dest.mkdir(parents=True, exist_ok=True)
 

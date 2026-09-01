@@ -196,9 +196,17 @@ def _check_source_map(bundle: Bundle, r: Report):
     out = check_source_map(bundle)
     if out["state"] == "absent":
         return
+    # `missing` is NOT `absent`: the bundle declared the sidecar mandatory and
+    # it is not there. Returning early on that would honour the declaration by
+    # ignoring it.
     for p in out["problems"]:
-        r.add("warning", "W_SOURCEMAP", f"{SOURCE_MAP} (line {p['line']})",
-              f"{p['code']}: {p['message']}")
+        # Not every problem is about a row. An empty file, an uncovered cited
+        # source and a declared-but-absent map are facts about the ARTIFACT, and
+        # `line 3` on any of them would send a reader to a line that is not
+        # there.
+        where = (f"{SOURCE_MAP} (line {p['line']})" if "line" in p
+                 else SOURCE_MAP)
+        r.add("warning", "W_SOURCEMAP", where, f"{p['code']}: {p['message']}")
     if out["unverifiable"]:
         r.add("warning", "W_SOURCEMAP_UNVERIFIABLE", SOURCE_MAP,
               f"{out['unverifiable']} of {out['rows']} row(s) could not be "
@@ -494,6 +502,17 @@ def _check_execution(bundle: Bundle, r: Report, strict: bool = False):
     from okfy.job import EXECUTION_FIELDS
     jobs = sorted((bundle.root / "meta" / "jobs").glob("*.json"))
     if not jobs:
+        return
+    if strict and str(bundle.purpose().get("provenance", "")).strip() == "legacy":
+        # v0.21 composed this check into release_check, where it had never run.
+        # A bundle extracted before v0.10 has job artifacts that CANNOT gain an
+        # executor identity — the run is over and nobody recorded who did it —
+        # so the escape is the declaration the other release gates already
+        # honour rather than a new one. Warning level still applies below when
+        # not strict, because a warning is a description and this is one.
+        r.add("warning", "W_EXEC_LEGACY", "meta/purpose.md",
+              "provenance: legacy declared — executor identity not enforced on "
+              f"{len(jobs)} job artifact(s); nothing records who ran them")
         return
     level, code = (("error", "E_EXEC_MISSING") if strict
                    else ("warning", "W_EXEC_MISSING"))
@@ -1054,11 +1073,37 @@ def _check_quality(bundle: Bundle, archetype, r: Report, strict: bool = False):
             if not str(row.get("evidence", "")).strip():
                 r.add(level, code("QUALITY_EVIDENCE"), c.id,
                       f"row for {sid} x {chk}: evidence is empty")
-    # replay: if the corpus hasn't moved (seed still current) the deterministic
-    # sample must be covered; a moved corpus is not replayable — skip silently.
-    from okfy.sampling import SELECTOR_VERSION, _selector_seed, sample_for_review
-    if (str(c.meta.get("seed")) == _selector_seed(bundle)
-            and c.meta.get("selector_version") == SELECTOR_VERSION):
+    # THE REPLAY, AND WHY IT NO LONGER SKIPS.
+    #
+    # This used to read "a moved corpus is not replayable — skip silently", and
+    # that comment was honest about what it did and wrong about what it meant.
+    # A moved corpus is exactly the moment the recorded L3 review stopped
+    # describing this bundle, so the single most obvious symptom of a stale
+    # review was turning the check OFF. An audit set the seed to
+    # `definitely-not-current` and released clean.
+    #
+    # Two causes, one code, two messages — the remedies differ. A moved corpus
+    # means re-run the sample and review what it picks; a changed selector means
+    # the sampler itself no longer chooses the same concepts, and the old sample
+    # is not the deterministic one for any corpus.
+    from okfy.archetype import checks_digest
+    from okfy.sampling import (SELECTOR_VERSION, _selector_seed,
+                               sample_for_review, sampled_fingerprint)
+    live_seed = _selector_seed(bundle)
+    rec_sv = c.meta.get("selector_version")
+    if str(c.meta.get("seed")) != live_seed:
+        r.add(level, code("QUALITY_STALE"), c.id,
+              f"the L3 review records seed {str(c.meta.get('seed'))!r} and the "
+              f"corpus is now {live_seed!r} — the corpus moved after the review, "
+              "so the recorded sample is not the one this bundle would select; "
+              "re-run `okfy sample` and review what it picks")
+    elif rec_sv != SELECTOR_VERSION:
+        r.add(level, code("QUALITY_STALE"), c.id,
+              f"the L3 review records selector_version {rec_sv!r} and the "
+              f"sampler is now v{SELECTOR_VERSION} — the corpus has not moved "
+              "but the selection rule has, so the recorded sample is not the "
+              "deterministic one; re-run `okfy sample` and review what it picks")
+    else:
         rerun = sample_for_review(
             bundle, fraction=float(c.meta.get("fraction", 0.1)),
             minimum=int(c.meta.get("minimum", 20)))
@@ -1066,6 +1111,36 @@ def _check_quality(bundle: Bundle, archetype, r: Report, strict: bool = False):
         if missing:
             r.add(level, code("QUALITY_SAMPLE"), c.id,
                   f"recorded sample misses deterministic selection: {missing}")
+
+    # WHAT WAS REVIEWED, and WHAT IT WAS REVIEWED AGAINST. The seed pins the
+    # corpus; these two pin the concepts' own bytes and the questions the
+    # reviewer answered. Without them a verdict recorded on Monday still reads
+    # `pass` after the concept is rewritten on Tuesday — the corpus never moved,
+    # so nothing above notices.
+    #
+    # Absent is the pre-v0.21 artifact and is never an error at plain validate.
+    # At release it is an error, because "this review does not record what it
+    # read" and "this review is current" cannot both be asserted — and the
+    # escape is the declaration that already exists for exactly this, rather
+    # than a new mechanism: `provenance: legacy` in meta/purpose.md.
+    legacy = str(bundle.purpose().get("provenance", "")).strip() == "legacy"
+    for pin, want in (("sampled_fingerprint", sampled_fingerprint(bundle, sampled)),
+                      ("checks_digest", checks_digest(archetype))):
+        have = c.meta.get(pin)
+        if have in (None, "", []):
+            if not legacy:
+                r.add(level, code("QUALITY_UNPINNED"), c.id,
+                      f"the L3 review records no {pin} — it does not say what "
+                      "it read, so a concept rewritten since cannot be told "
+                      "from one that was not. Re-run `okfy sample` and record "
+                      "the pins it reports, or declare `provenance: legacy` if "
+                      "this bundle predates the field")
+        elif str(have) != want:
+            r.add(level, code("QUALITY_DRIFT"), c.id,
+                  f"{pin} recorded {str(have)[:12]}… and computes to "
+                  f"{want[:12]}… — what the review covered changed after it was "
+                  "recorded, so its verdicts describe something else. Re-run "
+                  "`okfy sample` and redo the L3 pass over what it selects")
 
 
 def _check_provenance(bundle: Bundle, r: Report, strict: bool = False):

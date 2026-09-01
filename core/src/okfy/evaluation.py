@@ -106,6 +106,82 @@ def _find_run(data: dict, run_id: str, suite: str = "acceptance") -> dict:
 MIN_TOP_HITS = 1
 
 
+def canonical_query_options(n: int) -> dict:
+    """How `eval_run` invokes retrieval, in ONE place.
+
+    Only `n` ever varied; the other three have been constants since the field
+    existed. Writing them as a literal in `eval_run` and validating `n >= 1` in
+    the release gate meant the gate could not tell an invocation this function
+    produces from one nobody could have run — and the audit walked straight
+    through the gap: `{"n": 5, "expand": false, "include_meta": true,
+    "include_stale": false}` was accepted as evidence of a run that never
+    happened. The recorder and the checker now share this definition, so a
+    record whose options are not exactly this one is a record `eval_run` did not
+    write."""
+    return {"n": int(n), "expand": True, "include_meta": False,
+            "include_stale": True}
+
+
+def replay_run(bundle: Bundle, run: dict) -> list[dict]:
+    """Re-derive a recorded eval run from the live bundle and report every field
+    that differs. Reads only; writes nothing, ever.
+
+    THIS IS THE HALF THE FINGERPRINT NEVER COVERED. `retrieval_fingerprint`
+    pins the ENVIRONMENT — index, lexicon, test queries, tool version. It says
+    nothing about the OUTPUT recorded next to the owner's verdict, so a run
+    edited after review kept its fingerprint and released clean: a different
+    question, an invented expansion, an empty hit list and a fabricated note all
+    survived a green `release_check`. An owner verdict is only evidence about
+    the results it was given; if those results are not the ones the bundle
+    produces, the verdict is about something else.
+
+    Determinism is what makes this checkable rather than merely plausible, and
+    it was measured before this function was written: `query.query` is
+    bit-identical across repeated calls and across processes, float scores
+    included, so the comparison is EXACT — no rounding, no excluded field. If
+    that ever stops being true the right response is to name the unstable field
+    here, not to loosen the comparison quietly.
+
+    The caller decides WHEN to replay. Replaying a bundle whose fingerprint has
+    already moved proves nothing — the environment changed, so of course the
+    results did — and `E_REL_EVAL_STALE` is already the finding."""
+    suite = run_suite(run)
+    diffs: list[dict] = []
+    opts = run.get("query_options")
+    if not isinstance(opts, dict):
+        return [{"field": "query_options", "recorded": opts,
+                 "expected": "a mapping of n/expand/include_meta/include_stale"}]
+    n = opts.get("n")
+    if isinstance(n, bool) or not isinstance(n, int) or n < MIN_TOP_HITS:
+        return [{"field": "query_options.n", "recorded": n,
+                 "expected": f"an integer >= {MIN_TOP_HITS}"}]
+    want = canonical_query_options(n)
+    if opts != want:
+        return [{"field": "query_options", "recorded": opts, "expected": want}]
+
+    specs = suite_queries(bundle, suite)
+    results = run.get("results") or []
+    if len(results) != len(specs):
+        return [{"field": "results", "recorded": f"{len(results)} queries",
+                 "expected": f"{len(specs)} in meta/purpose.md"}]
+
+    for i, (spec_raw, rec) in enumerate(zip(specs, results)):
+        spec = spec_raw if isinstance(spec_raw, dict) else {"query": str(spec_raw)}
+        text = str(spec.get("query") or "")
+        out = query.query(bundle, text, n=n, expand=want["expand"])
+        got = {"query": text,
+               "expanded_query": out["expanded_query"],
+               "top_hits": [_slim(h) for h in out["results"]],
+               "notes": out["notes"]}
+        if suite == "adversarial":
+            got.update(adversarial_outcome(spec, out))
+        for field, value in got.items():
+            if rec.get(field) != value:
+                diffs.append({"index": i, "field": field,
+                              "recorded": rec.get(field), "replayed": value})
+    return diffs
+
+
 ADVERSARIAL_KEYS = {"query", "expect", "concept", "why"}
 
 
@@ -194,11 +270,12 @@ def eval_run(bundle: Bundle, n: int = 10, suite: str = "acceptance") -> dict:
             f"meta/purpose.md has no {field} — the {suite} suite replays them; "
             "add them to the purpose.md frontmatter first")
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    _OPTS = canonical_query_options(n)
     results = []
     for q in queries:
         spec = q if isinstance(q, dict) else {"query": str(q)}
         text = str(spec.get("query") or "")
-        out = query.query(bundle, text, n=n, expand=True)
+        out = query.query(bundle, text, n=n, expand=_OPTS["expand"])
         r = {"query": text, "expanded_query": out["expanded_query"],
              "top_hits": [_slim(h) for h in out["results"]],
              # lexicon notes (ambiguous / not-covered) are part of
@@ -225,8 +302,7 @@ def eval_run(bundle: Bundle, n: int = 10, suite: str = "acceptance") -> dict:
            # the bundle was built to answer, `adversarial` the ones it is most
            # likely to answer confidently and wrongly. One format, one ledger.
            "suite": suite,
-           "query_options": {"n": n, "expand": True, "include_meta": False,
-                             "include_stale": True},
+           "query_options": canonical_query_options(n),
            "results": results}
     data = load_evals(bundle)
     data["runs"].append(run)

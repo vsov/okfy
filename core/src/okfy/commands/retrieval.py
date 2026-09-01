@@ -47,5 +47,30 @@ def cmd_links(a) -> int:
 
 def cmd_sample(a) -> int:
     b = Bundle(a.bundle)
-    _print(sample_for_review(b, fraction=a.fraction, minimum=a.minimum))
+    out = sample_for_review(b, fraction=a.fraction, minimum=a.minimum)
+    # The PINS come from the tool that picks the sample. v0.21 requires
+    # meta/purpose-fitness.md to record what the review read
+    # (`sampled_fingerprint`) and what it was read against (`checks_digest`),
+    # and `okfy sample` is the only command that already knows the first of
+    # those. Emitting them here is what makes the L3 artifact writable by
+    # anything that cannot import okfy — the reference builder is shell, and
+    # recomputing a digest in shell would restate a definition that must exist
+    # exactly once.
+    #
+    # They describe THIS selection. A reviewer who samples, then reviews a
+    # different set, must not copy these across — and `E_QUALITY_DRIFT` is what
+    # catches it when they do.
+    from okfy.archetype import checks_digest, load_archetype
+    from okfy.sampling import sampled_fingerprint
+    plan = b.plan()
+    name = plan.meta.get("archetype") if plan else None
+    arch = None
+    if name:
+        try:
+            arch = load_archetype(str(name))
+        except FileNotFoundError:
+            arch = None
+    out["sampled_fingerprint"] = sampled_fingerprint(b, out["sampled"])
+    out["checks_digest"] = checks_digest(arch)
+    _print(out)
     return 0

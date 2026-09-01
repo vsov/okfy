@@ -1,3 +1,5 @@
+import hashlib
+import json
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -53,3 +55,21 @@ def load_archetype(name: str) -> Archetype:
         consumption_protocol=d.get("consumption_protocol", ""),
         root=root,
     )
+
+
+def checks_digest(archetype) -> str:
+    """A digest of the questions an L3 review answered.
+
+    A recorded `pass` is a pass against a specific check, phrased a specific
+    way. Rewording `decision-ready` or adding a sixth purpose check changes what
+    the review would have concluded, and without this the old verdict silently
+    carries forward as though it had answered the new question. `sampled` is
+    pinned by `sampled_fingerprint`, `seed` by the corpus — this is the third
+    leg, and the artifact was resting on two.
+
+    `sort_keys` because the digest is about the CONTENT of the checks, and a
+    reordering of the YAML is not a change to what they ask."""
+    checks = list(getattr(archetype, "purpose_checks", None) or []) if archetype else []
+    payload = json.dumps(checks, sort_keys=True, ensure_ascii=False,
+                         separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()

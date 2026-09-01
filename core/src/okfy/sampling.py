@@ -28,6 +28,31 @@ def _selector_seed(bundle: Bundle) -> str:
     return "no-seed"
 
 
+def sampled_fingerprint(bundle: Bundle, ids) -> str:
+    """A digest of the BYTES the L3 review actually read.
+
+    The seed says the corpus has not moved. It says nothing about whether the
+    concepts moved, and those are different facts: a reviewer can pass a concept
+    on Monday, the concept can be rewritten on Tuesday, and the recorded verdict
+    still reads `pass` against a corpus that never changed. This closes that,
+    and it is the half `_selector_seed` was never able to cover.
+
+    The id goes into the digest alongside the bytes, so renaming a reviewed
+    concept is a change rather than a coincidence of equal content. Ids are
+    sorted, so the digest is about the SET reviewed and not the order it was
+    listed in. A concept that has since been deleted contributes its id and an
+    explicit absence marker, because "reviewed and then removed" is exactly the
+    kind of drift a fingerprint over the survivors would hide."""
+    h = hashlib.sha256()
+    for cid in sorted({str(i) for i in ids}):
+        c = bundle.get(cid)
+        h.update(cid.encode("utf-8"))
+        h.update(b"\0")
+        h.update(c.path.read_bytes() if c is not None else b"<absent>")
+        h.update(b"\0")
+    return h.hexdigest()
+
+
 def sample_for_review(bundle: Bundle, fraction: float = 0.1, minimum: int = 20) -> dict:
     """Risk-oriented deterministic L3 sample. Priority tiers first — concepts
     whose sources changed since the snapshot, stale concepts, rare types, weak

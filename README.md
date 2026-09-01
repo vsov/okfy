@@ -171,3 +171,24 @@ explicit user act: its repo, its access control.
 ## License
 
 [Apache-2.0](LICENSE)
+
+## What v0.21 tightened
+
+A release now rests only on evidence that was either recomputed at release time
+or explicitly labelled as not recomputed.
+
+Both eval suites are **replayed**: every recorded query, expansion, hit list and
+note is re-derived from the live bundle and compared exactly, so an eval record
+edited after the owner judged it can no longer release clean. The L3 review
+fails closed on a stale seed instead of skipping silently, and records what it
+read and what it was read against. The source map reports `text_verified` and
+`raw_verified` separately — the raw document is not in a bundle, so its hash was
+never actually recomputed, and calling that `verified` overstated the contract;
+declare `normalization.raw_root` to close the other half for real. `okfy job`'s
+executor attestation is now required at release. And `okfy-normalize` refuses
+two source files whose names differ only by case or Unicode form, which on a
+case-insensitive filesystem were one file and a silently lost document.
+
+Every one of these exempts an older bundle by construction — an absent key, or a
+declared `provenance: legacy` — so nothing needs a list of exceptions.
+

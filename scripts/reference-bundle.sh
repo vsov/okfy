@@ -152,7 +152,20 @@ You are an extraction worker. Read only the spans assigned to you and write one
 draft concept per tradeable structure and per term of art. Cite the source file
 for every draft. Report what you did with every span you were given.
 EOF
-okfy job "$BUNDLE" segment-01 --prompt-file "$WORK/worker-prompt.md" >/dev/null \
+# The executor identity. v0.21 composes `--strict-execution` into release, so a
+# job artifact that does not say WHO ran it cannot be released — the workflow
+# has prescribed this for new extractions since v0.10 and the release predicate
+# simply was not asking. It is an attestation, not a measurement: the core
+# cannot observe a model, so it checks that the harness declared one. This
+# builder's declaration is honest about what actually produced these drafts.
+cat > "$WORK/execution.json" <<'EXEC'
+{"model": "none (fixture text written by scripts/reference-bundle.sh)",
+ "provider": "none",
+ "sampling": "n/a — the drafts are committed fixture text, not generated",
+ "harness_version": "reference-bundle.sh@0.21"}
+EXEC
+okfy job "$BUNDLE" segment-01 --prompt-file "$WORK/worker-prompt.md" \
+  --execution-file "$WORK/execution.json" >/dev/null \
   || fail "okfy job"
 
 # --- the worker pass: drafts, committed, then consolidated -----------------
@@ -475,6 +488,17 @@ SEED="$(grep -o '"seed": "[^"]*"' "$WORK/sample.json" | cut -d'"' -f4)"
 SELECTOR="$(grep -o '"selector_version": [0-9]*' "$WORK/sample.json" \
             | grep -o '[0-9]*$')"
 [ -n "$SEED" ] && [ -n "$SELECTOR" ] || fail "could not read seed from okfy sample"
+# v0.21: the artifact also records WHAT was reviewed and WHAT AGAINST. Both are
+# read back from `okfy sample` for the same reason the seed is — recomputing a
+# digest here would restate a definition that exists once in core, and a
+# restated definition is one that drifts. `E_QUALITY_UNPINNED` is what an
+# artifact without them gets, and `E_QUALITY_DRIFT` is what one whose concepts
+# moved afterwards gets.
+FPRINT="$(grep -o '"sampled_fingerprint": "[^"]*"' "$WORK/sample.json" \
+          | cut -d'"' -f4)"
+CHECKS="$(grep -o '"checks_digest": "[^"]*"' "$WORK/sample.json" | cut -d'"' -f4)"
+[ -n "$FPRINT" ] && [ -n "$CHECKS" ] \
+  || fail "okfy sample did not report the L3 pins (sampled_fingerprint / checks_digest)"
 # Five concepts, two archetype checks each. If `okfy sample` ever selects a
 # different set these rows go missing and validate says so by name.
 for id in glossary/delta glossary/gamma glossary/implied-volatility \
@@ -490,6 +514,8 @@ done
   echo "prompt_version: l3@1"
   echo "selector_version: $SELECTOR"
   echo "seed: $SEED"
+  echo "sampled_fingerprint: $FPRINT"
+  echo "checks_digest: $CHECKS"
   echo "fraction: 0.1"
   echo "minimum: 20"
   echo "sampled:"
@@ -582,25 +608,87 @@ grep -q '"ok": true' "$WORK/release.json" || fail "release-check did not return 
 # line above. So break the copy in one place the contract names, and require the
 # red. `awk` rather than an okfy verb because there is deliberately no CLI for
 # un-recording an owner verdict: verdicts are append-only evidence.
-step "the deliberate break"
-BROKEN="$WORK/broken-okf"
-rm -rf "$BROKEN"
-cp -R "$BUNDLE" "$BROKEN"
+# --- the deliberate breaks --------------------------------------------------
+# A green artifact proves the contract is SATISFIABLE. It does not prove the
+# contract is doing anything, and a builder that only ever reports green would
+# keep reporting green after a gate was accidentally deleted. So every gate this
+# bundle relies on is broken on purpose, on a copy, and required to go red with
+# its OWN code — never merely a nonzero exit, because `release_check` composes a
+# dozen gates into one boolean and redness proves nothing about any single one.
+#
+# Each break also asserts it EDITED SOMETHING first. A mutation that silently
+# matched nothing (a BSD/GNU sed difference, a field that moved) would leave the
+# assertion below passing over an untouched file — which is the exact shape of
+# false evidence this whole release is about.
+break_setup() {
+  BROKEN="$WORK/broken-okf"
+  rm -rf "$BROKEN"
+  cp -R "$BUNDLE" "$BROKEN"
+}
+
+# $1 = file that must differ, $2 = expected code, $3 = what was broken
+break_expect() {
+  cmp -s "$BUNDLE/$1" "$BROKEN/$1" \
+    && fail "the break edited nothing ($3) — the assertion below would be vacuous"
+  set +e
+  okfy release-check "$BROKEN" > "$WORK/broken.json"
+  BRC=$?
+  set -e
+  cat "$WORK/broken.json"
+  [ "$BRC" -ne 0 ] || fail "$3 and release-check still exited 0"
+  grep -q '"ok": false' "$WORK/broken.json" || fail "$3 and release-check still returned ok"
+  grep -q "$2" "$WORK/broken.json" || fail "$3 was not reported as $2"
+  rm -rf "$BROKEN"
+}
+
+step "break 1: one owner verdict removed"
+break_setup
 awk 'BEGIN { done = 0 }
      { if (!done && sub(/"owner_verdict": "pass"/, "\"owner_verdict\": null")) done = 1
        print }' "$BUNDLE/meta/eval.json" > "$BROKEN/meta/eval.json"
-cmp -s "$BUNDLE/meta/eval.json" "$BROKEN/meta/eval.json" \
-  && fail "the break edited nothing — the assertion below would be vacuous"
-set +e
-okfy release-check "$BROKEN" > "$WORK/broken.json"
-BRC=$?
-set -e
-cat "$WORK/broken.json"
-[ "$BRC" -ne 0 ] || fail "one owner verdict removed and release-check still exited 0"
-grep -q '"ok": false' "$WORK/broken.json" \
-  || fail "one owner verdict removed and release-check still returned ok"
-grep -q 'E_REL_EVAL_POLICY' "$WORK/broken.json" \
-  || fail "the break was not reported as an acceptance-policy failure"
+break_expect meta/eval.json E_REL_EVAL_POLICY "one owner verdict removed"
+
+# The gate the audit's first P0 asked for. The fingerprint still matches — the
+# environment did not move — so the only thing that changed is the record the
+# owner judged, which is precisely the substitution that used to release clean.
+step "break 2: a recorded eval result edited after the verdict"
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/"expanded_query": "/, "\"expanded_query\": \"fabricated ")) done = 1
+       print }' "$BUNDLE/meta/eval.json" > "$BROKEN/meta/eval.json"
+break_expect meta/eval.json E_REL_EVAL_REPLAY "an eval result edited after the owner verdict"
+
+# The audit's second P0. A stale seed used to turn the L3 check OFF.
+step "break 3: the L3 review's seed made stale"
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/^seed: .*$/, "seed: definitely-not-current")) done = 1
+       print }' "$BUNDLE/meta/purpose-fitness.md" > "$BROKEN/meta/purpose-fitness.md"
+break_expect meta/purpose-fitness.md E_REL_VALIDATE "the L3 seed made stale"
+# ...and specifically as staleness, not as some other validation error.
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/^seed: .*$/, "seed: definitely-not-current")) done = 1
+       print }' "$BUNDLE/meta/purpose-fitness.md" > "$BROKEN/meta/purpose-fitness.md"
+okfy validate "$BROKEN" --strict-quality > "$WORK/broken-validate.txt" 2>&1 || true
+grep -q "E_QUALITY_STALE" "$WORK/broken-validate.txt" \
+  || { cat "$WORK/broken-validate.txt"; fail "a stale L3 seed was not reported as E_QUALITY_STALE"; }
 rm -rf "$BROKEN"
+
+# The executor identity, rebuilt WITHOUT it rather than edited: `job_digest`
+# covers the whole artifact, so hand-editing the execution block out would fail
+# as a tampered digest (`E_PROV_JOB_DIGEST`) — a different defect with a
+# different code, and the assertion would pass while proving nothing about
+# executor identity. Re-running the verb produces a digest-consistent artifact
+# that simply has no executor. The ledger row's recorded digest then no longer
+# matches, which is honest and expected: the artifact really did change.
+step "break 4: the executor identity removed"
+break_setup
+okfy job "$BROKEN" segment-01 --prompt-file "$WORK/worker-prompt.md" >/dev/null \
+  || fail "okfy job (rebuild without execution)"
+okfy validate "$BROKEN" --strict-execution > "$WORK/broken-exec.txt" 2>&1 || true
+grep -q "E_EXEC_MISSING" "$WORK/broken-exec.txt" \
+  || { cat "$WORK/broken-exec.txt"; fail "a job with no executor identity was not reported"; }
+break_expect meta/jobs/segment-01.json E_REL_VALIDATE "the executor identity removed"
 
 printf '\nREFERENCE BUNDLE OK: %s\n' "$BUNDLE"

@@ -6,11 +6,16 @@ where provenance normally dies: a concept cites `handbook.md#L811-L824`, and
 nothing connects those lines back to page 47 of the PDF they came from.
 
 `meta/source-map.jsonl` is the sidecar that connects them — one JSON object per
-normalized span, carrying the raw file and its hash, the normalized span in the
-SAME anchor grammar a concept cites, the hash of that span's text, and which
+normalized span, RECORDING the raw file's path and hash, the normalized span in
+the SAME anchor grammar a concept cites, the hash of that span's text, and which
 converter produced it. This module validates the sidecar.
 
-TWO DELIBERATE LIMITS, both of which the output states rather than hides:
+Recording is not verifying, and the difference is limit 3 below. The word here
+used to be "carrying", which read as a claim that the raw hash had been checked
+against something — it had not, and an audit walked a hash of all zeros straight
+through a green release.
+
+THREE DELIBERATE LIMITS, all of which the output states rather than hides:
 
 1. `page` and `bbox` are CARRIED, never verified. Verifying them means opening a
    PDF, which means a PDF library, which the core will not have — it has exactly
@@ -19,6 +24,20 @@ TWO DELIBERATE LIMITS, both of which the output states rather than hides:
 2. When the corpus tree is not readable, a row is `unverifiable`, never `pass`.
    A hash cannot be recomputed from a file that is not there, and reporting that
    as verified is the failure mode `okfy cost` already refuses.
+3. THE RAW BYTES ARE USUALLY NOT HERE. A bundle's corpus holds the NORMALIZED
+   Markdown; the PDF it came from lives wherever the owner keeps it. So
+   `raw_sha256` normally cannot be recomputed from anything the bundle carries,
+   and a row in that state is `raw-unverified` — never `verified`. Reporting it
+   as verified is what an audit found this module doing, and "carrying the raw
+   file and its hash" was then a stronger claim than the code enforced.
+
+   A bundle CAN close that half: declare `normalization.raw_root` in
+   meta/purpose.md and, when the path is readable, the raw bytes are hashed and
+   compared for real. Rows that pass both halves are `verified`.
+
+The counts say which half was checked: `text_verified` and `raw_verified` are
+separate integers, because collapsing them is precisely how one unchecked field
+hid behind another that was.
 
 The converter is not named by this schema — docling, marker, pymupdf or pandoc
 all produce rows of the same shape. Recording `converter`, `converter_version`
@@ -46,9 +65,9 @@ REQUIRED = ("raw_path", "raw_sha256", "normalized_path", "normalized_lines",
 OPTIONAL = ("page", "bbox", "converter_ref")
 
 # A digest field has to contain a digest. `raw_sha256: x` used to pass, so the
-# module docstring's "carrying the raw file and its hash" was a stronger claim
-# than the contract enforced — the field was checked for being a non-empty
-# string and nothing else.
+# claim that this sidecar pins a raw file's hash was stronger than the contract
+# enforced — the field was checked for being a non-empty string and nothing
+# else. Form is checked here; whether the digest MATCHES anything is limit 3.
 #
 # Lowercase only, both patterns. `hashlib.hexdigest()` emits lowercase and the
 # adapter is the only producer; accepting uppercase as well would make one field
@@ -70,6 +89,35 @@ E_DIGEST = "E_SOURCEMAP_DIGEST"
 E_LINES = "E_SOURCEMAP_LINES"
 E_NO_FILE = "E_SOURCEMAP_NO_FILE"
 E_TEXT_DRIFT = "E_SOURCEMAP_TEXT_DRIFT"
+E_RAW_DRIFT = "E_SOURCEMAP_RAW_DRIFT"
+E_DUPLICATE = "E_SOURCEMAP_DUPLICATE"
+E_EMPTY = "E_SOURCEMAP_EMPTY"
+E_MISSING = "E_SOURCEMAP_MISSING"
+E_COVERAGE = "E_SOURCEMAP_COVERAGE"
+
+
+def normalization(bundle: Bundle) -> dict:
+    """The `normalization:` block from meta/purpose.md, as a mapping.
+
+    A bundle built from authored text has no such block and never gains a
+    finding from this module — the checks below return on exactly that absence.
+    That is the same shape `acceptance.dissent` uses, and it is why nothing
+    anywhere holds a list of which bundles are exempt.
+
+        normalization:
+          source_map: required     # an absent sidecar now blocks
+          raw_root: /path/to/raw   # optional; enables real raw verification
+    """
+    n = bundle.purpose().get("normalization")
+    return n if isinstance(n, dict) else {}
+
+
+def _raw_root(bundle: Bundle) -> Path | None:
+    root = str(normalization(bundle).get("raw_root") or "").strip()
+    if not root:
+        return None
+    p = Path(root)
+    return p if p.is_dir() else None
 
 
 def _corpus(bundle: Bundle) -> Path | None:
@@ -86,9 +134,20 @@ def span_text(path: Path, start: int, end: int) -> str:
     return "".join(lines[start - 1:end])
 
 
-def _check_row(row: dict, corpus: Path | None) -> tuple[str, list[dict]]:
-    """One row -> (state, problems). State is `verified` only when the text hash
-    was actually recomputed and matched."""
+def _check_row(row: dict, corpus: Path | None,
+               raw_root: Path | None = None) -> tuple[str, list[dict]]:
+    """One row -> (state, problems).
+
+    Four states, because three were not enough to be honest:
+
+    - `error`        something is wrong with the row
+    - `unverifiable` the corpus is not readable; nothing could be recomputed
+    - `raw-unverified` the SPAN TEXT was recomputed and matched, and the raw
+                     bytes were not available to check. This is the normal state
+                     for a bundle that does not declare `normalization.raw_root`,
+                     and it used to be reported as `verified` — which is the
+                     overstatement the audit caught.
+    - `verified`     both halves recomputed and matched."""
     problems = []
     if not isinstance(row, dict):
         return "error", [{"code": E_FIELD, "message": "row is not a JSON object"}]
@@ -153,21 +212,59 @@ def _check_row(row: dict, corpus: Path | None) -> tuple[str, list[dict]]:
                                      f"of {row['normalized_path']} — the normalized "
                                      "file changed after conversion, so the raw "
                                      "mapping no longer describes it"}]
+    # The raw half. Without a declared root there is nothing to hash: the raw
+    # document is not in the bundle and never was, so the honest report is that
+    # this half was not checked — not that it passed.
+    if raw_root is None:
+        return "raw-unverified", []
+    raw = (raw_root / str(row["raw_path"])).resolve()
+    if not raw.is_relative_to(raw_root.resolve()) or not raw.is_file():
+        return "raw-unverified", [{
+            "code": E_NO_FILE,
+            "message": f"raw_path {row['raw_path']!r} is not a readable file "
+                       f"inside the declared normalization.raw_root — the root "
+                       "is declared, so a row it cannot account for is a gap in "
+                       "the chain rather than an absent option"}]
+    if hashlib.sha256(raw.read_bytes()).hexdigest() != str(row["raw_sha256"]):
+        return "error", [{"code": E_RAW_DRIFT,
+                          "message": f"raw_sha256 does not match the bytes of "
+                                     f"{row['raw_path']} under the declared "
+                                     "raw_root — the raw document changed after "
+                                     "conversion, so this mapping describes a "
+                                     "file that no longer exists in that form"}]
     return "verified", []
 
 
 def check_source_map(bundle: Bundle) -> dict:
     """Validate `meta/source-map.jsonl`. Reads only; writes nothing, ever."""
     path = bundle.root / SOURCE_MAP
+    required = str(normalization(bundle).get("source_map") or "").strip() == "required"
     if not path.is_file():
+        if required:
+            # The bundle SAID the map is mandatory. Absence is then not "this
+            # corpus has no raw documents" — it is a declared artifact that is
+            # not there, which is the one thing a declaration is for.
+            return {"schema": SCHEMA, "state": "missing",
+                    "note": "meta/purpose.md declares normalization.source_map: "
+                            "required and the sidecar is absent",
+                    "ok": False, "rows": 0, "verified": 0, "text_verified": 0,
+                    "raw_verified": 0, "unverifiable": 0, "required": True,
+                    "problems": [{"code": E_MISSING,
+                                  "message": "meta/purpose.md declares "
+                                             "normalization.source_map: required "
+                                             "and meta/source-map.jsonl is absent"}]}
         # Absence is not a defect. Most bundles are built from text corpora and
         # will never have one; a missing optional sidecar must not read as a gap.
         return {"schema": SCHEMA, "state": "absent", "note": "no source map",
-                "ok": True, "rows": 0, "verified": 0, "unverifiable": 0,
+                "ok": True, "rows": 0, "verified": 0, "text_verified": 0,
+                "raw_verified": 0, "unverifiable": 0, "required": False,
                 "problems": []}
     corpus = _corpus(bundle)
+    raw_root = _raw_root(bundle)
     problems: list[dict] = []
-    verified = unverifiable = rows = 0
+    text_verified = raw_verified = unverifiable = rows = 0
+    seen: dict[tuple, int] = {}
+    mapped: set[str] = set()
     for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -177,17 +274,83 @@ def check_source_map(bundle: Bundle) -> dict:
         except ValueError as e:
             problems.append({"line": n, "code": E_JSON, "message": str(e)})
             continue
-        state, found = _check_row(row, corpus)
-        for p in found:
-            problems.append({"line": n, **p})
+        # Uniqueness BEFORE the content checks, and on the normalized span
+        # rather than the whole row: two rows saying the same thing are not two
+        # pieces of evidence, and two rows saying DIFFERENT things about one
+        # span are a contradiction that used to count as two verifications.
+        # The reverse — one raw span producing two normalized spans — is
+        # legitimate (a page can become two sections) and is not keyed here.
+        if isinstance(row, dict):
+            key = (str(row.get("normalized_path")),
+                   str(row.get("normalized_lines")))
+            if key in seen:
+                problems.append({
+                    "line": n, "code": E_DUPLICATE,
+                    "message": f"{key[0]} {key[1]} is already mapped on line "
+                               f"{seen[key]} — one normalized span has one "
+                               "origin, and counting it twice inflates the "
+                               "verified total without verifying anything"})
+                continue
+            seen[key] = n
+            mapped.add(key[0])
+        state, found = _check_row(row, corpus, raw_root)
+        for pr in found:
+            problems.append({"line": n, **pr})
         if state == "verified":
-            verified += 1
+            text_verified += 1
+            raw_verified += 1
+        elif state == "raw-unverified":
+            text_verified += 1
         elif state == "unverifiable":
             unverifiable += 1
+
+    if rows == 0:
+        # Present and empty is not the same finding as absent. Absent means the
+        # bundle has no raw documents; empty means something produced a sidecar
+        # and it says nothing — a broken artifact, and reporting it as `0/0
+        # verified, ok: true` is how it passed a release.
+        problems.append({"code": E_EMPTY,
+                         "message": "meta/source-map.jsonl exists and contains "
+                                    "no rows — an empty sidecar is a broken "
+                                    "artifact, not an absent one; delete it if "
+                                    "this corpus was never normalized"})
+
+    if required and corpus is not None:
+        # Completeness, and ONLY when the bundle declared the map mandatory.
+        # Without the declaration there is nothing to be complete about: a
+        # corpus can legitimately be part authored and part converted.
+        cited = {str(s) for c in bundle.concepts()
+                 for s in (c.meta.get("sources") or [])}
+        uncovered = sorted(s for s in cited if s not in mapped)
+        if uncovered:
+            problems.append({
+                "code": E_COVERAGE,
+                "message": f"{len(uncovered)} cited corpus file(s) have no "
+                           f"mapping row ({', '.join(uncovered[:3])}"
+                           f"{', …' if len(uncovered) > 3 else ''}) — the map is "
+                           "declared required, so a cited file it does not "
+                           "mention is a hole in the provenance chain"})
+
+    if corpus is None:
+        state = "unverifiable"
+    elif raw_verified == text_verified and rows and not problems:
+        state = "verified"
+    else:
+        state = "measured" if raw_root else "raw-unverified"
     return {"schema": SCHEMA,
-            "state": "measured" if corpus else "unverifiable",
+            "state": state,
             "corpus_readable": corpus is not None,
+            "raw_root_readable": raw_root is not None,
+            "required": required,
             "note": ("page and bbox are carried, not verified — the core cannot "
-                     "open a raw document"),
-            "ok": not problems, "rows": rows, "verified": verified,
+                     "open a raw document"
+                     + ("" if raw_root else
+                        "; raw_sha256 was not recomputed, because this bundle "
+                        "declares no normalization.raw_root")),
+            "ok": not problems, "rows": rows,
+            # `verified` is retained and means BOTH halves, so a reader who does
+            # not know about the split cannot mistake a text-only check for a
+            # complete one. The two components are what to look at.
+            "verified": raw_verified,
+            "text_verified": text_verified, "raw_verified": raw_verified,
             "unverifiable": unverifiable, "problems": problems}

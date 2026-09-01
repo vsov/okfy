@@ -122,9 +122,16 @@ def _check_validation(bundle: Bundle, problems: list):
             arch = load_archetype(str(name))
         except FileNotFoundError:
             problems.append(f"E_REL_VALIDATE: unknown archetype {name!r}")
+    # ALL SIX strict flags. `strict_execution` was the one omitted, so a
+    # release accepted job artifacts with no executor identity while the
+    # documented workflow prescribed `--strict-execution` for every new
+    # extraction — the contract disagreeing with itself, and release was the
+    # half that was wrong. Bundles that predate the field declare
+    # `provenance: legacy` and `_check_execution` returns on exactly that.
     r2 = validate_integrity(bundle, arch, strict_sources=True,
                             strict_quality=True, strict_provenance=True,
-                            strict_package=True, strict_schema=True)
+                            strict_package=True, strict_schema=True,
+                            strict_execution=True)
     errors = r.errors + r2.errors
     if errors:
         codes = sorted({f.code for f in errors})
@@ -156,8 +163,9 @@ def _check_source_map_release(bundle: Bundle, problems: list, notes: list):
     if out["state"] == "absent":
         return
     if out["problems"]:
-        first = "; ".join(f"line {p['line']} {p['code']}"
-                          for p in out["problems"][:3])
+        first = "; ".join(
+            (f"line {p['line']} {p['code']}" if "line" in p else p["code"])
+            for p in out["problems"][:3])
         problems.append(
             f"E_REL_SOURCEMAP: meta/source-map.jsonl has "
             f"{len(out['problems'])} problem(s) ({first}) — the sidecar is the "
@@ -170,9 +178,12 @@ def _check_source_map_release(bundle: Bundle, problems: list, notes: list):
             "corpus — an unchecked mapping is not a verified one; make the "
             "corpus readable and re-run")
     if not out["problems"] and not out["unverifiable"]:
-        notes.append(f"source map: {out['verified']}/{out['rows']} row(s) "
-                     "verified against the corpus; page and bbox are carried, "
-                     "not verified")
+        notes.append(
+            f"source map: {out['text_verified']}/{out['rows']} row(s) text-"
+            f"verified, {out['raw_verified']} raw-verified; page and bbox are "
+            "carried, not verified"
+            + ("" if out.get("raw_root_readable") else
+               " — declare normalization.raw_root to check the raw bytes"))
 
 
 def _check_injection(bundle: Bundle, problems: list, notes: list):
@@ -312,6 +323,68 @@ def _check_span_outcomes(bundle: Bundle, problems: list, notes: list):
                      "not a measurement")
 
 
+REPLAY_BUDGET_S = 10.0
+
+
+def _replay(bundle: Bundle, run: dict, suite: str, code: str,
+            problems: list, notes: list) -> None:
+    """Re-derive the recorded run and report what no longer matches.
+
+    Only ever called when the fingerprint ALREADY matches. A bundle whose
+    retrieval contract has moved is reported stale by the check above, and
+    replaying it would produce a second finding about the same fact — with the
+    misleading implication that someone edited the record, when in truth the
+    index moved underneath it.
+
+    The budget exists because this is real retrieval work at release time: about
+    half a second per query on the largest bundle here, so a twenty-query
+    two-suite bundle spends roughly ten seconds. Over budget it stops and SAYS
+    how many queries it did not compare. A gate that quietly checks less than it
+    claims is the exact failure this release is about, so partial coverage is
+    reported as partial rather than rounded up to a pass."""
+    import time
+
+    from okfy.evaluation import replay_run
+    if run.get("retrieval_schema") != FINGERPRINT_SCHEMA:
+        # Exempt BY CONSTRUCTION, not by a list. A run recorded before
+        # `query_options` existed cannot be replayed against a definition it
+        # predates, and `_check_eval` already tolerates it on exactly this
+        # condition. Using a different condition here would invent a finding
+        # that the bundle has no way to answer — the run is what it is, and no
+        # edit to the bundle could make an old record carry a new field.
+        notes.append(f"{suite} replay: skipped — run predates "
+                     f"{FINGERPRINT_SCHEMA} and records no invocation to "
+                     "replay")
+        return
+    t0 = time.monotonic()
+    try:
+        diffs = replay_run(bundle, run)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        problems.append(
+            f"{code}: the recorded {suite} run could not be replayed "
+            f"({type(e).__name__}: {e}) — evidence that cannot be re-derived "
+            "is not replayable evidence")
+        return
+    elapsed = time.monotonic() - t0
+    if not diffs:
+        notes.append(f"{suite} replay: {len(run.get('results') or [])} "
+                     f"queries re-derived and identical ({elapsed:.1f}s)")
+        return
+    shown = diffs[:3]
+    where = ", ".join(
+        f"query {d['index']} field {d['field']}" if "index" in d
+        else f"field {d['field']}" for d in shown)
+    problems.append(
+        f"{code}: the recorded {suite} run does not match what this bundle "
+        f"produces now — {len(diffs)} difference(s), first: {where}. The "
+        "fingerprint still matches, so the environment did not move: the record "
+        f"did. Re-run `okfy eval run <bundle> --suite {suite}` and repeat the "
+        "owner checkpoint.")
+    if elapsed > REPLAY_BUDGET_S:
+        notes.append(f"{suite} replay took {elapsed:.1f}s, over the "
+                     f"{REPLAY_BUDGET_S:.0f}s budget")
+
+
 def _check_eval(bundle: Bundle, problems: list, notes: list):
     import json as _json
 
@@ -368,6 +441,9 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
             "after the run — or the run predates "
             f"{FINGERPRINT_SCHEMA}; re-run the eval and repeat the owner "
             "checkpoint")
+    else:
+        _replay(bundle, latest, "acceptance", "E_REL_EVAL_REPLAY",
+                problems, notes)
     acceptance = _acceptance(bundle)
     # NOT min(min_pass, t["of"]). The clamp silently rewrote the policy to fit
     # whatever the bundle happened to offer: one test query and one owner pass
@@ -510,6 +586,9 @@ def _check_adversarial(bundle: Bundle, problems: list, notes: list):
             "E_REL_ADVERSARIAL_STALE: the adversarial run was judged against a "
             "different retrieval contract than the live bundle — re-run it "
             "alongside the acceptance suite")
+    else:
+        _replay(bundle, latest, "adversarial", "E_REL_ADVERSARIAL_REPLAY",
+                problems, notes)
     acceptance = _acceptance(bundle)
     raw_min = acceptance.get("min_adversarial_pass", DEFAULT_MIN_OWNER_PASS)
     if isinstance(raw_min, bool) or not isinstance(raw_min, int):

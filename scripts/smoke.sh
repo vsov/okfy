@@ -187,8 +187,49 @@ cp "$NCORPUS/source-map.jsonl" "$NBUNDLE/meta/source-map.jsonl"
 okfy sourcemap --json "$NBUNDLE" > "$WORK/sourcemap.json" || fail "okfy sourcemap"
 grep -q '"ok": true' "$WORK/sourcemap.json" \
   || { cat "$WORK/sourcemap.json"; fail "sourcemap rejected the adapter's own output"; }
-grep -q '"state": "measured"' "$WORK/sourcemap.json" \
-  || fail "sourcemap could not recompute the hashes — the join is unverified"
+# The TEXT half. v0.21 stopped calling this `verified`: the raw document is not
+# in the bundle, so its hash was never recomputed, and reporting it as verified
+# is what an audit walked a raw hash of all zeros through. `raw-unverified` is
+# the honest name for a row whose span text matched and whose origin was not
+# checked.
+grep -q '"state": "raw-unverified"' "$WORK/sourcemap.json" \
+  || { cat "$WORK/sourcemap.json"; fail "sourcemap did not report the raw half as unchecked"; }
+grep -q '"text_verified": 2' "$WORK/sourcemap.json" \
+  || fail "sourcemap could not recompute the span hashes — the join is unverified"
+grep -q '"raw_verified": 0' "$WORK/sourcemap.json" \
+  || fail "sourcemap claimed a raw verification it could not have performed"
+
+# ...and now the WHOLE chain, because here the raw tree still exists. Declaring
+# `normalization.raw_root` makes core hash the raw bytes for real, and only then
+# is a row `verified` — both halves recomputed. This is the one place outside the
+# adapter's own tests where the full provenance chain can be closed, and before
+# v0.21 there was no way to close it anywhere.
+# The declaration goes in the frontmatter, right after its opening `---`.
+awk -v raw="$RAW" 'NR==1 { print; print "normalization:"; print "  raw_root: " raw; next }
+                   { print }' \
+  "$NBUNDLE/meta/purpose.md" > "$WORK/purpose-declared.md"
+grep -q '^  raw_root: ' "$WORK/purpose-declared.md" \
+  || fail "could not declare normalization.raw_root — the assertions below would be vacuous"
+mv "$WORK/purpose-declared.md" "$NBUNDLE/meta/purpose.md"
+okfy sourcemap --json "$NBUNDLE" > "$WORK/sourcemap-full.json" || fail "okfy sourcemap (raw_root)"
+grep -q '"state": "verified"' "$WORK/sourcemap-full.json" \
+  || { cat "$WORK/sourcemap-full.json"; fail "declaring raw_root did not close the chain"; }
+grep -q '"raw_verified": 2' "$WORK/sourcemap-full.json" \
+  || fail "raw_root was declared and the raw bytes were still not hashed"
+
+# The negative for the raw half: change the raw document after conversion and
+# the mapping must be refused. Without this the check above proves only that
+# something was computed, not that it compares.
+printf 'totally different raw bytes\n' > "$RAW/handbook.md"
+set +e
+okfy sourcemap --json "$NBUNDLE" > "$WORK/sourcemap-rawdrift.json"
+RDRC=$?
+set -e
+[ "$RDRC" -ne 0 ] || fail "sourcemap accepted a raw document that changed after conversion"
+grep -q 'E_SOURCEMAP_RAW_DRIFT' "$WORK/sourcemap-rawdrift.json" \
+  || { cat "$WORK/sourcemap-rawdrift.json"; fail "raw drift was not reported as raw drift"; }
+# Put it back, so the text-drift assertion below is about the NORMALIZED file.
+printf '# Handbook\n\nSection one of the widget handbook.\n' > "$RAW/handbook.md"
 
 # ...and the negative: a sidecar the corpus contradicts must NOT pass. A verifier
 # that has only ever seen valid input is not known to verify anything.
