@@ -892,6 +892,37 @@ def _heading_slugs(text: str) -> set[str]:
     return out
 
 
+def heading_spans(text: str) -> dict[str, tuple[int, int]]:
+    """Every heading slug mapped to the 1-based inclusive line span it owns.
+
+    The span runs from the heading line to the line before the next heading of
+    the SAME OR HIGHER level, or to end of file — so `## Risk` owns its `###`
+    subsections and stops at the next `##`. That is what a reader means by "the
+    part under this heading", and it is what a citation of `guide.md#risk`
+    claims to be evidence for.
+
+    Slug variants come from `_heading_slugs`'s dialects and all point at the
+    same span: this exists to resolve an anchor to lines, not to referee
+    sluggers. Where two headings produce the same slug the FIRST wins, because
+    a duplicate slug is exactly what a reader's browser would jump to."""
+    lines = text.splitlines()
+    heads = []                      # (line_no, level, [slugs])
+    for i, line in enumerate(lines, 1):
+        m = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if m:
+            heads.append((i, len(m.group(1)), _heading_slugs(m.group(0))))
+    out: dict[str, tuple[int, int]] = {}
+    for n, (start, level, slugs) in enumerate(heads):
+        end = len(lines)
+        for later_start, later_level, _ in heads[n + 1:]:
+            if later_level <= level:
+                end = later_start - 1
+                break
+        for s in slugs:
+            out.setdefault(s, (start, max(end, start)))
+    return out
+
+
 def _check_anchors(bundle: Bundle, concepts, r: Report, strict=False):
     """Source anchors (external review round 4, item 4): `path#L10-L20` must be
     a real line range, `guide.md#heading-id` a real heading — checkable only

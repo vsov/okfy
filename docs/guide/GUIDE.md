@@ -268,7 +268,7 @@ Then the judging, in two roles that never collapse into one:
 - **The LLM-judge proposes.** `okfy eval verdict <bundle> latest <q-idx> pass|fail|partial --llm --note "…"` records a machine verdict with its reasoning. This is useful triage — but it stays **provisional**. An LLM verdict alone never counts toward release.
 - **The owner disposes.** `okfy eval verdict <bundle> latest <q-idx> pass|fail|partial --owner --note "…"` records the human's verdict. This is the only kind release acceptance counts.
 
-`okfy eval status` collapses the run to an effective verdict per query — owner wins over LLM, LLM-only is flagged provisional, neither is pending — and reports a top-level `provisional` flag that stays **true until every query carries an owner verdict**. A bundle cannot self-certify: the flag only clears when a human has signed off on the whole run. That friction is the point — it is the price of the claim "this bundle answers its purpose."
+`okfy eval status` collapses the run to an effective verdict per query — owner wins over LLM, LLM-only is flagged provisional, neither is pending — and reports a top-level `provisional` flag that stays **true until every query carries an owner verdict**. **What that guarantee actually is, stated precisely.** The tool will not mark a run owner-confirmed on its own: something outside the tool has to write those verdicts. `owner` is a role in a JSON file, recorded by whoever operates this machine — it is not an authenticated identity, and nothing here verifies who they were. So the flag clearing means "a person with write access to this bundle judged every query", which is exactly the guarantee that matters for a bundle you built and run yourself, and noticeably weaker than a signature if you are handing the bundle to a third party as evidence. If that is your case, the honest options are to sign the eval run's digest out of band or to treat the verdicts as attributed rather than proven. That friction is still the point — it is the price of the claim "this bundle answers its purpose."
 
 ### The lexicon as a retrieval contract
 
@@ -732,3 +732,57 @@ So v0.21 sorts every artifact a release depends on into three honest categories,
 Two smaller pieces of the same idea. `meta/purpose-fitness.md` now records `sampled_fingerprint` and `checks_digest` — what the review read, and what it was read against — so a verdict recorded on Monday cannot silently describe a concept rewritten on Tuesday. Both come from `okfy sample`, which is the command that picks the sample, rather than being recomputed by hand somewhere else. And a bundle can now declare `normalization.source_map: required`, after which an absent sidecar blocks and every cited corpus file owes a mapping row. Without the declaration, absence stays silent — most corpora are authored text and always will be.
 
 Every one of these tightenings exempts older bundles **by construction rather than by exception**: an absent key, or a declared `provenance: legacy`. There is no list anywhere of which bundles are excused, because a list is a thing that goes stale and a structure is not.
+
+## What a source map proves, and at which granularity
+
+A source map answers one question: *where did this text come from?* From v0.22
+each row states how precisely it can answer it, because "precisely enough" and
+"not at all" used to look identical.
+
+Every row carries an optional `granularity`:
+
+| value | what a row licenses you to conclude |
+|---|---|
+| `whole-document` | This Markdown came from that raw file. **Nothing** about pages, columns or regions. |
+| `page` | The span is bounded to one page of the raw document, and `page` on the row is that page. |
+| *(absent)* | Written before v0.22. Unstated, not wrong — and it claims nothing about pages either. |
+
+An unknown value is `E_SOURCEMAP_FIELD`. The distinction is the whole point: an
+absent granularity is a row making no claim, while an unrecognised one still
+reads as a claim and nothing understands it.
+
+**Every converter here reports `whole-document` today, docling included.** That
+has always been the behaviour — one span per document, no page, no bbox — and
+what changed is that the row now says so. On a fourteen-page guidance document
+the difference is tolerable. On a four-hundred-page manual, "this Markdown came
+from that PDF" and "this line came from page 217" are different claims, and only
+one of them was ever true.
+
+Measured, so this is not a hedge: a real fourteen-page PDF converted through
+docling 2.126.0 produced exactly one row spanning `L1-L314`. docling *does* carry
+per-item page numbers and bounding boxes internally. They are not used, because
+its items do not line up with the exported Markdown's line numbers without a
+re-derivation nobody has measured — and emitting a page number before doing that
+work would be the fabrication this whole subsystem exists to prevent.
+
+**What you get in exchange for declaring `normalization.raw_root`.** Without it,
+`raw_sha256` is carried and never recomputed, and the honest state is
+`raw-unverified`: the text half matched, the origin was never checked. Point
+`raw_root` at the raw tree and both halves are recomputed on every check —
+`E_SOURCEMAP_TEXT_DRIFT` when the Markdown moved, `E_SOURCEMAP_RAW_DRIFT` when
+the original did. Only then does a row read `verified`.
+
+Declare it and get it wrong and you are told: a `raw_root` that is not a readable
+directory is `E_NORMALIZATION_ROOT`, not a quiet fallback to text-only. That
+distinction is newer than it should be — before v0.22 a dead path behaved exactly
+like no path, so the bundle stayed green and the advice told you to declare the
+root already sitting in your `purpose.md`.
+
+**Citations are checked by interval, not by filename.** A concept citing
+`handbook.md#L11-L14` is covered when the union of that file's mapped intervals
+contains lines 11 to 14 — not when some row happens to mention `handbook.md`.
+Line anchors, the ledger's `#L11-14` form, character anchors and heading anchors
+all resolve to line spans first; a heading owns the lines from itself to the line
+before the next heading of the same or higher level. What is reported is the
+unmapped **lines**, because "handbook.md is not covered" sends you to read a file
+that is mostly covered.

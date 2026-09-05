@@ -51,7 +51,7 @@ import re
 from pathlib import Path
 
 from okfy.bundle import Bundle
-from okfy.validate import ANCHOR_LINE_RE
+from okfy.validate import ANCHOR_LINE_RE, heading_spans
 
 SOURCE_MAP = "meta/source-map.jsonl"
 SCHEMA = "okfy-source-map@1"
@@ -62,7 +62,17 @@ REQUIRED = ("raw_path", "raw_sha256", "normalized_path", "normalized_lines",
 # `converter_ref` is the converter's own handle on the region (docling calls it a
 # provenance item id); it is opaque to OKFy and travels only so a re-run can be
 # lined up against the original.
-OPTIONAL = ("page", "bbox", "converter_ref")
+OPTIONAL = ("page", "bbox", "converter_ref", "granularity")
+
+# What a row may claim about where its span came from. OPTIONAL, not required:
+# rows written before v0.22 exist and are not wrong, they are unstated — and a
+# release that turned every one of them into a finding would be inventing a
+# regression. But a row that states a value nothing understands IS a finding,
+# because it still reads as a claim. Restated from the adapter deliberately:
+# core cannot import the adapter, exactly as with OPTIONS_DIGEST_LEN above,
+# except that there the constant flows adapter <- core and here core is the
+# validator of a vocabulary the adapter produces.
+GRANULARITIES = ("whole-document", "page")
 
 # A digest field has to contain a digest. `raw_sha256: x` used to pass, so the
 # claim that this sidecar pins a raw file's hash was stronger than the contract
@@ -94,6 +104,14 @@ E_DUPLICATE = "E_SOURCEMAP_DUPLICATE"
 E_EMPTY = "E_SOURCEMAP_EMPTY"
 E_MISSING = "E_SOURCEMAP_MISSING"
 E_COVERAGE = "E_SOURCEMAP_COVERAGE"
+# The normalization BLOCK's own schema, separate codes because they are findings
+# about meta/purpose.md rather than about the sidecar.
+E_NORM_KEY = "E_NORMALIZATION_KEY"
+E_NORM_VALUE = "E_NORMALIZATION_VALUE"
+E_NORM_ROOT = "E_NORMALIZATION_ROOT"
+
+NORMALIZATION_KNOWN = ("source_map", "raw_root")
+SOURCE_MAP_VALUES = ("required",)
 
 
 def normalization(bundle: Bundle) -> dict:
@@ -112,12 +130,94 @@ def normalization(bundle: Bundle) -> dict:
     return n if isinstance(n, dict) else {}
 
 
+def normalization_problems(bundle: Bundle) -> list[dict]:
+    """The normalization block's schema, in ONE place.
+
+    Two fail-open defects lived here, both the shape `acceptance` had before
+    v0.19:
+
+    - `source_map: requierd` is not `required`, so `required` was False, so the
+      declaration silently became optional and the bundle shipped. A declaration
+      a typo can switch off is not a declaration.
+    - `raw_root` could be declared and absent. `_raw_root` collapsed that into
+      `None`, the module behaved as though no root were declared, and the advice
+      told the owner to declare the root they had already declared.
+
+    The contract:
+
+    - The block ABSENT means text-only, and produces no finding ever. That is
+      the same exemption-by-construction shape as `acceptance.dissent`, and it
+      is why nothing anywhere holds a list of which bundles are excused. No real
+      bundle here declares the block at all.
+    - Known keys are exactly `source_map` and `raw_root`. A key the tool ignores
+      is a setting the owner believes they made.
+    - `source_map` has ONE accepted value, `required`. Absent means text-only;
+      present and anything else is a typo, including `optional` — there is no
+      second active value to spell wrong.
+    - `raw_root` present must name a readable directory. Present and dead is an
+      error, not a fallback to text-only."""
+    block = bundle.purpose().get("normalization")
+    if block is None:
+        return []
+    if not isinstance(block, dict):
+        return [{"code": E_NORM_KEY,
+                 "message": f"normalization is {type(block).__name__} "
+                            f"{block!r}, not a mapping of "
+                            f"{'/'.join(NORMALIZATION_KNOWN)}"}]
+    out = []
+    for k in sorted(set(block) - set(NORMALIZATION_KNOWN)):
+        out.append({"code": E_NORM_KEY,
+                    "message": f"normalization.{k} is not a known setting "
+                               f"(known: {', '.join(NORMALIZATION_KNOWN)}) — a "
+                               "key this tool ignores is a setting you believe "
+                               "you made, so it is reported rather than dropped"})
+    if "source_map" in block:
+        v = block["source_map"]
+        if v not in SOURCE_MAP_VALUES:
+            out.append({"code": E_NORM_VALUE,
+                        "message": f"normalization.source_map is {v!r}; the "
+                                   f"only accepted value is "
+                                   f"{SOURCE_MAP_VALUES[0]!r}. Omit the key for "
+                                   "a text-only corpus — a misspelling used to "
+                                   "turn the declaration off silently, which is "
+                                   "the one thing a declaration exists to "
+                                   "prevent"})
+    if "raw_root" in block:
+        raw = block["raw_root"]
+        if not isinstance(raw, str) or not raw.strip():
+            out.append({"code": E_NORM_ROOT,
+                        "message": f"normalization.raw_root is {raw!r}, not a "
+                                   "path. Omit the key if there is no raw tree "
+                                   "to verify against"})
+        elif not Path(raw.strip()).is_dir():
+            out.append({"code": E_NORM_ROOT,
+                        "message": f"normalization.raw_root {raw.strip()!r} is "
+                                   "declared and is not a readable directory. "
+                                   "The declaration is what makes the raw half "
+                                   "checkable, so a dead path leaves every "
+                                   "raw_sha256 in the sidecar unverified while "
+                                   "reading as though it were pinned — point it "
+                                   "at the raw tree, or remove the key"})
+    return out
+
+
 def _raw_root(bundle: Bundle) -> Path | None:
+    """The raw tree, when one is declared AND readable.
+
+    A declared-but-dead root returns None here too, but it is no longer silent:
+    `normalization_problems` reports it as E_NORMALIZATION_ROOT, and the notes
+    below distinguish "no root declared" from "root declared, not there". The
+    two used to produce the same message, which advised declaring a root that
+    was already declared."""
     root = str(normalization(bundle).get("raw_root") or "").strip()
     if not root:
         return None
     p = Path(root)
     return p if p.is_dir() else None
+
+
+def _raw_root_declared(bundle: Bundle) -> bool:
+    return bool(str(normalization(bundle).get("raw_root") or "").strip())
 
 
 def _corpus(bundle: Bundle) -> Path | None:
@@ -181,6 +281,15 @@ def _check_row(row: dict, corpus: Path | None,
     if problems:
         return "error", problems
 
+    if "granularity" in row and row["granularity"] not in GRANULARITIES:
+        return "error", [{"code": E_FIELD,
+                          "message": f"granularity is "
+                                     f"{row['granularity']!r}, not one of "
+                                     f"{list(GRANULARITIES)} — an unstated "
+                                     "granularity is a row that makes no claim "
+                                     "about pages, but an unknown one still "
+                                     "reads as a claim"}]
+
     m = ANCHOR_LINE_RE.match(str(row["normalized_lines"]))
     if not m:
         return "error", [{"code": E_LINES,
@@ -235,9 +344,125 @@ def _check_row(row: dict, corpus: Path | None,
     return "verified", []
 
 
+ANCHOR_CHAR_RE = re.compile(r"^C(\d+)(?:-(\d+))?$")
+# TWO line-anchor grammars exist in this codebase and both are cited in real
+# bundles: concepts write `#L12-L40`, which is `validate.ANCHOR_LINE_RE`, and
+# `ledger.span_key` writes `#L12-40` for a `lines` entry. The canonical regex is
+# imported, never restated; this one covers only the ledger's dashless variant,
+# and it is named for that so nobody mistakes it for a second definition of the
+# same thing.
+LEDGER_LINE_RE = re.compile(r"^L(\d+)-(\d+)$")
+
+
+def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Overlapping and ADJACENT intervals merged. Adjacent matters: rows
+    covering L1-L10 and L11-L20 are a continuous mapping of L1-L20, and a
+    citation of L5-L15 is covered by them together even though neither contains
+    it alone."""
+    out: list[tuple[int, int]] = []
+    for s, e in sorted(spans):
+        if out and s <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
+def cited_span(source: str, corpus: Path | None) -> tuple[str, int | None,
+                                                          int | None]:
+    """A cited source resolved to (path, start, end), 1-based inclusive.
+
+    The coverage check used to compare the WHOLE source string against a bare
+    `normalized_path`, so a mapping of `handbook.md` did not cover a citation of
+    `handbook.md#L11-L14` and a fully mapped file was reported uncovered — which
+    made a required source map incompatible with anchored sources, which is to
+    say with normal bundles.
+
+    Stripping the anchor instead would have been worse than the bug: a row
+    covering L1-L2 would then stand as evidence for a citation of L900-L920. So
+    the anchor is RESOLVED, not discarded, and coverage becomes containment.
+
+    `(path, None, None)` means the citation could not be resolved to lines —
+    an unreadable file, or a heading that is not in it. That is reported as
+    unresolved rather than guessed at, because a guess here silently decides
+    whether provenance holds."""
+    path, _, frag = source.partition("#")
+    if not frag:
+        # A bare path claims the whole file, so the whole file must be mapped.
+        if corpus is None:
+            return path, None, None
+        f = corpus / path
+        try:
+            n = len(f.read_text(encoding="utf-8").splitlines())
+        except (OSError, UnicodeDecodeError):
+            return path, None, None
+        return path, 1, max(n, 1)
+    m = ANCHOR_LINE_RE.match(frag) or LEDGER_LINE_RE.match(frag)
+    if m:
+        start = int(m.group(1))
+        return path, start, int(m.group(2) or start)
+    m = ANCHOR_CHAR_RE.match(frag)
+    if m:
+        # Character anchors are what the ledger writes for a `chars` span. They
+        # are resolvable, but only by reading the file — counting newlines is
+        # the whole conversion, and refusing to do it would leave every
+        # char-anchored citation permanently unresolved.
+        if corpus is None:
+            return path, None, None
+        try:
+            text = (corpus / path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return path, None, None
+        a = int(m.group(1))
+        b = int(m.group(2) or a)
+        # Clamped to the file. A `chars` span the ledger wrote as C1-4000
+        # against a 1020-character file is the whole file, not a line past its
+        # end — and an end past the end used to report the last line as a gap.
+        n = max(len(text.splitlines()), 1)
+        return (path,
+                min(text.count("\n", 0, max(a - 1, 0)) + 1, n),
+                min(text.count("\n", 0, min(max(b, 1), len(text))) + 1, n))
+    if corpus is None:
+        return path, None, None
+    try:
+        text = (corpus / path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return path, None, None
+    span = heading_spans(text).get(frag.strip().lower())
+    return (path, *span) if span else (path, None, None)
+
+
+def _gaps(want: tuple[int, int], have: list[tuple[int, int]]) -> list[str]:
+    """The parts of `want` no interval in `have` covers, as `L5-L9` strings.
+
+    Reported rather than a bare file name: "handbook.md is not covered" sends a
+    reader to look at a file that is mostly covered, and the lines are the
+    actionable part."""
+    out, cursor = [], want[0]
+    for s, e in _merge(have):
+        if e < cursor:
+            continue
+        if s > want[1]:
+            break
+        if s > cursor:
+            out.append((cursor, min(s - 1, want[1])))
+        cursor = max(cursor, e + 1)
+        if cursor > want[1]:
+            break
+    if cursor <= want[1]:
+        out.append((cursor, want[1]))
+    return [f"L{a}" if a == b else f"L{a}-L{b}" for a, b in out]
+
+
 def check_source_map(bundle: Bundle) -> dict:
     """Validate `meta/source-map.jsonl`. Reads only; writes nothing, ever."""
     path = bundle.root / SOURCE_MAP
+    # The BLOCK's schema first, and on every return path below. A typo in
+    # `source_map` used to make `required` False, which sent this function down
+    # the "absent, and that is fine" branch and made release return before it
+    # ever looked — so the declaration switched itself off and the silence was
+    # complete.
+    norm = normalization_problems(bundle)
     required = str(normalization(bundle).get("source_map") or "").strip() == "required"
     if not path.is_file():
         if required:
@@ -249,22 +474,32 @@ def check_source_map(bundle: Bundle) -> dict:
                             "required and the sidecar is absent",
                     "ok": False, "rows": 0, "verified": 0, "text_verified": 0,
                     "raw_verified": 0, "unverifiable": 0, "required": True,
-                    "problems": [{"code": E_MISSING,
+                    "problems": norm + [{"code": E_MISSING,
                                   "message": "meta/purpose.md declares "
                                              "normalization.source_map: required "
                                              "and meta/source-map.jsonl is absent"}]}
         # Absence is not a defect. Most bundles are built from text corpora and
         # will never have one; a missing optional sidecar must not read as a gap.
-        return {"schema": SCHEMA, "state": "absent", "note": "no source map",
-                "ok": True, "rows": 0, "verified": 0, "text_verified": 0,
+        # Present-and-invalid normalization is NOT the absent case. Reporting it
+        # as `absent, ok: true` is precisely how a misspelled declaration
+        # shipped: release returns early on `absent` and never asks again.
+        return {"schema": SCHEMA,
+                "state": "absent" if not norm else "invalid",
+                "note": ("no source map" if not norm else
+                         "meta/purpose.md declares a normalization block this "
+                         "tool cannot act on"),
+                "ok": not norm, "rows": 0, "verified": 0, "text_verified": 0,
                 "raw_verified": 0, "unverifiable": 0, "required": False,
                 "problems": []}
     corpus = _corpus(bundle)
     raw_root = _raw_root(bundle)
-    problems: list[dict] = []
+    problems: list[dict] = list(norm)
     text_verified = raw_verified = unverifiable = rows = 0
     seen: dict[tuple, int] = {}
-    mapped: set[str] = set()
+    # Per PATH, the line intervals the sidecar maps. A set of bare paths was
+    # what made coverage a string comparison, and a string comparison is what
+    # could not see an anchor.
+    mapped: dict[str, list[tuple[int, int]]] = {}
     for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
@@ -292,7 +527,11 @@ def check_source_map(bundle: Bundle) -> dict:
                                "verified total without verifying anything"})
                 continue
             seen[key] = n
-            mapped.add(key[0])
+            span = ANCHOR_LINE_RE.match(key[1])
+            if span:
+                a = int(span.group(1))
+                mapped.setdefault(key[0], []).append(
+                    (a, int(span.group(2) or a)))
         state, found = _check_row(row, corpus, raw_root)
         for pr in found:
             problems.append({"line": n, **pr})
@@ -321,15 +560,34 @@ def check_source_map(bundle: Bundle) -> dict:
         # corpus can legitimately be part authored and part converted.
         cited = {str(s) for c in bundle.concepts()
                  for s in (c.meta.get("sources") or [])}
-        uncovered = sorted(s for s in cited if s not in mapped)
+        uncovered, unresolved = [], []
+        for s in sorted(cited):
+            path, start, end = cited_span(s, corpus)
+            if start is None:
+                unresolved.append(s)
+                continue
+            gaps = _gaps((start, end), mapped.get(path, []))
+            if gaps:
+                uncovered.append(f"{s} (unmapped: {', '.join(gaps[:3])}"
+                                 f"{', …' if len(gaps) > 3 else ''})")
         if uncovered:
             problems.append({
                 "code": E_COVERAGE,
-                "message": f"{len(uncovered)} cited corpus file(s) have no "
-                           f"mapping row ({', '.join(uncovered[:3])}"
-                           f"{', …' if len(uncovered) > 3 else ''}) — the map is "
-                           "declared required, so a cited file it does not "
-                           "mention is a hole in the provenance chain"})
+                "message": f"{len(uncovered)} cited span(s) are not covered by "
+                           f"the map: {'; '.join(uncovered[:3])}"
+                           f"{'; …' if len(uncovered) > 3 else ''} — the map is "
+                           "declared required, so a cited line the sidecar does "
+                           "not account for is a hole in the provenance chain"})
+        if unresolved:
+            problems.append({
+                "code": E_COVERAGE,
+                "message": f"{len(unresolved)} cited source(s) could not be "
+                           f"resolved to lines ({', '.join(unresolved[:3])}"
+                           f"{', …' if len(unresolved) > 3 else ''}) — an "
+                           "unreadable file or a heading anchor that names no "
+                           "heading. Coverage is undecidable for these, and "
+                           "guessing which way would decide whether provenance "
+                           "holds"})
 
     if corpus is None:
         state = "unverifiable"
@@ -342,11 +600,17 @@ def check_source_map(bundle: Bundle) -> dict:
             "corpus_readable": corpus is not None,
             "raw_root_readable": raw_root is not None,
             "required": required,
+            # THREE cases, not two. "declared and dead" used to print the same
+            # sentence as "not declared", so the advice told an owner to declare
+            # a root that was already sitting in their purpose.md.
             "note": ("page and bbox are carried, not verified — the core cannot "
                      "open a raw document"
                      + ("" if raw_root else
-                        "; raw_sha256 was not recomputed, because this bundle "
-                        "declares no normalization.raw_root")),
+                        "; raw_sha256 was not recomputed, because "
+                        + ("normalization.raw_root is declared and is not a "
+                           "readable directory"
+                           if _raw_root_declared(bundle) else
+                           "this bundle declares no normalization.raw_root"))),
             "ok": not problems, "rows": rows,
             # `verified` is retained and means BOTH halves, so a reader who does
             # not know about the split cannot mistake a text-only check for a

@@ -38,10 +38,18 @@ FIXTURE="$HERE/reference-corpus"
 # next machine. And the L3 sample seed is the corpus's git sha: with the fixture
 # read in place that sha is OKFy's own HEAD, so the recorded sample would go
 # stale on every unrelated commit and the replay check would silently skip.
+# The RAW tree and the normalized corpus are separate directories, because
+# that is the shape a converted corpus actually has and it is what makes
+# `normalization.raw_root` mean anything. Passthrough is the converter: it needs
+# nothing installed, so this stays runnable in CI, and the raw and normalized
+# bytes being identical is honest for a Markdown corpus rather than a shortcut.
+RAW="$WORK/raw"
+rm -rf "$RAW"
+mkdir -p "$RAW"
+cp "$FIXTURE"/*.md "$RAW/"
+
 CORPUS="$WORK/corpus"
 rm -rf "$CORPUS"
-mkdir -p "$CORPUS"
-cp "$FIXTURE"/*.md "$CORPUS/"
 
 BUNDLE="$WORK/widget-okf"
 [ -e "$BUNDLE" ] && { echo "refusing: $BUNDLE already exists" >&2; exit 2; }
@@ -52,6 +60,15 @@ export GIT_COMMITTER_NAME="okfy reference" GIT_COMMITTER_EMAIL="ref@example.inva
 
 step() { printf '\n=== %s\n' "$1"; }
 fail() { echo "REFERENCE FAIL: $*" >&2; exit 1; }
+
+step "normalize the raw tree into the corpus"
+# The adapter, not `cp`. A source map written by hand would agree with the
+# validator by construction; one written by the producer is the only thing that
+# shows the two halves of this contract still fit together.
+okfy-normalize "$RAW" "$CORPUS" >/dev/null || fail "okfy-normalize"
+[ -f "$CORPUS/source-map.jsonl" ] || fail "the adapter wrote no source map"
+grep -q '"granularity": "whole-document"' "$CORPUS/source-map.jsonl" \
+  || fail "the source map does not state its granularity"
 
 step "init"
 okfy init "$BUNDLE" --corpus "$CORPUS" --language en >/dev/null || fail "okfy init"
@@ -125,6 +142,34 @@ Answer a widget options trader's entry, exit and risk questions from the desk's
 own written material, and say plainly when the material does not cover the
 question.
 EOF
+
+# The normalization block, spliced INTO the frontmatter rather than appended,
+# because it carries a path only this run knows and the heredoc above is quoted
+# so it cannot interpolate one. Appending would put the key in the body, where
+# nothing reads it — a setting the owner believes they made, which is the exact
+# failure mode this release closes elsewhere.
+#
+# `source_map: required` is the strict setting: an absent sidecar now blocks.
+# `raw_root` is what makes the raw half of every row recomputable rather than
+# merely carried.
+awk -v raw="$RAW" '
+  BEGIN { fm = 0; done = 0 }
+  /^---$/ { fm++
+            if (fm == 2 && !done) {
+              print "normalization:"
+              print "  source_map: required"
+              print "  raw_root: " raw
+              done = 1
+            } }
+  { print }' "$BUNDLE/meta/purpose.md" > "$BUNDLE/meta/purpose.tmp"
+mv "$BUNDLE/meta/purpose.tmp" "$BUNDLE/meta/purpose.md"
+grep -q "^  source_map: required$" "$BUNDLE/meta/purpose.md" \
+  || fail "the normalization block was not spliced into the frontmatter"
+
+# The sidecar belongs to the BUNDLE, not to the corpus: leaving it in $CORPUS
+# would offer a .jsonl to every verb that walks the corpus tree.
+mv "$CORPUS/source-map.jsonl" "$BUNDLE/meta/source-map.jsonl" \
+  || fail "could not install the source map"
 cat > "$BUNDLE/meta/extraction-plan.md" <<'EOF'
 ---
 type: ExtractionPlan
@@ -691,4 +736,96 @@ grep -q "E_EXEC_MISSING" "$WORK/broken-exec.txt" \
   || { cat "$WORK/broken-exec.txt"; fail "a job with no executor identity was not reported"; }
 break_expect meta/jobs/segment-01.json E_REL_VALIDATE "the executor identity removed"
 
-printf '\nREFERENCE BUNDLE OK: %s\n' "$BUNDLE"
+# --- the v0.22 gates ---------------------------------------------------------
+# Six more breaks, one per trust boundary this release closed. Same rule as
+# above: each names its OWN code, and each proves it edited something first.
+#
+# These are also the answer to the audit's request for a published black-box
+# trust-boundary suite. The published repository ships src without tests by the
+# owner's publication policy, so `pytest` cannot be the external check — but
+# this script IS published, runs against an installed wheel, and every assertion
+# below is one an outside reader can run and watch fail.
+
+# A verdict outside the enum, not a verdict REMOVED. Break 1 sets one to null,
+# which is legal and fails on policy; this sets one to a value no era of this
+# tool could write, which fails on the record's schema. Different defect,
+# different code — and before v0.22 a malformed nested record did not produce a
+# finding at all: it raised AttributeError out of release-check.
+step "break 5: an eval verdict outside the enum"
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/"owner_verdict": "pass"/, "\"owner_verdict\": \"maybe\"")) done = 1
+       print }' "$BUNDLE/meta/eval.json" > "$BROKEN/meta/eval.json"
+break_expect meta/eval.json E_REL_EVAL_INVALID "an eval verdict outside the enum"
+
+# The audit's second P1. The recorded CRITERION, not the recorded answer: the
+# retrieval output still replays identically and the fingerprint still matches,
+# so the only thing that moved is what the owner was shown they were judging.
+step "break 6: an adversarial expectation edited after the owner verdict"
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/"expect": "covered"/, "\"expect\": \"not-covered\"")) done = 1
+       print }' "$BUNDLE/meta/eval.json" > "$BROKEN/meta/eval.json"
+break_expect meta/eval.json E_REL_ADVERSARIAL_REPLAY "an adversarial expectation edited after the verdict"
+
+# The audit's third P1, and the sharpest one: this typo used to make the check
+# that would have caught it UNREACHABLE. `requierd` is not `required`, so the
+# map became optional, so the sidecar's absence stopped being a defect, so
+# release returned before looking at anything.
+step "break 7: source_map misspelled"
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/^  source_map: required$/, "  source_map: requierd")) done = 1
+       print }' "$BUNDLE/meta/purpose.md" > "$BROKEN/meta/purpose.md"
+break_expect meta/purpose.md E_NORMALIZATION_VALUE "source_map misspelled"
+
+# Declared and dead. Before v0.22 this read exactly like "no raw_root declared",
+# so the bundle stayed green and the advice told the owner to declare the root
+# already sitting in their purpose.md.
+step "break 8: raw_root declared but absent"
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/^  raw_root: .*$/, "  raw_root: /nonexistent/raw/tree")) done = 1
+       print }' "$BUNDLE/meta/purpose.md" > "$BROKEN/meta/purpose.md"
+break_expect meta/purpose.md E_NORMALIZATION_ROOT "raw_root declared but absent"
+
+# The audit's fourth P1, from the other side. v0.21 reported a FALSE coverage
+# failure for any anchored citation; v0.22 resolves the anchor to lines and
+# requires containment — so a citation genuinely outside every mapped interval
+# must still be caught. Breaking it in this direction is the guard on the naive
+# fix: stripping the anchor would let a row covering L1-L2 vouch for L900-L920.
+step "break 9: a concept cites lines no row maps"
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/^sources: \[greeks\.md\]$/, "sources: [greeks.md#L900-L920]")) done = 1
+       print }' "$BUNDLE/glossary/gamma.md" > "$BROKEN/glossary/gamma.md"
+break_expect glossary/gamma.md E_SOURCEMAP_COVERAGE "a concept cites lines no row maps"
+
+# An unstated granularity is a row making no claim about pages. An UNKNOWN one
+# still reads as a claim, and nothing understands it.
+step "break 10: a source-map row claims an unknown granularity"
+break_setup
+awk 'BEGIN { done = 0 }
+     { if (!done && sub(/"granularity": "whole-document"/, "\"granularity\": \"page-and-bbox\"")) done = 1
+       print }' "$BUNDLE/meta/source-map.jsonl" > "$BROKEN/meta/source-map.jsonl"
+break_expect meta/source-map.jsonl E_SOURCEMAP_FIELD "a source-map row claims an unknown granularity"
+
+# --- the positive control ----------------------------------------------------
+# Ten breaks all went red. That is only evidence if the bundle they were made
+# from is still green: a permanently red artifact would satisfy every assertion
+# above while proving nothing. Each break worked on a copy, so this re-checks
+# the original and requires the same answer it gave before any of them ran.
+step "positive control: the unbroken bundle is still green"
+set +e
+okfy release-check "$BUNDLE" > "$WORK/control.json"
+CRC=$?
+set -e
+[ "$CRC" -eq 0 ] || fail "the unbroken bundle no longer passes (exit $CRC)"
+grep -q '"ok": true' "$WORK/control.json" \
+  || { cat "$WORK/control.json"; fail "the unbroken bundle no longer returns ok"; }
+grep -q '"state": "verified"' "$WORK/control.json" \
+  || grep -q 'raw-verified' "$WORK/control.json" \
+  || fail "the source map is no longer verified on the green path"
+echo "  the bundle every break was made from still returns ok: true"
+
+printf '\nREFERENCE BUNDLE OK: %s (10 deliberate breaks, all red with their own code)\n' "$BUNDLE"

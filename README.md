@@ -191,4 +191,3 @@ case-insensitive filesystem were one file and a silently lost document.
 
 Every one of these exempts an older bundle by construction — an absent key, or a
 declared `provenance: legacy` — so nothing needs a list of exceptions.
-

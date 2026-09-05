@@ -158,7 +158,12 @@ def _check_source_map_release(bundle: Bundle, problems: list, notes: list):
 
     FAILED blocks, obviously, and names the first few rows so the owner does not
     have to re-run the standalone command to learn what broke."""
-    from okfy.sourcemap import check_source_map
+    from okfy.sourcemap import check_source_map, normalization_problems
+    # The BLOCK, before the sidecar and before the early return. These are
+    # findings about meta/purpose.md, not about the sidecar's contents, so they
+    # carry their own codes instead of arriving folded inside E_REL_SOURCEMAP.
+    for pr in normalization_problems(bundle):
+        problems.append(f"{pr['code']}: {pr['message']}")
     out = check_source_map(bundle)
     if out["state"] == "absent":
         return
@@ -323,7 +328,20 @@ def _check_span_outcomes(bundle: Bundle, problems: list, notes: list):
                      "not a measurement")
 
 
-REPLAY_BUDGET_S = 10.0
+# MEASURED, not guessed. On 2026-09-06 the worst real bundle here
+# (sec-cftc-sfp-okf, 309 concepts) replayed a ten-query suite in 3.75 s —
+# 0.375 s per query — and `_replay` is called once per suite, so the bound is
+# per suite. 30 s is EIGHT TIMES that worst case, which leaves room for a bundle
+# roughly eight times the size of the largest one here before the bound can fire
+# on honest work.
+#
+# The old value was 10.0 and nothing measured it: at 3.75 s per suite it left
+# 1.3x headroom, tight enough that a normal bundle could have tripped a bound
+# that — as it happens — could not fire at all, because the clock was consulted
+# only after the loop finished.
+REPLAY_BUDGET_MEASURED_S = 3.75
+REPLAY_BUDGET_MULTIPLE = 8
+REPLAY_BUDGET_S = REPLAY_BUDGET_MEASURED_S * REPLAY_BUDGET_MULTIPLE
 
 
 def _replay(bundle: Bundle, run: dict, suite: str, code: str,
@@ -336,15 +354,21 @@ def _replay(bundle: Bundle, run: dict, suite: str, code: str,
     misleading implication that someone edited the record, when in truth the
     index moved underneath it.
 
-    The budget exists because this is real retrieval work at release time: about
-    half a second per query on the largest bundle here, so a twenty-query
-    two-suite bundle spends roughly ten seconds. Over budget it stops and SAYS
-    how many queries it did not compare. A gate that quietly checks less than it
-    claims is the exact failure this release is about, so partial coverage is
-    reported as partial rather than rounded up to a pass."""
+    The budget exists because this is real retrieval work at release time:
+    0.375 s per query on the largest bundle here (measured 2026-09-06), so a
+    ten-query suite spends about 3.75 s and `REPLAY_BUDGET_S` is eight times
+    that.
+
+    The clock is consulted BEFORE each query, so the bound stops work. Until
+    v0.22 it was read only after the whole loop had finished — and the success
+    path returned before even that — so this docstring described a behaviour the
+    function did not have. Over budget it now stops and reports
+    E_REL_REPLAY_INCOMPLETE naming how many queries went uncompared: a gate that
+    quietly checks less than it claims is the exact failure this release is
+    about, so partial coverage is a problem rather than a note."""
     import time
 
-    from okfy.evaluation import replay_run
+    from okfy.evaluation import replay_run_bounded
     if run.get("retrieval_schema") != FINGERPRINT_SCHEMA:
         # Exempt BY CONSTRUCTION, not by a list. A run recorded before
         # `query_options` existed cannot be replayed against a definition it
@@ -358,7 +382,8 @@ def _replay(bundle: Bundle, run: dict, suite: str, code: str,
         return
     t0 = time.monotonic()
     try:
-        diffs = replay_run(bundle, run)
+        diffs, compared, total = replay_run_bounded(bundle, run,
+                                                    REPLAY_BUDGET_S)
     except (OSError, ValueError, KeyError, TypeError) as e:
         problems.append(
             f"{code}: the recorded {suite} run could not be replayed "
@@ -366,7 +391,20 @@ def _replay(bundle: Bundle, run: dict, suite: str, code: str,
             "is not replayable evidence")
         return
     elapsed = time.monotonic() - t0
-    if not diffs:
+    if compared < total:
+        # Reported BEFORE the differences, and as a problem. Whatever the
+        # replayed prefix found, the rest of the run is unexamined, and "no
+        # differences in the nine queries I got to" is not the claim this gate
+        # is here to make.
+        problems.append(
+            f"E_REL_REPLAY_INCOMPLETE: the {suite} replay stopped after "
+            f"{compared}/{total} queries and {elapsed:.1f}s, leaving "
+            f"{total - compared} unexamined — the {REPLAY_BUDGET_S:.0f}s budget "
+            "bounds release-time retrieval work, and a partial replay cannot "
+            "stand as evidence for the whole run. Re-run "
+            f"`okfy eval run <bundle> --suite {suite}` so the record is fresh, "
+            "or shorten the suite")
+    if not diffs and compared == total:
         notes.append(f"{suite} replay: {len(run.get('results') or [])} "
                      f"queries re-derived and identical ({elapsed:.1f}s)")
         return
@@ -383,6 +421,27 @@ def _replay(bundle: Bundle, run: dict, suite: str, code: str,
     if elapsed > REPLAY_BUDGET_S:
         notes.append(f"{suite} replay took {elapsed:.1f}s, over the "
                      f"{REPLAY_BUDGET_S:.0f}s budget")
+
+
+def _record_invalid(run: dict, suite: str, problems: list) -> bool:
+    """Report a malformed eval record and say whether to stop.
+
+    One call site each in `_check_eval` and `_check_adversarial`, both BEFORE
+    `eval_status` and the replay. Those two walk the record assuming every
+    result is a mapping; a string in that position used to escape
+    `release_check` as `AttributeError: 'str' object has no attribute 'get'`,
+    which is the opposite of the machine-readable finding the README promises."""
+    from okfy.evaluation import eval_record_problems
+    bad = eval_record_problems(run)
+    if not bad:
+        return False
+    problems.append(
+        f"E_REL_EVAL_INVALID: the latest {suite} run "
+        f"{run.get('run_id') if isinstance(run, dict) else run!r} is not a "
+        f"valid eval record — {'; '.join(bad)}. Nothing in a malformed record "
+        "can be judged or replayed; repair meta/eval.json or re-run "
+        f"`okfy eval run <bundle> --suite {suite}` and judge it again")
+    return True
 
 
 def _check_eval(bundle: Bundle, problems: list, notes: list):
@@ -405,6 +464,11 @@ def _check_eval(bundle: Bundle, problems: list, notes: list):
     latest = latest_run(data, "acceptance")
     if latest is None:
         problems.append("E_REL_EVAL_MISSING: no eval runs recorded")
+        return
+    # BEFORE eval_status and before the replay. Both walk the nested structure
+    # assuming every result is a mapping, so a malformed record reached them as
+    # an AttributeError out of release_check rather than as a finding.
+    if _record_invalid(latest, "acceptance", problems):
         return
     st = eval_status(bundle, "latest")
     t = st["totals"]
@@ -574,6 +638,8 @@ def _check_adversarial(bundle: Bundle, problems: list, notes: list):
             "passes on the queries the bundle was built for cannot show what it "
             "answers confidently and wrongly; run `okfy eval run <bundle> "
             "--suite adversarial` and judge it")
+        return
+    if _record_invalid(latest, "adversarial", problems):
         return
     st = eval_status(bundle, "latest", suite="adversarial")
     t = st["totals"]

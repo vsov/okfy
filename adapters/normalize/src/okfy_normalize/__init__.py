@@ -18,10 +18,11 @@ from pathlib import Path
 
 from okfy.sourcemap import span_text
 
-from okfy_normalize.backends import (BackendUnavailable, get_backend,
+from okfy_normalize.backends import (BackendUnavailable, check_options,
+                                     get_backend,
                                      options_digest)
 
-__version__ = "0.21.0"
+__version__ = "0.22.0"
 SOURCE_MAP = "source-map.jsonl"
 
 __all__ = ["BackendUnavailable", "normalize_tree", "__version__", "SOURCE_MAP"]
@@ -45,6 +46,11 @@ def normalize_tree(src: Path, dest: Path, backend: str = "passthrough",
                          "writes into the source tree")
     convert, version_of = get_backend(backend)
     options = dict(options or {})
+    # BEFORE anything is written, and before dest exists. A per-file refusal
+    # would be caught by the skip handler below and reported as a skipped
+    # document, so an unhonoured option would empty the whole corpus and exit
+    # describing it as an absent one.
+    check_options(backend, options)
     digest = options_digest(options)
     ver = version_of()
 
@@ -132,6 +138,10 @@ def normalize_tree(src: Path, dest: Path, backend: str = "passthrough",
                 "converter": backend,
                 "converter_version": ver,
                 "converter_options_digest": digest,
+                # What this row can attest about WHERE the span came from. A row
+                # that does not say reads as a finer claim than the converter
+                # can support.
+                "granularity": out.granularity,
             }
             for k in ("page", "bbox", "converter_ref"):
                 if span.get(k) is not None:

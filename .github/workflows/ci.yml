@@ -14,6 +14,24 @@ name: CI
 # from the wheel, an archetype template not packaged as data, an entry-point typo
 # — every one of those is invisible to `pytest` in the repo and fatal to a user
 # running `uv tool install`.
+#
+# v0.22 adds `scripts/reference-bundle.sh`, and it is the answer to a fair
+# criticism: without unit tests, an outside reader could check that the tool
+# INSTALLS but not that its contract HOLDS. The smoke test proves the commands
+# run. The reference bundle proves the gates can still say no.
+#
+# It builds a bundle from `scripts/reference-corpus/`, drives it to
+# `release_check.ok == true` through the installed wheel, then breaks it in ten
+# places the contract names and requires each one to go red WITH ITS OWN ERROR
+# CODE — never merely a nonzero exit, because `release_check` composes a dozen
+# gates into one boolean and redness proves nothing about any single one. Each
+# break also asserts it edited something first, so a mutation that silently
+# matched nothing cannot pass as evidence. It finishes by re-checking the
+# unbroken bundle, because ten reds only mean something if green is still
+# reachable.
+#
+# That is a black-box trust-boundary suite an external reader can run, and it
+# ships in the public export.
 
 on:
   push:
@@ -72,6 +90,17 @@ jobs:
           else export PATH="$PWD/.venv/bin:$PATH"; fi
           okfy --help > /dev/null
           ./scripts/smoke.sh
+
+      - name: Reference bundle — the contract holds, and the gates still say no
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then export PATH="$PWD/.venv/Scripts:$PATH"
+          else export PATH="$PWD/.venv/bin:$PATH"; fi
+          # Its own workdir under the runner temp: the script refuses to build
+          # into an existing bundle path, and a bundle records its corpus path,
+          # so it must not be built inside the checkout.
+          ./scripts/reference-bundle.sh "${RUNNER_TEMP:-/tmp}/okfy-reference"
 
       - name: Unit suites (skipped when tests are not part of this export)
         shell: bash

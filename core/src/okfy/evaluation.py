@@ -106,6 +106,144 @@ def _find_run(data: dict, run_id: str, suite: str = "acceptance") -> dict:
 MIN_TOP_HITS = 1
 
 
+# --------------------------------------------------------------------------
+# The eval-record schema, in ONE place.
+#
+# MEASURED before it was written (2026-09-06, all nine bundles under ~/bundles:
+# 21 runs). Three eras exist on disk and all three are legitimate:
+#
+#   13 runs  {created, results, run_id, tool_version}
+#    5 runs  + retrieval_fingerprint
+#    3 runs  + query_options, retrieval_schema, suite
+#
+# A FOURTH era exists that this sweep could not see: a federated workspace run
+# writes `expanded_query` as a mapping of member name to expansion, because each
+# member expands against its own lexicon. No workspace lives under ~/bundles, so
+# the measurement missed it and the first version of this schema reddened three
+# workspace tests. It is handled by widening the type, not by excusing a caller.
+#
+# and three result shapes, 12 of which carry no `notes` key at all. So the
+# REQUIRED sets below are the INTERSECTION, not what today's producer emits. A
+# schema written from the current writer would have reported every one of those
+# 13 legacy runs as malformed — a new failure mode, not a closed bypass. An
+# absent key is absent, not wrong; that is the whole exemption mechanism, and
+# it is why nothing here holds a list of which bundles are excused.
+#
+# What IS closed is the value space: a key outside the known set, a field of the
+# wrong type, a verdict outside VERDICTS. Those cannot be produced by any era of
+# this tool, so reporting them costs no real bundle anything.
+RUN_REQUIRED = ("run_id", "tool_version", "created", "results")
+RUN_KNOWN = set(RUN_REQUIRED) | {"suite", "retrieval_schema",
+                                 "retrieval_fingerprint", "query_options"}
+RESULT_REQUIRED = ("query", "expanded_query", "top_hits",
+                   "llm_verdict", "llm_reason", "owner_verdict", "owner_note")
+RESULT_KNOWN = set(RESULT_REQUIRED) | {"notes", "expect", "concept", "why",
+                                       "outcome", "outcome_detail"}
+OUTCOMES = ("met", "unmet")
+MAX_REPORTED = 8
+
+
+def _result_problems(i: int, r) -> list[str]:
+    """One recorded result against the schema. Checks are ordered and never
+    merged: a field that is absent and a field that holds the wrong type are
+    different findings, and reporting the second for the first sends a reader
+    looking for a value that is not there."""
+    at = f"results[{i}]"
+    if not isinstance(r, dict):
+        return [f"{at} is {type(r).__name__} {r!r}, not a mapping — a result "
+                f"that is not a record carries no query, no hits and no "
+                f"verdict, so nothing about it can be replayed or judged"]
+    out = []
+    missing = [k for k in RESULT_REQUIRED if k not in r]
+    if missing:
+        out.append(f"{at} is missing required field(s): {', '.join(missing)}")
+    unknown = sorted(set(r) - RESULT_KNOWN)
+    if unknown:
+        out.append(f"{at} has unknown field(s): {', '.join(unknown)} "
+                   f"(known: {', '.join(sorted(RESULT_KNOWN))})")
+    if out:
+        return out
+    if not isinstance(r["query"], str):
+        out.append(f"{at}.query is {type(r['query']).__name__}, not a string")
+    # `expanded_query` is a string for a single bundle and a MAPPING of member
+    # name to expansion for a federated workspace run, because each member
+    # expands against its own lexicon (`federate.federated_query`, written
+    # through by `ws_release`). This case was missed by the sweep that produced
+    # the sets above — no workspace exists under ~/bundles, so the measurement
+    # could not see a fourth legitimate era that the code writes every day.
+    # Widening here rather than exempting workspaces by name: an exemption list
+    # is the thing this release is removing everywhere else.
+    eq = r["expanded_query"]
+    if isinstance(eq, dict):
+        if any(not isinstance(k, str) or not isinstance(v, str)
+               for k, v in eq.items()):
+            out.append(f"{at}.expanded_query is a mapping but not of member "
+                       f"name to expanded text")
+    elif not isinstance(eq, str):
+        out.append(f"{at}.expanded_query is {type(eq).__name__}, not a string "
+                   f"or a per-member mapping")
+    if not isinstance(r["top_hits"], list):
+        out.append(f"{at}.top_hits is {type(r['top_hits']).__name__}, not a list")
+    elif any(not isinstance(h, dict) for h in r["top_hits"]):
+        out.append(f"{at}.top_hits contains a non-mapping hit — a hit without "
+                   f"an id and a score cannot be compared against a replay")
+    if "notes" in r and (not isinstance(r["notes"], list)
+                         or any(not isinstance(n, str) for n in r["notes"])):
+        out.append(f"{at}.notes is not a list of strings — the coverage notes "
+                   f"are part of the answer that was judged")
+    for k in ("llm_verdict", "owner_verdict"):
+        if r[k] is not None and r[k] not in VERDICTS:
+            out.append(f"{at}.{k} is {r[k]!r}, not one of {sorted(VERDICTS)}")
+    for k in ("llm_reason", "owner_note"):
+        if r[k] is not None and not isinstance(r[k], str):
+            out.append(f"{at}.{k} is {type(r[k]).__name__}, not a string or null")
+    if "expect" in r and r["expect"] not in EXPECTATIONS:
+        out.append(f"{at}.expect is {r['expect']!r}, not one of "
+                   f"{list(EXPECTATIONS)}")
+    if "outcome" in r and r["outcome"] not in OUTCOMES:
+        out.append(f"{at}.outcome is {r['outcome']!r}, not one of "
+                   f"{list(OUTCOMES)}")
+    if r.get("concept") is not None and not isinstance(r["concept"], str):
+        out.append(f"{at}.concept is {type(r['concept']).__name__}, not a "
+                   f"concept id or null")
+    if "why" in r and not isinstance(r["why"], str):
+        out.append(f"{at}.why is {type(r['why']).__name__}, not a string")
+    return out
+
+
+def eval_record_problems(run) -> list[str]:
+    """Everything wrong with ONE recorded eval run, as human sentences.
+
+    Called BEFORE `eval_status()` and before the replay, because both walk the
+    nested structure assuming every result is a mapping. Replacing one result
+    with a string used to raise `AttributeError: 'str' object has no attribute
+    'get'` out of `release_check` — so the README's promise of a machine-readable
+    `E_REL_EVAL_INVALID` held for the file's outer JSON form and not for
+    anything inside it.
+
+    Widening an `except` clause would have hidden the next malformed variant
+    instead, which is why this is a schema and not a catch."""
+    if not isinstance(run, dict):
+        return [f"the run is {type(run).__name__} {run!r}, not a mapping"]
+    missing = [k for k in RUN_REQUIRED if k not in run]
+    if missing:
+        return [f"the run is missing required field(s): {', '.join(missing)}"]
+    unknown = sorted(set(run) - RUN_KNOWN)
+    if unknown:
+        return [f"the run has unknown field(s): {', '.join(unknown)} "
+                f"(known: {', '.join(sorted(RUN_KNOWN))})"]
+    if not isinstance(run["results"], list):
+        return [f"results is {type(run['results']).__name__}, not a list"]
+    out: list[str] = []
+    for i, r in enumerate(run["results"]):
+        out.extend(_result_problems(i, r))
+        if len(out) > MAX_REPORTED:
+            return out[:MAX_REPORTED] + [
+                f"... and more; {len(run['results']) - i - 1} further result(s) "
+                f"were not inspected after the first {MAX_REPORTED} problems"]
+    return out
+
+
 def canonical_query_options(n: int) -> dict:
     """How `eval_run` invokes retrieval, in ONE place.
 
@@ -123,49 +261,76 @@ def canonical_query_options(n: int) -> dict:
 
 
 def replay_run(bundle: Bundle, run: dict) -> list[dict]:
-    """Re-derive a recorded eval run from the live bundle and report every field
-    that differs. Reads only; writes nothing, ever.
+    """Re-derive a recorded run and return the field-by-field differences.
 
-    THIS IS THE HALF THE FINGERPRINT NEVER COVERED. `retrieval_fingerprint`
-    pins the ENVIRONMENT — index, lexicon, test queries, tool version. It says
-    nothing about the OUTPUT recorded next to the owner's verdict, so a run
-    edited after review kept its fingerprint and released clean: a different
-    question, an invented expansion, an empty hit list and a fabricated note all
-    survived a green `release_check`. An owner verdict is only evidence about
-    the results it was given; if those results are not the ones the bundle
-    produces, the verdict is about something else.
+    COMPARED FIELDS, all of them, so this docstring cannot claim more than the
+    code checks — the exact failure v0.22 is closing elsewhere:
 
-    Determinism is what makes this checkable rather than merely plausible, and
-    it was measured before this function was written: `query.query` is
-    bit-identical across repeated calls and across processes, float scores
-    included, so the comparison is EXACT — no rounding, no excluded field. If
-    that ever stops being true the right response is to name the unstable field
-    here, not to loosen the comparison quietly.
+        query, expanded_query, top_hits, notes
 
-    The caller decides WHEN to replay. Replaying a bundle whose fingerprint has
-    already moved proves nothing — the environment changed, so of course the
-    results did — and `E_REL_EVAL_STALE` is already the finding."""
+    and for an adversarial run, additionally:
+
+        expect, concept, why, outcome, outcome_detail
+
+    The first four are what retrieval returned; the next three are the criterion
+    the owner judged against, read from the LIVE purpose spec; the last two are
+    the deterministic verdict on whether the declared expectation held.
+
+    Comparison is EXACT — no rounding, no excluded field. That is licensed by
+    measurement, not by hope: `query.query` is bit-identical across calls and
+    across processes, float scores included. If that ever stops holding, name
+    the unstable field here rather than loosening the comparison quietly, which
+    would make this gate claim more than it checks."""
+    return replay_run_bounded(bundle, run)[0]
+
+
+def replay_run_bounded(bundle: Bundle, run: dict,
+                       budget_s: float | None = None
+                       ) -> tuple[list[dict], int, int]:
+    """`replay_run`, with a time bound that is actually enforced.
+
+    Returns `(differences, compared, total)`. When `budget_s` is given, the
+    clock is consulted BEFORE each query, so the bound stops work rather than
+    describing it after the fact — the previous version measured elapsed time
+    only after the whole loop had run, and its success path returned before even
+    that, so the budget could not stop a single query. A gate whose docstring
+    describes a behaviour it does not have is the defect class this release is
+    about, so the bound is either real or the word goes.
+
+    `compared < total` means the bound stopped early, and the caller MUST report
+    that as a problem: replaying nine of twenty queries and returning "no
+    differences" is a gate quietly checking less than it claims."""
+    import time
     suite = run_suite(run)
     diffs: list[dict] = []
+    deadline = None if budget_s is None else time.monotonic() + budget_s
+    compared = 0
     opts = run.get("query_options")
     if not isinstance(opts, dict):
-        return [{"field": "query_options", "recorded": opts,
-                 "expected": "a mapping of n/expand/include_meta/include_stale"}]
+        return ([{"field": "query_options", "recorded": opts,
+                  "expected": "a mapping of n/expand/include_meta/include_stale"}],
+                0, 0)
     n = opts.get("n")
     if isinstance(n, bool) or not isinstance(n, int) or n < MIN_TOP_HITS:
-        return [{"field": "query_options.n", "recorded": n,
-                 "expected": f"an integer >= {MIN_TOP_HITS}"}]
+        return ([{"field": "query_options.n", "recorded": n,
+                  "expected": f"an integer >= {MIN_TOP_HITS}"}], 0, 0)
     want = canonical_query_options(n)
     if opts != want:
-        return [{"field": "query_options", "recorded": opts, "expected": want}]
+        return ([{"field": "query_options", "recorded": opts,
+                  "expected": want}], 0, 0)
 
     specs = suite_queries(bundle, suite)
     results = run.get("results") or []
     if len(results) != len(specs):
-        return [{"field": "results", "recorded": f"{len(results)} queries",
-                 "expected": f"{len(specs)} in meta/purpose.md"}]
+        return ([{"field": "results", "recorded": f"{len(results)} queries",
+                  "expected": f"{len(specs)} in meta/purpose.md"}], 0,
+                len(results))
 
     for i, (spec_raw, rec) in enumerate(zip(specs, results)):
+        # BEFORE the query, not after the loop. This is the whole fix.
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        compared += 1
         spec = spec_raw if isinstance(spec_raw, dict) else {"query": str(spec_raw)}
         text = str(spec.get("query") or "")
         out = query.query(bundle, text, n=n, expand=want["expand"])
@@ -174,12 +339,28 @@ def replay_run(bundle: Bundle, run: dict) -> list[dict]:
                "top_hits": [_slim(h) for h in out["results"]],
                "notes": out["notes"]}
         if suite == "adversarial":
+            # THE CRITERION, not only the answer. `eval_run` writes `expect`,
+            # `concept` and `why` into the record, and until v0.22 the replay
+            # compared none of them — so all three could be edited after owner
+            # review and the gate stayed green, while `eval_status` showed the
+            # human the substituted criterion. The recomputed `outcome` did not
+            # catch it either: it is derived from the LIVE spec, so a tampered
+            # `expect` and an honest outcome agree.
+            #
+            # These are copied verbatim out of the spec, so exact equality is
+            # the right predicate — there is nothing here to round.
+            #
+            # `adversarial_outcome` goes LAST so a future outcome key can never
+            # be shadowed by a spec key of the same name.
+            got.update({"expect": spec.get("expect"),
+                        "concept": spec.get("concept"),
+                        "why": spec.get("why")})
             got.update(adversarial_outcome(spec, out))
         for field, value in got.items():
             if rec.get(field) != value:
                 diffs.append({"index": i, "field": field,
                               "recorded": rec.get(field), "replayed": value})
-    return diffs
+    return diffs, compared, len(results)
 
 
 ADVERSARIAL_KEYS = {"query", "expect", "concept", "why"}
@@ -340,8 +521,24 @@ def eval_status(bundle: Bundle, run_id: str = "latest",
                 suite: str = "acceptance") -> dict:
     """Effective verdict per query: owner wins; LLM-only is provisional;
     neither is pending. The top-level provisional flag stays True until every
-    query carries an owner verdict — a Bundle cannot self-certify."""
+    query carries an owner verdict.
+
+    What that guarantees, precisely: the tool will not mark a run
+    owner-confirmed by itself. `owner` is a ROLE in a JSON file, written by
+    whoever operates this machine — not an authenticated identity, and nothing
+    here verifies who they were. For a locally operated bundle that is the
+    guarantee that matters; for a bundle handed to a third party as evidence it
+    is weaker than a signature, and the guides say so rather than leaving
+    "cannot self-certify" to be read as more than it is."""
     run = _find_run(load_evals(bundle), run_id, suite)
+    # `okfy eval status` is a path a user reaches directly, so the malformed
+    # case has to arrive as a sentence naming the record and the field. It used
+    # to arrive as "'str' object has no attribute 'get'".
+    bad = eval_record_problems(run)
+    if bad:
+        raise ValueError(
+            f"eval run {run.get('run_id') if isinstance(run, dict) else run!r} "
+            f"in the {suite} suite is not a valid record: {'; '.join(bad)}")
     queries: list[dict] = []
     t = {"owner_confirmed": 0, "provisional": 0, "pending": 0,
          "of": len(run["results"]), "passes_owner": 0, "passes_provisional": 0,
