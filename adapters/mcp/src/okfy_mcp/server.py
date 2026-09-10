@@ -60,14 +60,24 @@ def build_server(path: Path) -> FastMCP:
                                    max_chars=max_chars)
 
     @mcp.tool()
-    def okfy_propose(target_id: str, action: str, note: str,
-                     content: str | None = None) -> dict:
+    def okfy_propose(target_id: str, action: str, note: str, actor: str,
+                     content: str | None = None, evidence: dict | None = None,
+                     extends: str | None = None, reopen: str | None = None) -> dict:
         """Suggest a change. Writes ONLY to proposals/ (never final content);
         a human reviews it via `okfy review`. action is create|update|delete;
         content is a full concept .md (frontmatter + body), omitted for delete.
-        target_id is the concept id the change concerns."""
+        target_id is the concept id the change concerns. actor is required:
+        who is proposing, as an OKF actor such as `claude-code/1.0`.
+        evidence is {kind, ref}: kind is test-run|owner-decision|
+        external-source|agent-inference (only the last may omit ref).
+        Search first: if the concept exists, pass extends=<id> instead of
+        creating. reopen="<what changed>" re-proposes text the owner rejected.
+        A refusal returns {error, message, way_out} — follow way_out. Report a
+        change as remembered ONLY when the response has persisted=true."""
         return handlers.h_propose(target, target=target_id, action=action,
-                                  note=note, content=content)
+                                  note=note, content=content, actor=actor,
+                                  evidence=evidence, extends=extends,
+                                  reopen=reopen)
 
     return mcp
 

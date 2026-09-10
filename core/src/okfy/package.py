@@ -48,21 +48,40 @@ fi
 """
 
 
-def render_index(bundle: Bundle) -> str:
+# OKF v0.2 §8: a root index may declare its version, and nothing else.
+INDEX_HEAD = '---\nokf_version: "0.2"\n---\n'
+
+
+DEMOTED_HEADING = "## Not reached by the acceptance suite"
+
+
+def render_index(bundle: Bundle, demote=frozenset()) -> str:
+    """`demote`: ids listed last, under their own heading — still linked, still
+    searched by `okfy query`; only their place in the resident index moves."""
     by_type: dict[str, list] = {}
+    demoted = []
     for c in bundle.concepts():
         if c.id.startswith("meta/"):
+            continue
+        if c.id in demote:
+            demoted.append(c)
             continue
         by_type.setdefault(str(c.meta.get("type")), []).append(c)
     purpose = bundle.purpose()
     lines = [f"# {purpose.get('title', 'Knowledge Bundle')}", ""]
+
+    def entries(cs):
+        return [f"- [{c.meta.get('title', c.id)}]({c.id}.md) — "
+                f"{str(c.meta.get('description', '')).strip()}"
+                for c in sorted(cs, key=lambda x: x.id)] + [""]
     for t in sorted(by_type):
-        lines += [f"## {t}", ""]
-        for c in sorted(by_type[t], key=lambda x: x.id):
-            desc = str(c.meta.get("description", "")).strip()
-            lines.append(f"- [{c.meta.get('title', c.id)}]({c.id}.md) — {desc}")
-        lines.append("")
-    return "\n".join(lines)
+        lines += [f"## {t}", ""] + entries(by_type[t])
+    if demoted:
+        lines += [DEMOTED_HEADING, "",
+                  "No recorded eval run retrieved these. They are listed last, "
+                  "not removed: `okfy query` searches them as before.", ""]
+        lines += entries(demoted)
+    return INDEX_HEAD + "\n".join(lines)
 
 
 def render_readme(bundle: Bundle, archetype: Archetype) -> str:
@@ -92,6 +111,29 @@ Humans: start at [index.md](index.md). Agents: read [AGENTS.md](AGENTS.md).
 """
 
 
+# The memory lifecycle, appended to every bundle's AGENTS.md. Short on purpose:
+# AGENTS.md is resident context billed on every turn, and this block measured
+# 179 tokens (heuristic) — 0.8-3.4% of the large real bundles' resident core,
+# but 21.7% of the smallest. The full discipline lives in the okf-consumer skill.
+MEMORY_BLOCK = """
+<!-- okfy:memory -->
+## Memory: before and after a task
+
+- **Before:** `okfy query` the task's own terms. For each hit you rely on, check
+  `stale` (owner: do not trust as current) and `review_due` (a passed reminder:
+  verify before relying — not the same as stale).
+- **After:** propose only what an agent with a blank context would need — a
+  confirmed root cause, a decision with its reasons, a constraint, a
+  reproducible workaround. Never conversation, scratch work or guesses.
+- Search first; add to an existing concept with `--extends <id>`.
+- `okfy propose <bundle> --as <actor> --evidence <kind>=<ref> …` — kinds:
+  test-run, owner-decision, external-source, agent-inference.
+- Something is remembered only when propose returned a proposal id; it is
+  accepted only after `okfy review accept`. Refusal codes name their way out.
+<!-- /okfy:memory -->
+"""
+
+
 def render_agents_md(bundle: Bundle, archetype: Archetype) -> str:
     """The consumption protocol an agent reads instead of the CLI.
 
@@ -114,7 +156,8 @@ def render_agents_md(bundle: Bundle, archetype: Archetype) -> str:
                            for t in types)
     return tmpl.substitute(
         purpose_title=p.get("title", ""), language=p.get("language", "en"),
-        write_policy=p.get("write_policy", "proposals"), types_table=types_rows)
+        write_policy=p.get("write_policy", "proposals"),
+        types_table=types_rows).rstrip("\n") + "\n" + MEMORY_BLOCK
 
 
 def append_log(bundle: Bundle, message: str) -> None:
@@ -139,11 +182,15 @@ def install_precommit(bundle: Bundle) -> None:
     hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def package(bundle: Bundle, archetype: Archetype) -> None:
+def package(bundle: Bundle, archetype: Archetype, demote_unretrieved: bool = False) -> None:
     import json
 
     from okfy.validate import package_fingerprint
-    (bundle.root / "index.md").write_text(render_index(bundle), encoding="utf-8")
+    demote = frozenset()
+    if demote_unretrieved:   # opt-in: the signal is bounded by the query set
+        from okfy.budget import usage_report
+        demote = frozenset(usage_report(bundle)["zero_hit_ids"])
+    (bundle.root / "index.md").write_text(render_index(bundle, demote), encoding="utf-8")
     (bundle.root / "README.md").write_text(render_readme(bundle, archetype), encoding="utf-8")
     (bundle.root / "AGENTS.md").write_text(render_agents_md(bundle, archetype), encoding="utf-8")
     (bundle.root / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
@@ -154,6 +201,7 @@ def package(bundle: Bundle, archetype: Archetype) -> None:
     # `refine → package → eval run → accept` recorded evidence gathered from a
     # pre-edit index. `okfy index` and this are the only writers.
     from okfy.index import build_index, retrieval_digest, save_index
+    from okfy.memory import accepted_since
     idx = build_index(bundle)
     # The manifest is tracked, so the digests it records are the reviewable claim
     # about what build_index produces — which is what makes the gitignored cache
@@ -163,7 +211,8 @@ def package(bundle: Bundle, archetype: Archetype) -> None:
         {"schema": "okfy-package@1",
          "fingerprint": package_fingerprint(bundle),
          "index_content_fingerprint": idx["content_fingerprint"],
-         "retrieval_digest": retrieval_digest(idx)}) + "\n", encoding="utf-8")
+         "retrieval_digest": retrieval_digest(idx),
+         "memory_accepted": accepted_since(bundle, None)}) + "\n", encoding="utf-8")
     save_index(bundle, idx)
     install_precommit(bundle)
     append_log(bundle, "package: regenerated index.md, README.md, AGENTS.md, "

@@ -13,7 +13,13 @@ def cmd_propose(a) -> int:
         meta, body = frontmatter.parse(a.from_file.read_text(encoding="utf-8"))
     else:
         meta, body = {}, ""
-    path = propose(b, meta, body, target=a.target, action=a.action, note=a.note)
+    evidence = None
+    if a.evidence:
+        kind, _, ref = a.evidence.partition("=")
+        evidence = {"kind": kind.strip(), "ref": ref.strip()}
+    path = propose(b, meta, body, target=a.target, action=a.action, note=a.note,
+                   actor=a.actor, evidence=evidence, extends=a.extends,
+                   reopen=a.reopen)
     _print({"proposal": b.concept_id(path)})
     return 0
 

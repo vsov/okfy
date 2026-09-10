@@ -2,6 +2,7 @@
 import datetime
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,10 +72,34 @@ def validate_conformance(bundle: Bundle, include_drafts=False, include_proposals
     return r
 
 
+def _norm(s) -> str:
+    return " ".join(unicodedata.normalize("NFC", str(s)).casefold().split())
+
+
+def _index_body(text: str) -> str:
+    """index.md without its version frontmatter, if it has one that parses."""
+    if text.startswith("---"):
+        try:
+            return frontmatter.parse(text)[1]
+        except frontmatter.FrontmatterError:
+            pass
+    return text
+
+
 def _check_reserved(bundle: Bundle, r: Report):
     idx = bundle.root / "index.md"
-    if idx.is_file() and idx.read_text(encoding="utf-8").startswith("---"):
-        r.add("error", "E_INDEX_FRONTMATTER", "index.md", "index.md must not contain frontmatter")
+    text = idx.read_text(encoding="utf-8") if idx.is_file() else ""
+    if text.startswith("---"):
+        try:
+            meta = frontmatter.parse(text)[0]
+        except frontmatter.FrontmatterError as e:
+            meta = {"<unparseable>": str(e)}
+        extra = {k: v for k, v in meta.items() if (k, v) != ("okf_version", "0.2")}
+        if extra or not meta:
+            r.add("error", "E_INDEX_FRONTMATTER", "index.md",
+                  'index.md frontmatter may only declare okf_version: "0.2" '
+                  f"(OKF v0.2 §8); found {extra or 'an empty block'} — "
+                  "`okfy package` regenerates it")
     log = bundle.root / "log.md"
     if log.is_file():
         for heading in DATE_HEADING_RE.findall(log.read_text(encoding="utf-8")):
@@ -126,6 +151,9 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_execution(bundle, r, strict=strict_execution)
     _check_collisions(concepts, r)
     _check_stale(concepts, r)
+    _check_verified(concepts, r)
+    _check_memory_log(bundle, r)
+    _check_review_due(concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
     _check_coverage(bundle, concepts, r)
     _check_span_coverage(bundle, r)
@@ -134,6 +162,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_lexicon(concepts, r)
     linked_ids = _check_links(bundle, concepts, r)
     _check_orphans(bundle, concepts, linked_ids, r, strict=strict_package)
+    _check_index_drift(bundle, concepts, r)
     _check_quality(bundle, archetype, r, strict=strict_quality)
     _check_provenance(bundle, r, strict=strict_provenance)
     _check_package(bundle, r, strict=strict_package)
@@ -562,6 +591,75 @@ def _check_stale(concepts, r: Report):
             r.add("error", "E_STALE_FIELDS", c.id,
                   f"stale_since is not an ISO date: {c.meta['stale_since']!r}")
 
+
+
+
+def review_due_date(value) -> datetime.date | None:
+    """`review_due` as a date, or None when it is not one. YAML reads an
+    unquoted 2026-10-01 as a date and a quoted one as a string; both count."""
+    if isinstance(value, datetime.datetime):
+        return None
+    if isinstance(value, datetime.date):
+        return value
+    try:
+        return datetime.date.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _check_review_due(concepts, r: Report):
+    """`review_due` is when someone should look at a concept again. A passed date
+    is a WARNING and never touches `stale`: stale is the owner's ruling that a
+    text is not to be trusted as current (ADR-0013), a review date is only a
+    reminder, and an expired reminder proves nothing about the text."""
+    today = datetime.date.today()
+    for c in concepts:
+        if "review_due" not in c.meta:
+            continue
+        d = review_due_date(c.meta["review_due"])
+        if d is None:
+            r.add("error", "E_REVIEW_DUE", c.id,
+                  f"review_due is not an ISO date (YYYY-MM-DD): "
+                  f"{c.meta['review_due']!r} — correct it with `okfy refine`")
+        elif d < today:
+            r.add("warning", "W_REVIEW_DUE", c.id,
+                  f"review_due {d.isoformat()} passed {(today - d).days} day(s) ago — "
+                  "the text may be out of date, which is not the same as stale; "
+                  "`okfy stale <bundle> --due` lists every overdue concept")
+
+
+def _check_memory_log(bundle: Bundle, r: Report):
+    """meta/memory.jsonl is read, never judged: an unreadable line is a warning
+    here, because validate must not block a bundle on its own history. The place
+    it DOES refuse is `okfy propose`, whose rejected-content gate reads this log
+    and cannot run fail-open over a line it cannot parse."""
+    from okfy import memory
+    for problem in memory.events(bundle)[1]:
+        r.add("warning", "W_MEMORY_LINE", memory.MEMORY_FILE,
+              problem.removeprefix(f"{memory.E_MEMORY_LINE}: ")
+              + " — `okfy propose` refuses until it is fixed")
+
+def _check_verified(concepts, r: Report):
+    """A verification binds to the text it verified (`content`, sha256 of the
+    body). When the latest one no longer matches, the current text is unverified
+    and every earlier verification is history — never an error, because an
+    owner `refine` is a legitimate edit, but never silent either.
+
+    An entry without `content` (a pre-v0.23 or foreign OKF `verified`) binds to
+    nothing, so there is nothing to compare: exempt by construction."""
+    import hashlib
+    for c in concepts:
+        v = c.meta.get("verified")
+        if not isinstance(v, list) or not v or not isinstance(v[-1], dict):
+            continue
+        want = v[-1].get("content")
+        if want is None:
+            continue
+        if str(want) != hashlib.sha256(c.body.encode("utf-8")).hexdigest():
+            r.add("warning", "W_VERIFIED_SUPERSEDED", c.id,
+                  f"text changed after its last verification ({v[-1].get('by')}, "
+                  f"{v[-1].get('at')}) — that verification is now historical; "
+                  "re-verify with `okfy propose` and `okfy review accept`")
 
 def _source_checker(bundle: Bundle, r: Report | None = None, strict: bool = False):
     """What to resolve sources: against — manifest keys when
@@ -1046,6 +1144,28 @@ def _check_orphans(bundle, concepts, linked_ids, r: Report, strict=False):
             continue
         if c.id not in indexed and c.id not in linked_ids:
             r.add(level, code, c.id, "not reachable from index.md or any concept")
+
+
+INDEX_LINE_RE = re.compile(r"^- \[[^\]]*\]\(([^)\s]+)\)")
+
+
+def _check_index_drift(bundle, concepts, r: Report):
+    """okfy package renders every index line from its concept's description, so
+    a line that no longer carries it was edited by hand (or the concept changed
+    after packaging) and the index now tells agents something the concept does
+    not say."""
+    idx = bundle.root / "index.md"
+    if not idx.is_file():
+        return
+    by_id = {c.id: c for c in concepts}
+    for line in _index_body(idx.read_text(encoding="utf-8")).splitlines():
+        m = INDEX_LINE_RE.match(line)
+        c = by_id.get(resolve_link(bundle, idx, m.group(1))) if m else None
+        desc = str(c.meta.get("description", "")).strip() if c else ""
+        if desc and _norm(desc) not in _norm(line):
+            r.add("warning", "W_INDEX_DRIFT", c.id,
+                  f"index.md line for {c.id} no longer carries its description — "
+                  "run okfy package to regenerate")
 
 
 QUALITY_FIELDS = ["date", "prompt_version", "selector_version", "seed",

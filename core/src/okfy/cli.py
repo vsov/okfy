@@ -120,6 +120,7 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("index");    p.add_argument("bundle", type=Path)
+    p.add_argument("--usage", action="store_true")
 
     p = sub.add_parser("query");    p.add_argument("bundle", type=Path)
     p.add_argument("text"); p.add_argument("--type", dest="type_", default=None)
@@ -147,6 +148,7 @@ def main(argv=None) -> int:
     p.add_argument("--dry-run", dest="dry_run", action="store_true")
 
     p = sub.add_parser("package");  p.add_argument("bundle", type=Path)
+    p.add_argument("--demote-unretrieved", action="store_true")
 
     p = sub.add_parser("log");      p.add_argument("bundle", type=Path)
     p.add_argument("message")
@@ -158,6 +160,19 @@ def main(argv=None) -> int:
     p.add_argument("--note", default="")
     p.add_argument("--from", dest="from_file", type=Path, default=None,
                    help="full concept .md (not needed for delete)")
+    p.add_argument("--as", dest="actor", required=True,
+                   help="who is proposing, as an OKF v0.2 actor: "
+                        "<producer>/<version> (claude-code/1.0) or <prefix>:<id>")
+    p.add_argument("--evidence", default=None,
+                   help="what the change rests on: <kind>=<ref>, kind one of "
+                        "test-run, owner-decision, external-source, "
+                        "agent-inference (the last needs no ref)")
+    p.add_argument("--extends", default=None, metavar="CONCEPT_ID",
+                   help="add to this existing concept instead of creating a new "
+                        "one (turns the proposal into an update)")
+    p.add_argument("--reopen", default=None, metavar="WHAT_CHANGED",
+                   help="re-propose text the owner rejected, stating the new "
+                        "evidence that justifies asking again")
 
     p = sub.add_parser("review")
     rsub = p.add_subparsers(dest="rcmd", required=True)
@@ -173,10 +188,13 @@ def main(argv=None) -> int:
     p.add_argument("-m", "--message", default="")
 
     p = sub.add_parser("stale");    p.add_argument("bundle", type=Path)
-    p.add_argument("concept_id")
+    p.add_argument("concept_id", nargs="?")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--reason", help="owner's reason to distrust this concept")
     g.add_argument("--clear", action="store_true", help="remove the stale flag")
+    g.add_argument("--due", action="store_true",
+                   help="list concepts whose review_due date has passed — a "
+                        "listing, never a stale flag")
 
     p = sub.add_parser("eval")
     esub = p.add_subparsers(dest="ecmd", required=True)

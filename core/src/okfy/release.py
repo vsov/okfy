@@ -771,6 +771,35 @@ def _check_dissent(bundle: Bundle, problems: list, notes: list):
                  "was adversarial")
 
 
+def _check_memory(bundle: Bundle, problems: list, notes: list):
+    """The working-memory profile, stated. `okfy review accept` puts one change
+    into the bundle and does not re-run the eval, re-pin L3 or repackage — so a
+    bundle with accepted memory is expected to fail the gates above until the
+    owner runs the release loop again. This adds no problem of its own (those
+    gates already fire); it says how much memory moved the bundle, so the
+    reddening has a visible cause instead of looking like a regression.
+
+    `meta/package.json` records `memory_accepted` when packaged; a package from
+    before the ledger has no count, so every accept counts."""
+    import json
+
+    from okfy import memory
+    total = sum(1 for row in memory.events(bundle)[0] if row["event"] == "accept")
+    recorded = None
+    try:
+        recorded = json.loads((bundle.root / "meta" / "package.json")
+                              .read_text(encoding="utf-8")).get("memory_accepted")
+    except (OSError, ValueError, AttributeError):
+        pass
+    if isinstance(recorded, int) and not isinstance(recorded, bool):
+        n, tail = max(total - recorded, 0), ""
+    else:
+        n = total
+        tail = " (the package predates the memory ledger)" if total else ""
+    notes.append(f"memory: {n} accepted proposal(s) since last package{tail} — "
+                 "accept does not re-run the eval, re-pin L3 or repackage")
+
+
 def release_check(bundle: Bundle) -> dict:
     """The machine predicate for 'release accepted'. Fail-closed: missing
     evidence is a failure, not a skip."""
@@ -787,5 +816,6 @@ def release_check(bundle: Bundle) -> dict:
     _check_l3(bundle, problems, notes)
     _check_adversarial(bundle, problems, notes)
     _check_dissent(bundle, problems, notes)
+    _check_memory(bundle, problems, notes)
     return {"ok": not problems, "problems": problems, "notes": notes,
             "retrieval_fingerprint": retrieval_fingerprint(bundle)}

@@ -17,7 +17,10 @@ Advisory by the owner's decision. `okfy budget` exits 0 always,
 never composes any of it.
 """
 from okfy.bundle import Bundle
-from okfy.tokens import count_path, token_method
+import json
+import re
+
+from okfy.tokens import count_path, count_tokens, token_method
 
 RESIDENT_FILES = ("AGENTS.md", "index.md")
 
@@ -116,3 +119,40 @@ def budget_report(bundle: Bundle, archetype=None) -> dict:
             "resident": resident, "types": types,
             "unreadable": unreadable, "notes": notes,
             "anti_padding": ANTI_PADDING}
+
+
+USAGE_LABEL = ("zero_hit = not reached by the acceptance suite, which can reach at "
+               "most ceiling.reachable ids — never evidence that a concept is unused")
+_INDEX_TARGET_RE = re.compile(r"\]\(([^)\s]+)\.md\)")
+
+
+def usage_report(bundle: Bundle) -> dict:
+    """Which concepts the recorded eval runs ever returned, read from
+    meta/eval.json and index.md only — it writes nothing. The share is bounded
+    by the query set (queries x top_n), so it is reported with that ceiling."""
+    ids = sorted(c.id for c in bundle.concepts() if not c.id.startswith("meta/"))
+    ev = bundle.root / "meta" / "eval.json"
+    runs = (json.loads(ev.read_text(encoding="utf-8")).get("runs") or []) if ev.is_file() else []
+    hit: set[str] = set()
+    queries = top_n = 0
+    for run in runs:
+        for res in run.get("results") or []:
+            if not isinstance(res, dict):
+                continue
+            hits = res.get("top_hits") or []
+            queries += 1
+            top_n = max(top_n, len(hits))
+            hit.update(h["id"] if isinstance(h, dict) else str(h) for h in hits)
+    zero = [i for i in ids if i not in hit] if runs else []
+    idx = bundle.root / "index.md"
+    lines = [ln for ln in (idx.read_text(encoding="utf-8").splitlines() if idx.is_file() else [])
+             if (m := _INDEX_TARGET_RE.search(ln)) and m.group(1) in set(zero)]
+    return {"concepts": len(ids), "runs": len(runs),
+            "ever_hit": len(ids) - len(zero) if runs else None,
+            "zero_hit": len(zero) if runs else None,
+            "share": round(len(zero) / len(ids), 4) if runs and ids else None,
+            "ceiling": {"queries": queries, "top_n": top_n,
+                        "reachable": min(len(ids), queries * top_n)},
+            "zero_hit_ids": zero,
+            "zero_hit_index_tokens": count_tokens("\n".join(lines)) if lines else 0,
+            "token_method": token_method(), "label": USAGE_LABEL}

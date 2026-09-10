@@ -1,6 +1,7 @@
 """Pure MCP tool handlers: import okfy core in-process, return JSON-able dicts.
 No MCP types here — server.py owns the protocol surface, this owns the logic."""
 import inspect
+import re
 
 from okfy import federate, frontmatter, proposals, query as q
 from okfy.index import load_index
@@ -106,8 +107,16 @@ def h_overview(t: Target, type_: str | None = None, max_items: int = 50,
     return out
 
 
+_CODED = re.compile(r"^([EW]_[A-Z_]+): ")
+
+
 def h_propose(t: Target, target: str, action: str, note: str,
-              content: str | None) -> dict:
+              content: str | None, actor: str, evidence: dict | None = None,
+              extends: str | None = None, reopen: str | None = None) -> dict:
+    """File a proposal. A refusal the core names with a code comes back as data
+    — `{error, message, way_out}` — so an agent can act on it instead of reading
+    a traceback; `persisted: true` appears ONLY when a proposal file was written,
+    and is the only thing an agent may report as remembered."""
     if t.is_workspace:
         raise ValueError("propose targets a single member bundle; point the "
                          "server at that bundle's path, not the workspace")
@@ -118,6 +127,16 @@ def h_propose(t: Target, target: str, action: str, note: str,
             raise ValueError("content (a full concept .md) is required unless "
                              "action=delete")
         meta, body = frontmatter.parse(content)
-    path = proposals.propose(t.bundle, meta, body, target=target,
-                             action=action, note=note)
-    return {"proposal": t.bundle.concept_id(path)}
+    try:
+        path = proposals.propose(t.bundle, meta, body, target=target,
+                                 action=action, note=note, actor=actor,
+                                 evidence=evidence, extends=extends, reopen=reopen)
+    except ValueError as e:
+        msg = str(e)
+        m = _CODED.match(msg)
+        if m is None:
+            raise
+        return {"error": m.group(1), "message": msg,
+                "way_out": msg.rsplit(" — ", 1)[1] if " — " in msg else ""}
+    return {"proposal": t.bundle.concept_id(path), "persisted": True,
+            "path": path.relative_to(t.bundle.root).as_posix()}

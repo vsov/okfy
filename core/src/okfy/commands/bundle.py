@@ -1,3 +1,4 @@
+from okfy.budget import usage_report
 from okfy.bundle import Bundle
 from okfy.index import build_index, save_index
 from okfy.init import init_bundle
@@ -74,6 +75,9 @@ def cmd_release_check(a) -> int:
 
 def cmd_index(a) -> int:
     b = Bundle(a.bundle)
+    if getattr(a, "usage", False):
+        _print(usage_report(b))
+        return 0
     idx = build_index(b)
     save_index(b, idx)
     _print({"indexed": len(idx["concepts"])})
@@ -82,7 +86,7 @@ def cmd_index(a) -> int:
 
 def cmd_package(a) -> int:
     b = Bundle(a.bundle)
-    package(b, _archetype_for(b))
+    package(b, _archetype_for(b), demote_unretrieved=getattr(a, "demote_unretrieved", False))
     _print({"packaged": str(b.root)})
     return 0
 

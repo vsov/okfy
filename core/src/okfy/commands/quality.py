@@ -4,7 +4,7 @@ from okfy.bundle import Bundle
 from okfy.evaluation import eval_run, eval_status, eval_verdict
 from okfy.job import build_job, job_digest, load_job, write_job
 from okfy.ledger import add_row, parse_merge_map, read_rows
-from okfy.proposals import clear_stale, set_stale
+from okfy.proposals import clear_stale, set_stale, overdue
 
 from .common import _print
 
@@ -155,6 +155,11 @@ def cmd_dissent(a) -> int:
 
 def cmd_stale(a) -> int:
     b = Bundle(a.bundle)
+    if a.due:
+        _print(overdue(b))
+        return 0
+    if not a.concept_id:
+        raise ValueError("stale needs a concept id unless --due")
     if a.clear:
         clear_stale(b, a.concept_id)
         _print({"cleared": a.concept_id})

@@ -786,3 +786,96 @@ all resolve to line spans first; a heading owns the lines from itself to the lin
 before the next heading of the same or higher level. What is reported is the
 unmapped **lines**, because "handbook.md is not covered" sends you to read a file
 that is mostly covered.
+
+## Memory as proposals
+
+An agent that learns something while working — a confirmed root cause, a
+decision and its reasons, a constraint, a workaround that reproduces — can leave
+it in the bundle for the next agent. It never writes the bundle directly. It
+files a proposal, and the owner accepts or rejects it:
+
+    agent: okfy query → work → okfy propose --as … --evidence …
+    owner: okfy review list → okfy review accept | reject
+    next agent, next session: okfy query finds it
+
+**Who.** `--as` is required and must be an OKF v0.2 actor: `<producer>/<version>`
+(`claude-code/1.0`) or `<prefix>:<id>` (`human:alice`). It is recorded as
+`generated` and survives later updates; the owner who accepts is recorded in
+`verified`.
+
+**On what.** `--evidence <kind>=<ref>` states what the change rests on:
+`test-run` (a run id), `owner-decision` (where the owner decided it),
+`external-source` (a URL or document) or `agent-inference` (no ref — it says
+it is inference). "I checked" is not evidence, and a proposal can never carry
+`verified` itself.
+
+**What `okfy propose` refuses**, each with the way out in its message:
+
+| Code | Why | Way out |
+|---|---|---|
+| `E_PROPOSAL_ACTOR` | missing or malformed actor | `--as <producer>/<version>` |
+| `E_PROPOSAL_EVIDENCE` | unknown kind, missing ref, or a `verified` field | `--evidence <kind>=<ref>` |
+| `E_PROPOSAL_INJECTION` | the text reads as instructions to an agent | none for the agent; the owner may `okfy refine` |
+| `E_PROPOSAL_REJECTED` | the owner already rejected this exact text | `--reopen "<what changed>"`, with new evidence |
+| `E_PROPOSAL_DUPLICATE` | a create whose title already names a concept | `--extends <id>` |
+| `E_MEMORY_LINE` | `meta/memory.jsonl` has an unreadable line | the owner repairs it; `okfy validate` lists it |
+
+**What `okfy review accept` refuses.** `E_PROPOSAL_BASE_MOVED`: the concept
+changed after the proposal was written against it, so accepting would erase that
+change. Every proposal records the sha256 of the file it was written against;
+accept compares it under a lock. A proposal filed before this existed carries no
+base and is accepted with `W_PROPOSAL_UNBASED` in the log line.
+
+**The ledger.** Every propose, accept and reject is appended to
+`meta/memory.jsonl`: who, when, which proposal, which text (by sha256), and the
+reason for a rejection. That is how a rejected claim stays rejected after its
+proposal file is gone.
+
+**Verification is bound to text.** Each `verified` entry names the sha256 of the
+body it verified. If the text changes later — an owner `refine`, say —
+`okfy validate` warns `W_VERIFIED_SUPERSEDED`: the old verification is history,
+and the current text is not verified until it is accepted again.
+
+The consumer skill teaches agents the before-task and after-task half of this
+loop. Every packaged `AGENTS.md` carries a short version of it between
+`<!-- okfy:memory -->` markers.
+
+## Working memory, and what accept does not claim
+
+`okfy review accept` puts one change into the bundle. It records who proposed
+it (`generated`), who accepted it and which exact text they accepted
+(`verified`, with the body's sha256 as `content`), and appends the decision to
+`meta/memory.jsonl`. That is all it claims.
+
+It does **not** re-run the eval, re-pin the purpose-fitness pass, or repackage.
+Those describe the bundle as it was when the owner last released it, and one
+accepted change can make any of them describe a different bundle. So between an
+accept and the next release loop the bundle is in the **working-memory** state:
+usable, reviewed change by change, but not re-accepted as a whole.
+
+`okfy release-check` says so explicitly. It prints a note —
+
+    memory: 2 accepted proposal(s) since last package — accept does not re-run the eval, re-pin L3 or repackage
+
+— next to the codes that actually went red. On a released bundle, one accepted
+update produces exactly three: `E_REL_VALIDATE` (carrying `E_STALE_PACKAGE`, the
+generated index no longer describes the concepts, and `E_QUALITY_DRIFT`, the
+purpose-fitness pass reviewed bytes that changed), `E_REL_EVAL_STALE` and
+`E_REL_ADVERSARIAL_STALE` (both suites were judged against a retrieval contract
+the bundle no longer has). The note adds no failure of its own; it names the
+cause of the ones already there. Running `okfy package`, a
+fresh eval with owner verdicts, and the L3 pass returns the bundle to a
+released state, and the count restarts from what `meta/package.json` recorded.
+
+This is a profile, stated and visible, not an exception: nothing is exempted,
+no gate is relaxed, and a working-memory bundle can never pass `release-check`
+by accident.
+
+### A review date is not staleness
+
+`review_due: 2026-12-01` on a concept is a reminder to look at it again. When
+the date passes, `okfy validate` reports `W_REVIEW_DUE` and
+`okfy stale <bundle> --due` lists it with how many days it is overdue. Neither
+touches `stale`. Staleness stays what it has been since v0.5: the owner's
+ruling, with a reason, that a text is not to be trusted as current. An expired
+reminder proves nothing about the text; only a person reading it can.
