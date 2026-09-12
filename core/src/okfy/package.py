@@ -52,7 +52,7 @@ fi
 INDEX_HEAD = '---\nokf_version: "0.2"\n---\n'
 
 
-DEMOTED_HEADING = "## Not reached by the acceptance suite"
+DEMOTED_HEADING = "## Not reached by any recorded eval run"
 
 
 def render_index(bundle: Bundle, demote=frozenset()) -> str:

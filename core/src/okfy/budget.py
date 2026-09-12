@@ -121,7 +121,7 @@ def budget_report(bundle: Bundle, archetype=None) -> dict:
             "anti_padding": ANTI_PADDING}
 
 
-USAGE_LABEL = ("zero_hit = not reached by the acceptance suite, which can reach at "
+USAGE_LABEL = ("zero_hit = not reached by any recorded eval run, which can reach at "
                "most ceiling.reachable ids — never evidence that a concept is unused")
 _INDEX_TARGET_RE = re.compile(r"\]\(([^)\s]+)\.md\)")
 

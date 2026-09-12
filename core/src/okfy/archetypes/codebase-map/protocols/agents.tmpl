@@ -30,7 +30,8 @@ Canonical language: $language. Write policy: $write_policy.
   the same change that alters the mapped code — the PR review covers both.
   If `proposals`: write suggested changes under `proposals/` with evidence.
   With the CLI, the sanctioned way is:
-  `okfy propose <bundle> --target <concept-id> --action update --note "<why>" --from <file.md>`
+  `okfy propose <bundle> --as <actor> --target <concept-id> --action update
+  --note "<why>" --from <file.md>`
   — direct edits to concept files will be refused by the bundle's pre-commit hook.
 - Never edit `meta/`, `index.md`, or `log.md` by hand.
 

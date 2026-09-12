@@ -44,10 +44,10 @@ of the corpus snapshot; it does not replace counsel.
 ## Editing rules
 
 - write_policy=$write_policy. Under `proposals`: found a missed amendment,
-  a wrong date, a boundary error? File it — `okfy propose <bundle>
-  --target <concept-id> --action update --note "<why>" --from <file>` —
-  the owner reviews. Direct edits to final concepts are refused by the
-  pre-commit gate.
+  a wrong date, a boundary error? File it — `okfy propose <bundle> --as
+  <actor> --target <concept-id> --action update --note "<why>" --from
+  <file>` — the owner reviews. Direct edits to final concepts are refused
+  by the pre-commit gate.
 - Status changes (`active` -> `superseded`) are the owner's call: propose
   the evidence (the amending release), never rewrite status yourself.
 

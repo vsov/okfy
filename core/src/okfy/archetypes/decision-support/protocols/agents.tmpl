@@ -28,7 +28,8 @@ Canonical language: $language. Write policy: $write_policy.
   write suggested changes as new concepts under `proposals/` with a `sources:`
   field carrying your evidence. A human reviews them.
   With the CLI, the sanctioned way is:
-  `okfy propose <bundle> --target <concept-id> --action update --note "<why>" --from <file.md>`
+  `okfy propose <bundle> --as <actor> --target <concept-id> --action update
+  --note "<why>" --from <file.md>`
   — direct edits to concept files will be refused by the bundle's pre-commit hook.
 - Never edit `meta/`, `index.md`, or `log.md` by hand.
 
