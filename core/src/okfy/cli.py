@@ -5,6 +5,7 @@ from pathlib import Path
 from okfy.commands import HANDLERS
 from okfy.cost import DEFAULT_N as COST_N
 from okfy.guard import GuardError
+from okfy.proposals import FLAG_TYPES
 from okfy.segment import DEFAULT_BUDGET
 
 
@@ -15,7 +16,10 @@ def _positive_int(v: str) -> int:
     return n
 
 
-def main(argv=None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The argparse tree, split out from `main` so tests can enumerate a
+    subcommand's own option strings (e.g. which `propose` flags are required)
+    instead of restating them by hand — a restated list drifts."""
     ap = argparse.ArgumentParser(prog="okfy")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -35,6 +39,9 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("segment-status"); p.add_argument("bundle", type=Path)
     p.add_argument("segment_id"); p.add_argument("status")
+    p.add_argument("--reason", default=None,
+                   help="required moving to failed/skipped, or done -> pending "
+                        "(re-extraction); stored as status_reason on the segment")
 
     p = sub.add_parser("glean", help="queue a second pass: append pending "
                        "glean-NN segments holding the assigned corpus files no "
@@ -121,6 +128,10 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("index");    p.add_argument("bundle", type=Path)
     p.add_argument("--usage", action="store_true")
+    p.add_argument("--journal", type=Path, default=None,
+                   help="with --usage: add a second, separately labelled "
+                        "usage section built from an okfy-mcp --journal file "
+                        "(real sessions, not the eval set)")
 
     p = sub.add_parser("query");    p.add_argument("bundle", type=Path)
     p.add_argument("text"); p.add_argument("--type", dest="type_", default=None)
@@ -134,6 +145,16 @@ def main(argv=None) -> int:
     p = sub.add_parser("show");     p.add_argument("bundle", type=Path)
     p.add_argument("concept_id")
 
+    p = sub.add_parser(
+        "fresh",
+        help="read-only per-id freshness check: compare a caller-remembered "
+             "sha256 against each concept's CURRENT file bytes and stale "
+             "flag (never writes; never touches git)")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("--ids", required=True, metavar="ID=SHA[,ID=SHA...]",
+                   help="comma-separated id=sha256 pairs to check")
+    p.add_argument("--json", action="store_true")
+
     p = sub.add_parser("links");    p.add_argument("bundle", type=Path)
     p.add_argument("concept_id")
 
@@ -142,6 +163,10 @@ def main(argv=None) -> int:
     p.add_argument("--minimum", type=int, default=20)
 
     p = sub.add_parser("diff");     p.add_argument("bundle", type=Path)
+    # JSON stays the default: v0.23 callers parse it. --json is accepted so a
+    # skill can say what it means; --text is the human summary.
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--text", action="store_true")
     p = sub.add_parser("snapshot"); p.add_argument("bundle", type=Path)
 
     p = sub.add_parser("repair-links"); p.add_argument("bundle", type=Path)
@@ -149,17 +174,38 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("package");  p.add_argument("bundle", type=Path)
     p.add_argument("--demote-unretrieved", action="store_true")
+    p.add_argument("--shard-index", action="store_true",
+                   help="v0.24: opt-in two-level index.md — one resident line "
+                        "per top-level concept directory, full listings moved "
+                        "to non-resident index/<dir>.md")
 
     p = sub.add_parser("log");      p.add_argument("bundle", type=Path)
     p.add_argument("message")
 
     p = sub.add_parser("propose");  p.add_argument("bundle", type=Path)
-    p.add_argument("--target", required=True)
-    p.add_argument("--action", choices=["create", "update", "delete"],
+    # v0.24: --target is optional at the argparse level — `gap` never takes
+    # one, `flag` takes --target OR --query. propose() enforces the real
+    # per-action requirement table (see its ValueError messages); this is
+    # just "not every action can say what its target is before parsing".
+    p.add_argument("--target", required=False, default=None)
+    p.add_argument("--action",
+                   choices=["create", "update", "delete", "supersede", "flag", "gap"],
                    default="update")
     p.add_argument("--note", default="")
     p.add_argument("--from", dest="from_file", type=Path, default=None,
-                   help="full concept .md (not needed for delete)")
+                   help="full concept .md (not needed for delete, flag, gap, "
+                        "or --patch-file)")
+    p.add_argument("--type", dest="flag_type", default=None,
+                   choices=list(FLAG_TYPES),
+                   help="required with --action flag: what is wrong")
+    p.add_argument("--query", default=None,
+                   help="required with --action gap: the user's own wording "
+                        "of the question the bundle could not answer; with "
+                        "--action flag, an alternative to --target")
+    p.add_argument("--patch-file", dest="patch_file", type=Path, default=None,
+                   help="with --action update: JSON list of {old, new, "
+                        "count=1} hunks applied to the target's current body "
+                        "(mutually exclusive with --from)")
     p.add_argument("--as", dest="actor", required=True,
                    help="who is proposing, as an OKF v0.2 actor: "
                         "<producer>/<version> (claude-code/1.0) or <prefix>:<id>")
@@ -173,14 +219,51 @@ def main(argv=None) -> int:
     p.add_argument("--reopen", default=None, metavar="WHAT_CHANGED",
                    help="re-propose text the owner rejected, stating the new "
                         "evidence that justifies asking again")
+    p.add_argument("--distinct-from", dest="distinct_from", action="append",
+                   default=None, metavar="ID=REASON",
+                   help="declare that a near-duplicate concept W_PROPOSAL_NEAR "
+                        "found is NOT the same thing (repeatable); suppresses "
+                        "the warning for that id without blocking anything")
+    p.add_argument("--new-id", dest="new_id", default=None, metavar="CONCEPT_ID",
+                   help="required with --action supersede: id of the new "
+                        "concept that replaces --target (must not exist)")
+    p.add_argument("--supersedes", dest="supersedes", default=None,
+                   metavar="PROPOSAL_ID",
+                   help="replace this open proposal instead of leaving both "
+                        "open — only when it shares this proposal's actor "
+                        "and target (E_PROPOSAL_LANE otherwise)")
+    p.add_argument("--reverts", dest="reverts", default=None, metavar="GIT_SHA",
+                   help="with --action update: this proposal reverts to the "
+                        "named git sha, recorded as origin: revert at accept")
+    p.add_argument("--batch", type=Path, default=None,
+                   help="JSONL file, one proposal per line, keys mirroring "
+                        "propose()'s own parameters (action, target, note, "
+                        "content, evidence, extends, reopen, distinct_from, "
+                        "new_id, supersedes, reverts, flag_type, query, patch) "
+                        "— exclusive of every single-entry flag above; --as "
+                        "applies to the whole batch. Validated all-first: any "
+                        "entry refused writes nothing unless --partial")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="with --batch: validate only, never write")
+    p.add_argument("--partial", action="store_true",
+                   help="with --batch: file the entries that passed even if "
+                        "others were refused (still exits non-zero)")
 
     p = sub.add_parser("review")
     rsub = p.add_subparsers(dest="rcmd", required=True)
     r = rsub.add_parser("list");    r.add_argument("bundle", type=Path)
+    r = rsub.add_parser("show");    r.add_argument("bundle", type=Path)
+    r.add_argument("proposal_id"); r.add_argument("--json", action="store_true")
     r = rsub.add_parser("accept");  r.add_argument("bundle", type=Path)
     r.add_argument("proposal_id")
+    r.add_argument("--as", dest="as_actor", default=None,
+                   help="v0.24 (c): owner-only verb — defaults to the git-config "
+                        "owner role. An explicit value is honoured only when it "
+                        "is a human: actor (E_OWNER_ACTION_REQUIRED otherwise)")
     r = rsub.add_parser("reject");  r.add_argument("bundle", type=Path)
     r.add_argument("proposal_id"); r.add_argument("--reason", default="")
+    r.add_argument("--as", dest="as_actor", default=None,
+                   help="v0.24 (c): owner-only verb — same rule as review accept")
 
     p = sub.add_parser("refine");   p.add_argument("bundle", type=Path)
     p.add_argument("concept_id")
@@ -225,6 +308,38 @@ def main(argv=None) -> int:
     e.add_argument("--suite", choices=["acceptance", "adversarial"],
                    default="acceptance")
     e.add_argument("run", nargs="?", default="latest")
+
+    e = esub.add_parser(
+        "metrics", help="read-only recall@k/MRR/abstention over ONE recorded "
+                        "eval run, with oracle/random control arms and "
+                        "always/never-abstain arms (nothing is re-run)")
+    e.add_argument("bundle", type=Path)
+    e.add_argument("--run", default="latest", help="run_id or 'latest'")
+    e.add_argument("--suite", choices=["acceptance", "adversarial"],
+                   default="adversarial")
+    e.add_argument("--k", default="5,10",
+                   help="comma-separated recall@k cutoffs (default 5,10)")
+    e.add_argument("--json", action="store_true")
+
+    e = esub.add_parser(
+        "compare", help="read-only diff of two recorded eval runs, joined by "
+                        "exact query string — no verdict, no retrieval, no git")
+    e.add_argument("bundle", type=Path)
+    e.add_argument("--base", required=True, help="run_id (not 'latest')")
+    e.add_argument("--head", default="latest", help="run_id or 'latest'")
+    e.add_argument("--suite", choices=["acceptance", "adversarial"],
+                   default=None,
+                   help="required to disambiguate 'latest' when not given "
+                        "explicitly for both --base and --head")
+    e.add_argument("--json", action="store_true")
+
+    e = esub.add_parser(
+        "qrels", help="read-only span-level ground truth: every source a "
+                      "covered adversarial row's declared concept cites, "
+                      "resolved via okfy.sourcemap.cited_span")
+    e.add_argument("bundle", type=Path)
+    e.add_argument("--unit", choices=["span"], default="span")
+    e.add_argument("--json", action="store_true")
 
     p = sub.add_parser("job", help="freeze a segment's worker inputs into a "
                        "versioned job artifact (meta/jobs/<segment>.json)")
@@ -292,8 +407,12 @@ def main(argv=None) -> int:
     wsub = p.add_subparsers(dest="wcmd", required=True)
     w = wsub.add_parser("init");    w.add_argument("dir", type=Path)
     w.add_argument("--member", action="append", required=True,
-                   help="role:name=path (role: knowledge|constraints)")
+                   help="role:name=path (role: knowledge|constraints|personal)")
     w.add_argument("--title", default="Workspace")
+    w.add_argument("--project-key", dest="project_key", default=None,
+                   help="owner-set slug (^[a-z0-9][a-z0-9._-]{0,63}$) that "
+                        "scopes any `personal`-role member to this workspace; "
+                        "required when any --member has role personal")
     w = wsub.add_parser("status");  w.add_argument("dir", type=Path)
     w = wsub.add_parser("export");  w.add_argument("dir", type=Path)
     w.add_argument("out", type=Path)
@@ -301,6 +420,27 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("link-candidates"); p.add_argument("dir", type=Path)
 
+    p = sub.add_parser(
+        "transcript-lint",
+        help="read-only: structural facts from a HOST session transcript — "
+             "tool-call ordering/counts and concept-id-shaped strings named "
+             "in assistant text (not a quality verdict; never fails a build)")
+    p.add_argument("session", type=Path)
+    p.add_argument("--bundle", type=Path, required=True)
+    p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser(
+        "codes",
+        help="the diagnostic code registry (okfy.codes.CODES): every E_/W_ "
+             "code the core and MCP adapter can raise, its meaning, and its "
+             "way out — not bundle-specific")
+    p.add_argument("--json", action="store_true")
+
+    return ap
+
+
+def main(argv=None) -> int:
+    ap = build_parser()
     a = ap.parse_args(argv)
     try:
         return HANDLERS[a.cmd](a)

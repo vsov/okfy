@@ -464,7 +464,10 @@ okfy dissent add "$BUNDLE" --run run-1 --group strategies/widget-straddle \
   >/dev/null || fail "okfy dissent add"
 
 step "segment done"
-okfy segment-status "$BUNDLE" segment-01 "done" >/dev/null || fail "okfy segment-status"
+# v0.24: the segment lifecycle is a closed vocabulary with legal edges —
+# pending cannot jump straight to done, it has to pass through running first.
+okfy segment-status "$BUNDLE" segment-01 "running" >/dev/null || fail "okfy segment-status (running)"
+okfy segment-status "$BUNDLE" segment-01 "done" >/dev/null || fail "okfy segment-status (done)"
 
 # --- the lexicon: the retrieval contract ------------------------------------
 # `not-covered` rows are how a bundle says "I do not answer this" instead of
@@ -964,6 +967,84 @@ cmp -s "$BUNDLE/index.md" "$BROKEN/index.md" && fail "break 18 edited nothing"
 break_expect_validate E_INDEX_FRONTMATTER "an extra key in index.md frontmatter"
 rm -rf "$BROKEN"
 
+# --- v0.24 review-fix breaks ---------------------------------------------------
+# Seven more, one per v0.24 code a bundle AUTHOR (not just the release-check
+# path) can trigger with a small edit or an ordinary agent action, each
+# reported by `okfy validate` or the command that already exercises its kind
+# of break above.
+
+step "break 19: a dangling supersedes/superseded_by link"
+break_setup
+awk '{ print } /^title: Gamma$/ { print "superseded_by: glossary/nope-missing" }' \
+  "$BUNDLE/glossary/gamma.md" > "$BROKEN/glossary/gamma.md"
+cmp -s "$BUNDLE/glossary/gamma.md" "$BROKEN/glossary/gamma.md" && fail "break 19 edited nothing"
+break_expect_validate E_SUPERSEDE_DANGLING "a superseded_by naming a concept that does not exist"
+rm -rf "$BROKEN"
+
+step "break 20: applies_to that is not a list"
+break_setup
+awk '{ print } /^title: Gamma$/ { print "applies_to: not-a-list" }' \
+  "$BUNDLE/glossary/gamma.md" > "$BROKEN/glossary/gamma.md"
+cmp -s "$BUNDLE/glossary/gamma.md" "$BROKEN/glossary/gamma.md" && fail "break 20 edited nothing"
+break_expect_validate E_APPLIES_TO "applies_to given as a scalar string, not a list"
+rm -rf "$BROKEN"
+
+step "break 21: a concept-shaped file under a reserved directory"
+break_setup
+mkdir -p "$BROKEN/protocols"
+printf -- '---\ntype: GlossaryTerm\ntitle: Wandered Here\n---\n\nA concept that landed under protocols/ by hand.\n' \
+  > "$BROKEN/protocols/stray.md"
+break_expect_validate E_RESERVED_DIR "a .md file with a type: key placed under protocols/"
+rm -rf "$BROKEN"
+
+step "break 22: a shard listing a concept twice across index/ shards"
+break_setup
+okfy package "$BROKEN" --shard-index >/dev/null || fail "break 22: okfy package --shard-index"
+[ -f "$BROKEN/index/glossary.md" ] || fail "break 22: no index/glossary.md shard was written"
+GAMMA_LINE=$(grep -m1 'gamma\.md' "$BROKEN/index/glossary.md") \
+  || fail "break 22: no gamma.md listing line found in its own shard"
+printf '%s\n' "$GAMMA_LINE" >> "$BROKEN/index/strategies.md"
+grep -qF -- "$GAMMA_LINE" "$BROKEN/index/strategies.md" || fail "break 22 edited nothing"
+# The package fingerprint is untouched (nothing under strategies/ or glossary/
+# concept files changed) — this must stay E_INDEX_SHARD, never fall into the
+# ordinary-staleness exemption that suppresses it (v0.24 review fix, finding 29).
+okfy validate "$BROKEN" > "$WORK/broken-shard.txt" 2>&1 || true
+grep -q E_STALE_PACKAGE "$WORK/broken-shard.txt" \
+  && { cat "$WORK/broken-shard.txt"; fail "break 22 premise: the package reads stale, so E_INDEX_SHARD would be suppressed"; }
+grep -q E_INDEX_SHARD "$WORK/broken-shard.txt" \
+  || { cat "$WORK/broken-shard.txt"; fail "a concept listed twice across shards was not reported as E_INDEX_SHARD"; }
+echo "  reported as E_INDEX_SHARD: a concept duplicated across two index/ shards, package still fresh"
+rm -rf "$BROKEN"
+
+step "break 23: a secret-shaped value in a proposal"
+break_setup
+concept_file "$WORK/p23.md" "Gamma" "Gamma is convexity. Rotate the key sk-abcdefghijklmnopqrstuvwxyz012345 first."
+grep -q "sk-abcdefghijklmnopqrstuvwxyz012345" "$WORK/p23.md" || fail "break 23 wrote no secret-shaped text"
+break_expect_cmd E_PROPOSAL_SECRET "a secret-shaped value inside proposed memory" \
+  okfy propose "$BROKEN" --target glossary/gamma --as claude-code/1.0 --from "$WORK/p23.md"
+if [ -e "$BUNDLE/$LEDGER" ]; then
+  cmp -s "$BUNDLE/$LEDGER" "$BROKEN/$LEDGER" || fail "a refused secret still reached the memory ledger"
+else
+  [ ! -e "$BROKEN/$LEDGER" ] || fail "a refused secret still reached the memory ledger"
+fi
+rm -rf "$BROKEN"
+
+step "break 24: a patch hunk whose declared count does not match"
+break_setup
+printf '[{"old": "delta", "new": "Delta", "count": 5}]\n' > "$WORK/p24.json"
+break_expect_cmd E_PATCH_COUNT "a --patch-file hunk with a wrong declared count" \
+  okfy propose "$BROKEN" --target glossary/gamma --action update --as claude-code/1.0 \
+  --patch-file "$WORK/p24.json"
+rm -rf "$BROKEN"
+
+step "break 25: a done segment moved back to running (not a legal edge)"
+break_setup
+grep -q "segment-01" "$BROKEN/meta/extraction-plan.md" \
+  || fail "break 25 premise: segment-01 is not in the extraction plan"
+break_expect_cmd E_SEGMENT_TRANSITION "segment-01 (already done) moved to running" \
+  okfy segment-status "$BROKEN" segment-01 running
+rm -rf "$BROKEN"
+
 # --- three sessions, one bundle ------------------------------------------------
 # Memory is memory only if a DIFFERENT agent, holding nothing but the bundle, gets
 # it back. Each session is its own process with an emptied environment (`env -i`,
@@ -1026,7 +1107,7 @@ echo "  session C (gemini-cli/0.3): $SC"
 rm -rf "$SCEN"
 
 # --- the positive control ----------------------------------------------------
-# Eighteen breaks all went red. That is only evidence if the bundle they were made
+# Twenty-five breaks all went red. That is only evidence if the bundle they were made
 # from is still green: a permanently red artifact would satisfy every assertion
 # above while proving nothing. Each break worked on a copy, so this re-checks
 # the original and requires the same answer it gave before any of them ran.
@@ -1043,4 +1124,4 @@ grep -q '"state": "verified"' "$WORK/control.json" \
   || fail "the source map is no longer verified on the green path"
 echo "  the bundle every break was made from still returns ok: true"
 
-printf '\nREFERENCE BUNDLE OK: %s (18 deliberate breaks, all red with their own code)\n' "$BUNDLE"
+printf '\nREFERENCE BUNDLE OK: %s (25 deliberate breaks, all red with their own code)\n' "$BUNDLE"

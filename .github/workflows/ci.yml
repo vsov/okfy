@@ -22,12 +22,12 @@ name: CI
 #
 # It builds a bundle from `scripts/reference-corpus/`, drives it to
 # `release_check.ok == true` through the installed wheel, then breaks it in
-# eighteen places the contract names and requires each one to go red WITH ITS OWN ERROR
+# twenty-five places the contract names and requires each one to go red WITH ITS OWN ERROR
 # CODE — never merely a nonzero exit, because `release_check` composes a dozen
 # gates into one boolean and redness proves nothing about any single one. Each
 # break also asserts it edited something first, so a mutation that silently
 # matched nothing cannot pass as evidence. It finishes by re-checking the
-# unbroken bundle, because eighteen reds only mean something if green is still
+# unbroken bundle, because twenty-five reds only mean something if green is still
 # reachable.
 #
 # That is a black-box trust-boundary suite an external reader can run, and it

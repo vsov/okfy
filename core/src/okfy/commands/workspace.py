@@ -17,7 +17,8 @@ def cmd_workspace(a) -> int:
                 raise ValueError(f"bad --member spec {spec!r} "
                                  "(want role:name=path)") from None
             members.append((name, Path(mpath), role))
-        path = init_workspace(a.dir, members, title=a.title)
+        path = init_workspace(a.dir, members, title=a.title,
+                              project_key=a.project_key)
         _print({"created": str(path)})
     elif a.wcmd == "status":
         _print(workspace_status(Workspace.load(a.dir)))

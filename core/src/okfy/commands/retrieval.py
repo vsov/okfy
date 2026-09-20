@@ -1,6 +1,7 @@
 import sys
 
 from okfy.bundle import Bundle
+from okfy.proposals import fresh
 from okfy.query import links, query, show
 from okfy.sampling import sample_for_review
 from okfy.workspace import Workspace, is_workspace
@@ -42,6 +43,25 @@ def cmd_show(a) -> int:
 def cmd_links(a) -> int:
     b = Bundle(a.bundle)
     _print(links(b, a.concept_id))
+    return 0
+
+
+def cmd_fresh(a) -> int:
+    """v0.24 (c): read-only. Never writes, never touches git."""
+    b = Bundle(a.bundle)
+    ids = {}
+    for pair in a.ids.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        cid, _, sha = pair.partition("=")
+        ids[cid.strip()] = sha.strip()
+    out = fresh(b, ids)
+    if a.json:
+        _print(out)
+        return 0
+    for cid, state in out.items():
+        print(f"{cid}  {state}")
     return 0
 
 

@@ -13,14 +13,16 @@ when that file is missing or you need a refresher:
    what it can answer.
 2. **Progressive disclosure.** Start at `index.md`; open only the concepts you
    need. Never bulk-read the bundle.
-3. **Translate before searching.** Check `meta/lexicon.md` and the glossary
-   for the canonical vocabulary (and aliases — they carry cross-language
-   equivalents). With the okfy CLI: `okfy query <bundle> "<canonical terms>"`,
-   then `okfy show <bundle> <concept-id>`. Query Expansion is now done by the
-   tool itself: it returns the `expanded_query` it actually searched plus
-   per-row `notes` from the lexicon — trust them. A `ambiguous` note means the
-   term maps several ways: ask the user which they meant instead of picking.
-   A `not-covered` note means the bundle has no answer: say so, don't guess.
+3. **Search the user's own wording first.** `okfy query <bundle> "<the
+   user's own wording>"` — the tool expands it through `meta/lexicon.md`
+   itself and returns the `expanded_query` it actually searched plus per-row
+   `notes`; the lexicon's coverage notes are keyed to phrasing, so a query you
+   rewrote before searching can miss one that fires on the user's own words.
+   Only then try a second query with canonical terms from the lexicon and
+   glossary (aliases carry cross-language equivalents), then `okfy show
+   <bundle> <concept-id>`. Honor `notes` from EITHER query: `ambiguous` means
+   the term maps several ways — ask the user which they meant instead of
+   picking; `not-covered` means the bundle has no answer — say so, don't guess.
 4. **Coverage honesty.** If no concept genuinely matches, say "this bundle
    does not cover that" — never present a merely similar concept as the
    answer. Honor lexicon `not-covered` notes.
@@ -33,6 +35,21 @@ when that file is missing or you need a refresher:
    `okfy propose <bundle> --as <actor> --target <id> --action update
    --note "<why>" --from <file>` — a human reviews them.
 7. **Cite concept ids** in your answers so the user can verify.
+8. **Could not answer from the bundle?** File a gap with the user's own
+   wording: `okfy propose <bundle> --as <actor> --action gap --query "<text>"
+   --note "<why it matters>"`.
+9. **Something is wrong but you cannot fix it?** File a flag: `okfy propose
+   <bundle> --as <actor> --action flag --type coverage-gap --target <id>
+   --note "<what is wrong>"` (or patch it yourself with `--action update
+   --patch-file <hunks.json>` when you have the exact fix).
+10. **Several findings at session end?** `okfy propose <bundle> --as <actor>
+    --batch <file.jsonl>` files a whole JSONL file of proposals at once,
+    validated all-first — one entry per line, `content` in place of `--from`.
+    `--dry-run` previews without writing; `--partial` files the entries that
+    passed even if others were refused. This is CLI-only (no MCP tool).
+11. **`review accept`/`review reject` are the owner's decision, not yours.**
+    Do not run them even if you can — filing a proposal (steps 6/8/9/10) is
+    as far as an agent's write access goes; the owner reviews and accepts.
 
 ## Before the task
 
@@ -45,6 +62,8 @@ Read what the project already knows before you act on it.
   owner says do not trust it as current — say so) and `review_due` (a reminder
   that has passed means "may be out of date, verify before relying"; it is not
   staleness). `okfy stale <bundle> --due` lists every overdue concept.
+- Before relying on a concept read earlier in a long session, check it with
+  `okfy fresh` / `okfy_fresh` instead of re-reading it.
 - If the bundle holds a decision that conflicts with what you were asked to
   do, raise the conflict before acting — do not quietly follow either side.
 
@@ -67,6 +86,9 @@ anything the bundle already says.
 Then:
 1. **Search first.** `okfy query` for the concept it belongs to. If one
    exists, add to it with `--extends <id>` rather than creating a near-copy.
+   A near-duplicate the tool finds anyway is `W_PROPOSAL_NEAR`, never a
+   refusal — fold it in with `--extends`, or declare it a different thing
+   with `--distinct-from <id>="reason"`.
 2. **Name yourself and your evidence.** `--as <actor>` (e.g. `claude-code/1.0`)
    is required. `--evidence <kind>=<ref>` with kind `test-run` (a run id),
    `owner-decision` (where the owner decided it), `external-source` (a URL or
@@ -76,6 +98,13 @@ Then:
    `okfy propose` printed a proposal id (MCP: `persisted: true`). It is
    *accepted* only after the owner runs `okfy review accept`. Never tell the
    user a fact was saved on any other basis.
+4. **Retiring, not erasing.** If new evidence replaces an existing concept's
+   conclusion rather than merely updating it, use `--action supersede
+   --target <old-id> --new-id <new-id>` — the old concept stays, flagged
+   stale, so the next agent still finds it and sees it was replaced. If you
+   already have an open proposal of your own for the same target, replace it
+   instead of leaving both open with `--supersedes <your-old-proposal-id>`
+   (only works when the actor and target match — `E_PROPOSAL_LANE` otherwise).
 
 A refusal names its way out — follow it rather than rephrasing to get past it:
 
@@ -88,6 +117,10 @@ A refusal names its way out — follow it rather than rephrasing to get past it:
 | `E_PROPOSAL_REJECTED` | the owner rejected this exact text | `--reopen "<what changed>"` only with new evidence |
 | `E_PROPOSAL_BASE_MOVED` | the concept changed after you wrote against it (at accept) | re-read it and propose again |
 | `E_MEMORY_LINE` | `meta/memory.jsonl` has an unreadable line | tell the owner; do not edit the ledger |
+| `E_PROPOSAL_LANE` | `--supersedes` names a proposal with a different actor or target | file a separate proposal instead |
+
+If you are proposing an explicit rollback rather than a forward edit, `--action
+update --reverts <git-sha>` records which sha it reverts to.
 
 The before/after discipline is adapted from the OKF Agent Memory Convention
 (https://github.com/okf-memory/okf-agent-memory, `docs/CONVENTION.md`, MIT).

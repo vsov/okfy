@@ -238,8 +238,6 @@ def _check_injection(bundle: Bundle, problems: list, notes: list):
 
 
 def _check_provenance_complete(bundle: Bundle, problems: list, notes: list):
-    from okfy.job import job_digest
-    from okfy.ledger import read_rows
     if str(bundle.purpose().get("provenance", "")).strip() == "legacy":
         notes.append("provenance: legacy declared in meta/purpose.md — "
                      "worker-job completeness not enforced")
@@ -262,26 +260,42 @@ def _check_provenance_complete(bundle: Bundle, problems: list, notes: list):
                         f"{', '.join(not_done)} — an unfinished extraction "
                         "cannot be released")
     done = [str(s["id"]) for s in segs if s.get("status") == "done"]
-    rows = read_rows(bundle)
-    by_seg = {}
-    for row in rows:
-        by_seg.setdefault(str(row.get("segment")), []).append(row)
     for seg in done:
-        jf = bundle.root / "meta" / "jobs" / f"{seg}.json"
-        if not jf.is_file():
+        state = segment_provenance_state(bundle, seg)
+        if state == "no-job":
             problems.append(f"E_REL_JOB_MISSING: done segment {seg} has no "
                             f"job artifact meta/jobs/{seg}.json")
-            continue
-        try:
-            art = json.loads(jf.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        elif state == "job-unreadable":
             problems.append(f"E_REL_JOB_MISSING: job artifact for {seg} unreadable")
-            continue
-        ledgered = [row for row in by_seg.get(seg, [])
-                    if row.get("job_digest") == job_digest(art)]
-        if not ledgered:
+        elif state == "no-ledger-row":
             problems.append(f"E_REL_LEDGER_JOB: no ledger row for segment "
                             f"{seg} carries the job artifact's digest")
+
+
+def segment_provenance_state(bundle: Bundle, segment_id: str) -> str:
+    """Whether `segment_id` has the provenance a `done` status claims: a job
+    artifact (`meta/jobs/<segment_id>.json`) AND a ledger row whose
+    `job_digest` matches it. One of `ok`, `no-job`, `job-unreadable`,
+    `no-ledger-row` — read-only, never writes, never raises.
+
+    Shared by `_check_provenance_complete` above (which turns a bad state
+    into `E_REL_JOB_MISSING`/`E_REL_LEDGER_JOB` across every `done` segment
+    at release time) and `okfy.segment.set_segment_status`'s
+    `E_SEGMENT_DONE_UNBACKED` (checked for ONE segment, before it is marked
+    done — same predicate, checked earlier)."""
+    from okfy.job import job_digest
+    from okfy.ledger import read_rows
+    jf = bundle.root / "meta" / "jobs" / f"{segment_id}.json"
+    if not jf.is_file():
+        return "no-job"
+    try:
+        art = json.loads(jf.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "job-unreadable"
+    ledgered = [row for row in read_rows(bundle)
+               if str(row.get("segment")) == segment_id
+               and row.get("job_digest") == job_digest(art)]
+    return "ok" if ledgered else "no-ledger-row"
 
 
 def _check_span_outcomes(bundle: Bundle, problems: list, notes: list):

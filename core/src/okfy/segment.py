@@ -1,3 +1,5 @@
+import contextlib
+import fcntl
 import subprocess
 import sys
 from fnmatch import fnmatch
@@ -5,9 +7,37 @@ from math import ceil
 from pathlib import Path
 
 from okfy import frontmatter
+from okfy.actor import utc_now
 from okfy.bundle import Bundle
+from okfy.gitenv import run_git
 
 DEFAULT_BUDGET = 50_000  # ~tokens of material per Worker (ADR-0008)
+
+# v0.24 (b): the segment lifecycle is a CLOSED vocabulary with LEGAL EDGES —
+# superset-compatible with what was actually in use before this: `make_segments`
+# always wrote "pending", and every caller that set a terminal state
+# (extract.md, scripts/reference-bundle.sh) only ever wrote "done". "running",
+# "failed" and "skipped" are new spellings, not renames.
+STATUSES = ("pending", "running", "done", "failed", "skipped")
+E_SEGMENT_STATUS = "E_SEGMENT_STATUS"
+E_SEGMENT_TRANSITION = "E_SEGMENT_TRANSITION"
+E_SEGMENT_REASON_REQUIRED = "E_SEGMENT_REASON_REQUIRED"
+E_SEGMENT_DONE_UNBACKED = "E_SEGMENT_DONE_UNBACKED"
+
+# Every legal next state, keyed by current state. Deliberately does not
+# include self-transitions (pending -> pending etc.) — none of those appear
+# in the spec's edge list, so none are legal.
+LEGAL_TRANSITIONS: dict[str, set[str]] = {
+    "pending": {"running", "skipped"},
+    "running": {"done", "failed", "pending"},          # pending: re-queue
+    "failed": {"running", "skipped"},
+    "skipped": {"pending"},
+    "done": {"pending"},                                # re-extraction only
+}
+# `failed`/`skipped` always need a reason (why this segment stopped);
+# `done -> pending` always needs one too (why re-extract something finished) —
+# every other legal edge is routine machinery and needs none.
+REASON_REQUIRED_STATUSES = {"failed", "skipped"}
 
 DEFAULT_EXCLUDES = {
     "dirs": {"node_modules", "vendor", "dist", "build", "target",
@@ -45,9 +75,9 @@ def _walk(corpus: Path) -> list[str]:
     """Relative posix paths, files only. Git corpora get exact gitignore semantics."""
     if (corpus / ".git").exists():
         try:
-            out = subprocess.run(
-                ["git", "-C", str(corpus), "ls-files", "--cached", "--others",
-                 "--exclude-standard", "-z"],
+            out = run_git(
+                corpus, "ls-files", "--cached", "--others",
+                "--exclude-standard", "-z",
                 capture_output=True, text=True, check=True).stdout
             rels = {r for r in out.split("\0") if r and (corpus / r).is_file()}
             return sorted(rels)
@@ -273,14 +303,105 @@ def write_segments_to_plan(bundle: Bundle, segments: list[dict]) -> None:
     plan.path.write_text(frontmatter.serialize(plan.meta, plan.body), encoding="utf-8")
 
 
-def set_segment_status(bundle: Bundle, segment_id: str, status: str) -> None:
-    plan = bundle.plan()
-    segs = plan.meta.get("segments", [])
-    for s in segs:
-        if s["id"] == segment_id:
-            s["status"] = status
-            break
-    else:
-        raise KeyError(f"unknown segment: {segment_id}")
-    plan.meta["segments"] = segs
-    plan.path.write_text(frontmatter.serialize(plan.meta, plan.body), encoding="utf-8")
+@contextlib.contextmanager
+def _plan_lock(bundle: Bundle):
+    """One extraction-plan write at a time. Stage 4 runs up to 4 workers
+    concurrently, each ending with its own `segment-status <id> done` — two
+    concurrent read-modify-writes of meta/extraction-plan.md can otherwise
+    silently lose one of them. Same fcntl pattern as `proposals.review_lock`,
+    a sibling lock file beside it in the already-gitignored cache dir (so no
+    bundle worktree is dirtied by an untracked lock)."""
+    from okfy.index import index_path
+    lock = index_path(bundle).parent / "plan.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield lock
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def set_segment_status(bundle: Bundle, segment_id: str, status: str, *,
+                       reason: str | None = None) -> dict:
+    """v0.24 (b): the segment lifecycle is a closed vocabulary
+    (`STATUSES`) with legal edges (`LEGAL_TRANSITIONS`) — an unrecognised
+    status is `E_SEGMENT_STATUS`, an illegal move (self-transitions
+    included) is `E_SEGMENT_TRANSITION`, both naming the way out.
+
+    `failed` and `skipped`, and the one legal edge back OUT of `done`
+    (`done -> pending`, a re-extraction), require `--reason`
+    (`E_SEGMENT_REASON_REQUIRED` otherwise) — stored on the segment entry as
+    `status_reason`, with `status_at` (UTC) alongside it.
+
+    Moving TO `done` additionally requires the provenance a `done` status
+    claims: a job artifact for this segment AND a ledger row carrying that
+    job's digest (`E_SEGMENT_DONE_UNBACKED` otherwise) — the exact predicate
+    `release_check` composes over every done segment at release time
+    (`okfy.release.segment_provenance_state`), checked here for ONE segment,
+    before it is marked done rather than after. A segment for which NO job
+    artifact was ever built (a legacy bundle predating the job chain, or one
+    that declares `provenance: legacy`) is let through unbacked — the
+    returned dict labels it `legacy_unbacked: True` rather than pretending it
+    was backed, and `release_check` still requires `provenance: legacy` to be
+    declared explicitly for that to be reported instead of refused.
+
+    Returns `{"segment_id", "status", "legacy_unbacked"}`."""
+    if status not in STATUSES:
+        raise ValueError(
+            f"{E_SEGMENT_STATUS}: {status!r} is not a legal segment status — "
+            f"use one of: {', '.join(STATUSES)}")
+    with _plan_lock(bundle):
+        plan = bundle.plan()
+        if plan is None:
+            raise FileNotFoundError(
+                "meta/extraction-plan.md missing — run /okfy:new first")
+        segs = plan.meta.get("segments", [])
+        seg = next((s for s in segs if s["id"] == segment_id), None)
+        if seg is None:
+            raise KeyError(f"unknown segment: {segment_id}")
+        current = seg.get("status") or "pending"
+        legal = LEGAL_TRANSITIONS.get(current, set())
+        if status not in legal:
+            names = ", ".join(sorted(legal)) or (
+                "(none — this segment is in a status this vocabulary does "
+                "not recognise; fix it by hand in meta/extraction-plan.md)")
+            raise ValueError(
+                f"{E_SEGMENT_TRANSITION}: {segment_id}: {current} -> {status} "
+                f"is not a legal move; from {current} the legal next state(s) "
+                f"are: {names}")
+        reason_needed = status in REASON_REQUIRED_STATUSES or \
+            (current == "done" and status == "pending")
+        if reason_needed and not (reason and reason.strip()):
+            raise ValueError(
+                f"{E_SEGMENT_REASON_REQUIRED}: {segment_id}: {current} -> "
+                f"{status} requires --reason (why this segment stopped, or "
+                "why a finished one is being re-extracted)")
+
+        legacy_unbacked = False
+        if status == "done":
+            from okfy.release import segment_provenance_state
+            state = segment_provenance_state(bundle, segment_id)
+            if state == "no-job":
+                legacy_unbacked = True   # labelled, not silently accepted
+            elif state in ("job-unreadable", "no-ledger-row"):
+                reason_txt = {"job-unreadable": "its job artifact "
+                              f"meta/jobs/{segment_id}.json is unreadable",
+                              "no-ledger-row": "no ledger row carries that "
+                              "job artifact's digest"}[state]
+                raise ValueError(
+                    f"{E_SEGMENT_DONE_UNBACKED}: {segment_id}: a job artifact "
+                    f"exists for this segment but {reason_txt} — run `okfy "
+                    f"ledger add --job {segment_id} ...` (Stage 4's own "
+                    "sequence: job, worker, ledger add, THEN segment-status "
+                    "done) before marking it done")
+
+        seg["status"] = status
+        if reason_needed:
+            seg["status_reason"] = reason.strip()
+            seg["status_at"] = utc_now()
+        plan.meta["segments"] = segs
+        plan.path.write_text(frontmatter.serialize(plan.meta, plan.body),
+                             encoding="utf-8")
+    return {"segment_id": segment_id, "status": status,
+           "legacy_unbacked": legacy_unbacked}

@@ -1,10 +1,11 @@
 import datetime
 import hashlib
 import json
-import subprocess
+import os
 from pathlib import Path
 
 from okfy.frontmatter import serialize
+from okfy.gitenv import run_git
 from okfy.guard import assert_safe_bundle_path
 
 
@@ -17,8 +18,7 @@ def _git(bundle: Path, *args) -> None:
     laptops — reached the user as a traceback ending in `exit status 128` and no
     hint of what to do. Found by the CI matrix: the same command passed on macOS
     runners and failed on Ubuntu ones for exactly this reason."""
-    r = subprocess.run(["git", "-C", str(bundle), *args],
-                       capture_output=True, text=True)
+    r = run_git(bundle, *args, capture_output=True, text=True)
     if r.returncode == 0:
         return
     err = (r.stderr or r.stdout or "").strip()
@@ -35,17 +35,56 @@ def _git(bundle: Path, *args) -> None:
 
 
 def _corpus_git_sha(corpus: Path) -> str | None:
-    r = subprocess.run(["git", "-C", str(corpus), "rev-parse", "HEAD"],
-                       capture_output=True, text=True)
+    r = run_git(corpus, "rev-parse", "HEAD", capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else None
 
 
-def _manifest(corpus: Path) -> dict[str, str]:
-    out = {}
-    for p in sorted(corpus.rglob("*")):
-        rel = p.relative_to(corpus)
-        if p.is_file() and not any(part.startswith(".") for part in rel.parts):
-            out[rel.as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+def _manifest(corpus: Path, errors: list[str] | None = None,
+              skipped_symlinks: list[str] | None = None) -> dict[str, str]:
+    """path -> sha256, for every non-hidden file under `corpus`.
+
+    Walked with `os.walk(..., onerror=...)` rather than `Path.rglob` so an
+    unreadable directory or file can be REPORTED instead of silently dropped
+    from the listing: `rglob` swallows `OSError` from `scandir` the same way
+    `os.walk`'s default (no `onerror`) does, so passing `errors` is a pure
+    addition — callers that omit it (init, refresh_snapshot) see the exact
+    same manifest as before. `errors` collects the relative path of every
+    directory or file `os.walk`/`read_bytes` could not read; `update.corpus_diff`
+    is the caller that treats a non-empty list as E_DIFF_PARTIAL_LISTING.
+
+    A name from `os.walk`'s `filenames` that is NOT `Path.is_file()` — a
+    dangling symlink, a FIFO, a socket, a device — is skipped, exactly as the
+    v0.23 `rglob()` + `is_file()` walk skipped it (a broken link is not a
+    listing failure, it is an absent file). `read_bytes()` on one of these
+    would either raise on a broken link or, for a FIFO, hang forever; neither
+    belongs in `errors`. `skipped_symlinks` collects the relative path of
+    every skipped entry that IS a symlink (broken or otherwise non-file), for
+    `update.corpus_diff` to report as `skipped_dangling_symlinks` — a note,
+    never a refusal."""
+    out: dict[str, str] = {}
+
+    def onerror(exc: OSError) -> None:
+        if errors is not None:
+            errors.append(getattr(exc, "filename", None) or str(exc))
+
+    for dirpath, dirnames, filenames in os.walk(corpus, onerror=onerror):
+        # Prune hidden dirs from descent — matches the old rglob filter,
+        # which excluded any path with a "."-prefixed component.
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        for name in sorted(filenames):
+            if name.startswith("."):
+                continue
+            p = Path(dirpath) / name
+            rel = p.relative_to(corpus).as_posix()
+            if not p.is_file():
+                if skipped_symlinks is not None and p.is_symlink():
+                    skipped_symlinks.append(rel)
+                continue
+            try:
+                out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                if errors is not None:
+                    errors.append(rel)
     return out
 
 

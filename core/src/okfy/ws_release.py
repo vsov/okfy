@@ -95,9 +95,25 @@ def ws_suite_queries(ws: Workspace, suite: str) -> list:
 def _flat_hits(out: dict, n: int) -> list:
     """One ranked list out of the role-grouped federated result, plus whatever
     the constrains auto-pull dragged in — the pull is the answer too, and an
-    expectation about a constraint firing has to be able to see it."""
+    expectation about a constraint firing has to be able to see it.
+
+    v0.24 / finding 43: `federated_query` added a third, additive `personal`
+    group (out only when the workspace has a `personal` member — already
+    scoped to in-scope hits by `_personal_scope_filter`, so nothing extra to
+    filter here). Flattening only knowledge+constraints made every personal
+    hit invisible to workspace eval: a `covered` expectation on an in-scope
+    personal concept recorded `top_hits=[]` and graded `unmet` although
+    federation answered it correctly, and the owner judged acceptance runs
+    with the personal evidence missing from the record. `out.get("personal")`
+    is `None` for a workspace with no personal member, so this line is a
+    no-op there and every existing (pre-v0.24) recorded run and its era stays
+    byte-identical — this is additive to the FLATTENING, not a bump of
+    WS_FINGERPRINT_SCHEMA (which pins the federated CONTRACT, not this
+    projection of it, and staying `okfy-ws-retrieval@1` keeps every run
+    recorded before this fix comparable rather than stale-by-fiat)."""
     hits = []
-    for e in (out.get("knowledge") or []) + (out.get("constraints") or []):
+    for e in ((out.get("knowledge") or []) + (out.get("constraints") or [])
+             + (out.get("personal") or [])):
         hits.append({"id": e["ref"], "member": e["member"], "role": e["role"],
                      "score": e.get("score")})
     for e in (out.get("pulled") or []):

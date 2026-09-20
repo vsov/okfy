@@ -7,7 +7,7 @@ from okfy.bm25 import tokenize
 from okfy.bundle import Bundle
 from okfy.crosswalk import load_rows, parse_ref
 from okfy.index import load_index
-from okfy.workspace import Workspace
+from okfy.workspace import Member, Workspace
 
 RRF_K = 60
 
@@ -53,9 +53,16 @@ def expansion_terms(ws: Workspace, member_name: str, text: str,
     """Terms to ADD when querying member_name: for each accepted same-as row
     with one side in another member and one side in member_name, if the query
     lexically touches the FAR side's title/aliases, contribute the NEAR side's
-    title+alias tokens."""
+    title+alias tokens.
+
+    A caller-supplied `rows` (as `federated_query` passes) is trusted as-is —
+    it has already been through `_scope_crosswalk_rows`. The default path
+    (no `rows`, e.g. a direct call) scopes for itself: a personal member's
+    out-of-scope concept must not drive expansion regardless of who calls
+    this (finding 41)."""
     if rows is None:
         rows, _, _ = active_rows(ws)
+        rows, _ = _scope_crosswalk_rows(rows, personal_scope_ids(ws, ws.project_key()))
     qtok = set(tokenize(text))
     indexes = {m.name: load_index(Bundle(m.path)) for m in ws.members}
     extra: list[str] = []
@@ -123,14 +130,93 @@ def _merge_same_as(ranked: dict[str, dict], rows: list) -> list[dict]:
     return out
 
 
+def _in_scope(applies_to, project_key: str | None) -> bool:
+    """Fail closed (ADR-0015): missing, empty or malformed `applies_to` is
+    OUT of scope, never in. Only a list of strings can be in scope, and only
+    via an exact project_key match or the `*` wildcard."""
+    if not isinstance(applies_to, list) or not applies_to:
+        return False
+    return any(k == "*" or k == project_key
+              for k in applies_to if isinstance(k, str))
+
+
+def _personal_scope_filter(m: Member, pool: list[dict], project_key: str | None
+                           ) -> tuple[list[dict], str]:
+    """Drop every pool entry out of scope for a `personal` member and return
+    (filtered pool, note). `applies_to` is not carried by the index (only
+    concept_tokens/id/title/... are — see index.py), so it is read straight
+    from the concept files, once per member, rather than by changing the
+    index schema for a v1 read-only feature."""
+    applies = {c.id: c.meta.get("applies_to") for c in Bundle(m.path).concepts()}
+    total = len(pool)
+    kept = [c for c in pool if _in_scope(applies.get(c["id"]), project_key)]
+    note = (f"{m.name}: personal scope {project_key} — "
+           f"{len(kept)} of {total} concepts in scope")
+    return kept, note
+
+
+def personal_scope_ids(ws: Workspace, project_key: str | None) -> dict[str, set[str]]:
+    """For every `personal` member, the set of concept ids in scope for this
+    query's project_key. Built ONCE per query (audit finding 41) so every
+    path that can put a ref into the federated result — the search pool via
+    `_personal_scope_filter`, the crosswalk (same-as merge, expansion,
+    constrains auto-pull) via `ref_in_scope` below — checks the identical
+    predicate. A member absent from this dict is not `personal` and is never
+    narrowed here."""
+    out: dict[str, set[str]] = {}
+    for m in ws.members:
+        if m.role != "personal":
+            continue
+        applies = {c.id: c.meta.get("applies_to") for c in Bundle(m.path).concepts()}
+        out[m.name] = {cid for cid, a in applies.items()
+                       if _in_scope(a, project_key)}
+    return out
+
+
+def ref_in_scope(scope_ids: dict[str, set[str]], ref: str) -> bool:
+    """True unless `ref` (\"member:concept-id\") names a `personal` member's
+    concept that this query's project_key put out of scope. A non-personal
+    member (absent from scope_ids) is always in scope — only `personal`
+    narrows, same as the search-pool filter."""
+    member, cid = parse_ref(ref)
+    if member not in scope_ids:
+        return True
+    return cid in scope_ids[member]
+
+
+def _scope_crosswalk_rows(rows: list, scope_ids: dict[str, set[str]]
+                          ) -> tuple[list, int]:
+    """Drop every crosswalk row (same-as OR constrains) with either side
+    naming an out-of-scope personal concept. The crosswalk is a side door
+    into the federated result — same-as drives merge and query expansion,
+    constrains drives the auto-pull — and it must fail closed exactly like
+    the search pool does, regardless of how the row got there (owner-written,
+    `crosswalk.candidates`, or LLM-proposed then accepted)."""
+    kept, dropped = [], 0
+    for r in rows:
+        if ref_in_scope(scope_ids, r.src) and ref_in_scope(scope_ids, r.dst):
+            kept.append(r)
+        else:
+            dropped += 1
+    return kept, dropped
+
+
 def federated_query(ws: Workspace, text: str, n: int = 10,
                     pull_top: int = 5) -> dict:
     from okfy.query import filter_pool, search_pool
     ws_rows = lexicon.load_rows(Bundle(ws.root))   # workspace meta/lexicon.md
     role_of = {m.name: m.role for m in ws.members}
     rows, n_stale, unverifiable = active_rows(ws)
+    scope_ids = personal_scope_ids(ws, ws.project_key())
+    rows, n_scoped = _scope_crosswalk_rows(rows, scope_ids)
     ranked: dict[str, dict] = {}
     notes: list[str] = []
+    if n_scoped:
+        notes.append(
+            f"workspace: {n_scoped} crosswalk row(s) excluded — touch a "
+            "personal concept out of this workspace's scope (ADR-0015 "
+            "fail-closed; same-as merge/expansion and constrains auto-pull "
+            "never see them)")
     if unverifiable:
         notes.append(
             f"workspace: member baseline unverifiable for "
@@ -150,6 +236,13 @@ def federated_query(ws: Workspace, text: str, n: int = 10,
         expanded[m.name] = qtext
         notes += [f"{m.name}: {note}" for note in eff["notes"]]
         pool = filter_pool(load_index(b))
+        if m.role == "personal":
+            # scope filtering happens BEFORE search_pool, so BM25's idf/avgdl
+            # are computed over the already-narrowed pool — ranking of the
+            # concepts that remain equals a direct query of a bundle that
+            # never held the filtered ones (see test_personal_scope.py).
+            pool, note = _personal_scope_filter(m, pool, ws.project_key())
+            notes.append(note)
         for rank, h in enumerate(search_pool(pool, eff["pins"], qtext, n)):
             ref = f"{m.name}:{h['id']}"
             e = ranked.setdefault(ref, {
@@ -166,7 +259,12 @@ def federated_query(ws: Workspace, text: str, n: int = 10,
     out = {"knowledge": [e for e in ordered if e["role"] == "knowledge"][:n],
            "constraints": [e for e in ordered if e["role"] == "constraints"][:n],
            "notes": notes, "expanded_query": expanded}
-    for e in out["knowledge"] + out["constraints"]:
+    # `personal` is a third, ADDITIVE result group — added to the payload
+    # only when the workspace actually has a personal member, so a workspace
+    # of only knowledge/constraints members keeps a byte-identical shape.
+    if any(m.role == "personal" for m in ws.members):
+        out["personal"] = [e for e in ordered if e["role"] == "personal"][:n]
+    for e in out["knowledge"] + out["constraints"] + out.get("personal", []):
         e["score"] = round(e["score"], 5)
     pulled: dict[str, dict] = {}
     # a top result answers FOR its whole accepted same-as class, not only

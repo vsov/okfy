@@ -3,7 +3,11 @@ description: "Stages 4-6: blind parallel extraction → consolidation → 4-laye
 argument-hint: "<bundle-path>"
 ---
 Bundle: $1. Read `meta/extraction-plan.md` and `meta/purpose.md` first.
-Resumable: skip any segment already `status: done`.
+Resumable: skip any segment already `status: done`; process every segment
+that is `pending`, `running` or `failed` — a `running` segment left over
+from an interrupted run is re-queued (`segment-status ... pending`, legal
+from `running`) before its Worker is restarted, and a `failed` one is
+retried directly (`segment-status ... running`, also legal from `failed`).
 Commits: always `git -C <bundle> add .` (never `add -A`) — in embed bundles
 the enclosing repo is the user's corpus repo and `-A` would stage their
 unrelated changes.
@@ -21,7 +25,8 @@ hashes the actual prompt text and inputs.
    `okfy segment <bundle> --budget <plan budget> --include <globs> --exclude <globs>`.
 2. Seed Glossary: from the plan's glossary strategy + survey, draft 10-30
    one-line term seeds (term + gloss). Keep in memory; pass to every worker.
-3. For each pending segment, FIRST freeze the worker's contract:
+3. For each segment to process (see Resumable above), FIRST freeze the
+   worker's contract:
    First write the execution attestation once per run, to a scratch file outside
    the bundle (e.g. `/tmp/okfy-exec.json`):
 
@@ -44,7 +49,10 @@ hashes the actual prompt text and inputs.
    `okfy job <bundle> <segment-id> --prompt-file plugin/prompts/extract-worker.md --execution-file /tmp/okfy-exec.json`
    — the core writes `meta/jobs/<segment-id>.json` (schema `okfy-worker-job@1`:
    inputs with their `lines`/`chars` spans and content hashes, corpus snapshot,
-   archetype, prompt SHA-256) and prints it with its `digest`. Then spawn a
+   archetype, prompt SHA-256) and prints it with its `digest`. Then
+   `okfy segment-status <bundle> <segment-id> running` — a segment goes
+   `pending -> running` when its Worker starts, not straight to `done`
+   (`pending -> done` is not a legal move). Then spawn a
    subagent (Task tool) with the prompt from `plugin/prompts/extract-worker.md`,
    placeholders filled, passing the job artifact's `inputs` list as the
    worker's AUTHORITATIVE input manifest — the worker reads exactly what the
@@ -57,10 +65,21 @@ hashes the actual prompt text and inputs.
    Never let a worker read the whole file for a span entry — the segment
    budget exists precisely because these files don't fit. If the artifact
    contains a span form you don't recognize, STOP and report — do not guess.
-   Run up to 4 concurrently. After each segment completes:
+   Run up to 4 concurrently. After each segment completes — IN THIS ORDER,
+   `segment-status done` LAST: v0.24 closes the vocabulary and requires a
+   `done` segment to already have a job artifact AND a ledger row carrying
+   that job's digest (`E_SEGMENT_DONE_UNBACKED` otherwise), so the ledger row
+   has to exist before the status change, not after. If a Worker fails and
+   cannot be re-run, mark it `okfy segment-status <bundle> <segment-id>
+   failed --reason "<why>"` instead of the steps below (legal from
+   `running`); a `failed` segment can go `running` again on retry, or
+   `skipped --reason "<why>"` if the owner decides not to retry it. If the
+   owner decides to skip a segment before any Worker starts it (still
+   `pending`), `okfy segment-status <bundle> <segment-id> skipped --reason
+   "<why>"` (legal from `pending`, not from `running` — a running segment
+   goes through `failed` first).
    - `okfy validate <bundle> --all` — draft frontmatter must parse (fix by
      re-running the worker on its segment if broken);
-   - `okfy segment-status <bundle> <segment-id> done`
    - `git -C <bundle> add . && git -C <bundle> commit -m "extract: <segment-id>"`
    - Save the worker's SPAN OUTCOME BLOCK verbatim to a scratch file, e.g.
      `/tmp/spans-<segment-id>.json`. Do not edit it to make anything pass. If
@@ -80,6 +99,8 @@ hashes the actual prompt text and inputs.
      block is the worker's own report, not a measurement — the core verifies
      that it accounts for every assigned span, and cannot verify that anything
      was read.
+   - `okfy segment-status <bundle> <segment-id> done` — now backed: the job
+     artifact and the ledger row above both exist.
 
 ## Stage 4a — Glean (only when Stage 6 step 1 reports substantive misses)
 

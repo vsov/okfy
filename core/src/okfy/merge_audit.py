@@ -30,6 +30,7 @@ import subprocess
 
 from okfy import frontmatter
 from okfy.bundle import Bundle
+from okfy.gitenv import run_git
 from okfy.ledger import read_rows
 from okfy.validate import LINK_RE, resolve_link
 
@@ -52,8 +53,7 @@ _LITERAL_SKIP_FIELDS = {"sources", "aliases"}
 
 
 def _git(bundle: Bundle, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(bundle.root), *args],
-                          capture_output=True, text=True)
+    return run_git(bundle.root, *args, capture_output=True, text=True)
 
 
 def _is_git_repo(bundle: Bundle) -> bool:

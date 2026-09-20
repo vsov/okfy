@@ -19,6 +19,7 @@ never composes any of it.
 from okfy.bundle import Bundle
 import json
 import re
+from pathlib import Path
 
 from okfy.tokens import count_path, count_tokens, token_method
 
@@ -126,10 +127,14 @@ USAGE_LABEL = ("zero_hit = not reached by any recorded eval run, which can reach
 _INDEX_TARGET_RE = re.compile(r"\]\(([^)\s]+)\.md\)")
 
 
-def usage_report(bundle: Bundle) -> dict:
+def usage_report(bundle: Bundle, journal: Path | None = None) -> dict:
     """Which concepts the recorded eval runs ever returned, read from
     meta/eval.json and index.md only — it writes nothing. The share is bounded
-    by the query set (queries x top_n), so it is reported with that ceiling."""
+    by the query set (queries x top_n), so it is reported with that ceiling.
+
+    `journal` (v0.24 (d)) adds a SECOND, separately labelled `journal` section
+    built from real okfy-mcp sessions (see `journal_report`) — additive only;
+    the eval-run section above and its label are unchanged either way."""
     ids = sorted(c.id for c in bundle.concepts() if not c.id.startswith("meta/"))
     ev = bundle.root / "meta" / "eval.json"
     runs = (json.loads(ev.read_text(encoding="utf-8")).get("runs") or []) if ev.is_file() else []
@@ -147,12 +152,82 @@ def usage_report(bundle: Bundle) -> dict:
     idx = bundle.root / "index.md"
     lines = [ln for ln in (idx.read_text(encoding="utf-8").splitlines() if idx.is_file() else [])
              if (m := _INDEX_TARGET_RE.search(ln)) and m.group(1) in set(zero)]
-    return {"concepts": len(ids), "runs": len(runs),
-            "ever_hit": len(ids) - len(zero) if runs else None,
-            "zero_hit": len(zero) if runs else None,
-            "share": round(len(zero) / len(ids), 4) if runs and ids else None,
-            "ceiling": {"queries": queries, "top_n": top_n,
-                        "reachable": min(len(ids), queries * top_n)},
-            "zero_hit_ids": zero,
-            "zero_hit_index_tokens": count_tokens("\n".join(lines)) if lines else 0,
-            "token_method": token_method(), "label": USAGE_LABEL}
+    out = {"concepts": len(ids), "runs": len(runs),
+          "ever_hit": len(ids) - len(zero) if runs else None,
+          "zero_hit": len(zero) if runs else None,
+          "share": round(len(zero) / len(ids), 4) if runs and ids else None,
+          "ceiling": {"queries": queries, "top_n": top_n,
+                      "reachable": min(len(ids), queries * top_n)},
+          "zero_hit_ids": zero,
+          "zero_hit_index_tokens": count_tokens("\n".join(lines)) if lines else 0,
+          "token_method": token_method(), "label": USAGE_LABEL}
+    if journal is not None:
+        out["journal"] = journal_report(bundle, journal, ids=ids)
+    return out
+
+
+def _read_journal_rows(path: Path) -> tuple[list[dict], int]:
+    """(readable JSONL rows, count of lines that were not one). Never fatal —
+    a malformed line is counted (`skipped_lines`) and skipped, not raised."""
+    if not path.is_file():
+        return [], 0
+    rows: list[dict] = []
+    skipped = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            skipped += 1
+            continue
+        if not isinstance(row, dict):
+            skipped += 1
+            continue
+        rows.append(row)
+    return rows, skipped
+
+
+def journal_report(bundle: Bundle, journal: Path, ids: list[str] | None = None) -> dict:
+    """v0.24 (d): a second usage source, built from an okfy-mcp `--journal`
+    file — OBSERVED tool calls from real sessions, distinctly labelled from
+    the eval-run section `usage_report` already reports (never merged with
+    it: an eval run is a designed suite, a journal is whatever actually
+    happened).
+
+    v0.24 review fix: a concept counts as EVER REACHED (`ever_hit`/
+    `zero_hit_ids`) when it appears either in a query row's `top_ids` (what
+    a search surfaced) or in a show row's `shown_id`/`shown_ids` (what was
+    actually fetched — a targeted `okfy_show` on an id copied from an
+    earlier result, a link, or the agent's own memory never goes through
+    `okfy_query`, so a journal that only looked at `top_ids` undercounted
+    reach). The two sources are ALSO reported separately, additively:
+    `queried_ids_n` (distinct bundle ids ever in a query's `top_ids`) and
+    `shown_ids_n` (distinct bundle ids ever shown) sit alongside the
+    combined `ever_hit`/`zero_hit_ids`, not in place of them."""
+    ids = sorted(c.id for c in bundle.concepts() if not c.id.startswith("meta/")) \
+        if ids is None else ids
+    id_set = set(ids)
+    rows, skipped = _read_journal_rows(journal)
+    sessions = {r["session"] for r in rows if r.get("session")}
+    query_rows = [r for r in rows if r.get("tool") == "query"]
+    show_rows = [r for r in rows if r.get("tool") == "show"]
+    queried_ids: set[str] = set()
+    for r in query_rows:
+        queried_ids.update(i for i in (r.get("top_ids") or []) if isinstance(i, str))
+    shown_ids: set[str] = set()
+    for r in show_rows:
+        sid = r.get("shown_id")
+        if isinstance(sid, str):
+            shown_ids.add(sid)
+        shown_ids.update(i for i in (r.get("shown_ids") or []) if isinstance(i, str))
+    hit = queried_ids | shown_ids
+    zero = [i for i in ids if i not in hit]
+    return {"label": f"observed MCP tool calls from {journal} — real "
+                     "sessions, not the eval set",
+            "sessions": len(sessions), "queries": len(query_rows),
+            "ever_hit": len(ids) - len(zero), "zero_hit_ids": zero,
+            "queried_ids_n": len(queried_ids & id_set),
+            "shown_ids_n": len(shown_ids & id_set),
+            "skipped_lines": skipped}

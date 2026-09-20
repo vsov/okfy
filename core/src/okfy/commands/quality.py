@@ -11,7 +11,12 @@ from .common import _print
 
 def cmd_eval(a) -> int:
     """`eval run` on a workspace replays its cross-bundle queries through the
-    FEDERATED path; verdict and status are shared — they only need `.root`."""
+    FEDERATED path; verdict and status are shared — they only need `.root`.
+    `metrics`/`compare`/`qrels` are pure reads over meta/eval.json and take a
+    plain Bundle — a workspace's federated eval runs are a fourth record era
+    those readers already tolerate (see eval_metrics.py), not a separate path."""
+    if a.ecmd in ("metrics", "compare", "qrels"):
+        return _cmd_eval_metrics(a)
     from okfy.workspace import Workspace, is_workspace
     if is_workspace(a.bundle):
         b = Workspace.load(a.bundle)
@@ -35,6 +40,96 @@ def cmd_eval(a) -> int:
                   f"owner-confirmed ({t['provisional']} llm-only, "
                   f"{t['pending']} pending) — release acceptance counts "
                   "owner verdicts only", file=sys.stderr)
+    return 0
+
+
+def _fmt_metric(m: dict) -> str:
+    if m["value"] is None:
+        return f"null ({m['reason']})"
+    return f"{m['value']:.3f}"
+
+
+def _cmd_eval_metrics(a) -> int:
+    from okfy.eval_metrics import (eval_compare, eval_metrics, eval_qrels,
+                                   workspace_pool_size)
+    from okfy.workspace import Workspace, is_workspace
+    # `eval metrics`'s concept pool must never be the WORKSPACE root's own
+    # files (crosswalks/manifest, not concepts) — see eval_metrics.py's
+    # workspace_pool_size docstring. `compare`/`qrels` don't read a pool, so
+    # they're unaffected; only the metrics path below consumes the override.
+    if is_workspace(a.bundle):
+        ws = Workspace.load(a.bundle)
+        b = Bundle(ws.root)
+        n_pool_override = workspace_pool_size(ws)
+    else:
+        b = Bundle(a.bundle)
+        n_pool_override = None
+    if a.ecmd == "qrels":
+        out = eval_qrels(b, unit=a.unit)
+        if a.json:
+            _print(out)
+            return 0
+        print(f"eval qrels ({out['unit']}): {len(out['rows'])} covered row(s)")
+        for r in out["rows"]:
+            print(f"  {r['query']!r} -> {r['concept']} "
+                  f"[{len(r['spans'])} span(s), {len(r['unresolved'])} unresolved]")
+        return 0
+    if a.ecmd == "compare":
+        out = eval_compare(b, a.base, a.head, suite=a.suite)
+        if a.json:
+            _print(out)
+            return 0
+        s = out["summary"]
+        print(f"eval compare: {out['base_run_id']} -> {out['head_run_id']} "
+              f"[{out['suite']}]")
+        print(f"compared {s['compared']}, {s['with_differences']} differ, "
+              f"only-in-base {s['only_in_base']}, only-in-head {s['only_in_head']}")
+        for q in out["queries"]:
+            bits = []
+            if q["entered"]:
+                bits.append(f"+{len(q['entered'])}")
+            if q["left"]:
+                bits.append(f"-{len(q['left'])}")
+            if q["rank_moves"]:
+                bits.append(f"{len(q['rank_moves'])} rank move(s)")
+            if q["notes_gained"]:
+                bits.append(f"+{len(q['notes_gained'])} note(s)")
+            if q["notes_lost"]:
+                bits.append(f"-{len(q['notes_lost'])} note(s)")
+            if q.get("concept"):
+                c = q["concept"]
+                bits.append(f"{c['concept']} {c['base_rank']}->{c['head_rank']} "
+                           f"{c['base_outcome']}->{c['head_outcome']}")
+            print(f"  {q['query']!r}: {', '.join(bits)}")
+        return 0
+    # metrics
+    ks = tuple(int(x) for x in a.k.split(",") if x.strip())
+    out = eval_metrics(b, run_id=a.run, suite=a.suite, ks=ks,
+                       n_pool_override=n_pool_override)
+    if a.json:
+        _print(out)
+        return 0
+    print(out["label"])
+    rk = out["ranking"]
+    print(f"n_covered_with_concept: {rk['n_covered_with_concept']}")
+    for k in ks:
+        m = rk["recall"][str(k)]
+        print(f"  recall@{k}: {_fmt_metric(m)}  "
+              f"(oracle {_fmt_metric(m['oracle'])}, random {_fmt_metric(m['random'])}"
+              f"{', DEGENERATE: ' + m['degenerate_reason'] if m['degenerate'] else ''})")
+    m = rk["mrr"]
+    print(f"  MRR: {_fmt_metric(m)}  "
+          f"(oracle {_fmt_metric(m['oracle'])}, random {_fmt_metric(m['random'])}"
+          f"{', DEGENERATE: ' + m['degenerate_reason'] if m['degenerate'] else ''})")
+    ab = out["abstention"]
+    print(f"n_not_covered: {ab['n_not_covered']}  n_fired: {ab['n_fired']}")
+    print(f"  abstention precision: {_fmt_metric(ab['precision'])}  "
+          f"recall: {_fmt_metric(ab['recall'])}  f1: {_fmt_metric(ab['f1'])}")
+    aa, na = ab["always_abstain"], ab["never_abstain"]
+    print(f"  always-abstain: P {_fmt_metric(aa['precision'])} "
+          f"R {_fmt_metric(aa['recall'])} F1 {_fmt_metric(aa['f1'])}")
+    print(f"  never-abstain:  P {_fmt_metric(na['precision'])} "
+          f"R {_fmt_metric(na['recall'])} F1 {_fmt_metric(na['f1'])}")
     return 0
 
 
@@ -166,4 +261,46 @@ def cmd_stale(a) -> int:
     else:
         set_stale(b, a.concept_id, a.reason)
         _print({"stale": a.concept_id, "reason": a.reason})
+    return 0
+
+
+def cmd_transcript_lint(a) -> int:
+    """Read-only structural report over a HOST session transcript. Always
+    exits 0 when the file was readable at all — a malformed or truncated
+    transcript comes back `partial`, never a crash. See transcript_lint.py's
+    module docstring for exactly what is and is not checked."""
+    from okfy.transcript_lint import lint_transcript
+    b = Bundle(a.bundle)
+    out = lint_transcript(b, a.session)
+    if a.json:
+        _print(out)
+        return 0
+
+    print(f"transcript-lint: {out['session']}")
+    print(f"bundle: {out['bundle']}")
+    if out["partial"]:
+        print(f"PARTIAL: {out['skipped_lines']} line(s) could not be parsed, "
+              f"{out['skipped_blocks']} block(s) skipped (unexpected shape)")
+    tc = out["tool_calls"]
+    print("tool calls: " + " · ".join(f"{k} {tc[k]}" for k in
+                                      ("SEARCH", "SHOW", "PROPOSE", "MUTATION")))
+
+    fs, fm = out["first_search"], out["first_mutation"]
+    fs_label = fs["index"] if fs else "none"
+    fm_label = f"{fm['index']} ({fm['tool']})" if fm else "none"
+    print(f"first search: {fs_label}   first mutation: {fm_label}")
+    print(f"searched before first mutation: {out['searched_before_first_mutation']}")
+
+    if out["proposes"]:
+        print("\nproposes:")
+        for p in out["proposes"]:
+            print(f"  #{p['index']}  searched_before={p['searched_before']}  "
+                  f"target_shown={p['target_shown']}")
+
+    if out["cited_ids"]:
+        print("\ncited ids:")
+        for c in out["cited_ids"]:
+            print(f"  {c['id']}  [{c['status']}]")
+
+    print(f"\n{out['label']}")
     return 0

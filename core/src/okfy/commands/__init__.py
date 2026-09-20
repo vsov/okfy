@@ -4,14 +4,14 @@ Each handler takes the parsed argparse namespace and returns an exit code.
 The argparse construction and dispatch live in okfy.cli; this package holds
 the per-verb logic, grouped by domain.
 """
-from .bundle import (cmd_index, cmd_init, cmd_log, cmd_package,
+from .bundle import (cmd_codes, cmd_index, cmd_init, cmd_log, cmd_package,
                      cmd_release_check, cmd_sourcemap, cmd_validate)
 from .corpus import (cmd_cluster, cmd_diff, cmd_glean, cmd_repair_links,
                      cmd_segment, cmd_segment_status, cmd_snapshot, cmd_survey)
 from .economics import cmd_budget, cmd_cost
 from .quality import (cmd_dissent, cmd_eval, cmd_job, cmd_ledger, cmd_merge_audit,
-                      cmd_stale)
-from .retrieval import cmd_links, cmd_query, cmd_sample, cmd_show
+                      cmd_stale, cmd_transcript_lint)
+from .retrieval import cmd_fresh, cmd_links, cmd_query, cmd_sample, cmd_show
 from .review import cmd_propose, cmd_refine, cmd_review
 from .workspace import cmd_link_candidates, cmd_workspace
 
@@ -33,6 +33,7 @@ HANDLERS = {
     "query": cmd_query,
     "show": cmd_show,
     "links": cmd_links,
+    "fresh": cmd_fresh,
     "sample": cmd_sample,
     "diff": cmd_diff,
     "snapshot": cmd_snapshot,
@@ -43,9 +44,11 @@ HANDLERS = {
     "review": cmd_review,
     "refine": cmd_refine,
     "stale": cmd_stale,
+    "transcript-lint": cmd_transcript_lint,
     "eval": cmd_eval,
     "job": cmd_job,
     "ledger": cmd_ledger,
     "workspace": cmd_workspace,
     "link-candidates": cmd_link_candidates,
+    "codes": cmd_codes,
 }

@@ -17,19 +17,29 @@ import os
 from okfy.actor import utc_now
 
 MEMORY_FILE = "meta/memory.jsonl"
-EVENTS = ("propose", "accept", "reject")
+# v0.24: `superseded` records a proposal LANE eviction (okfy propose
+# --supersedes <old-proposal-id>) — the old proposal file is gone the same way
+# a reject removes it, but the row names what replaced it (`by_proposal`)
+# instead of a reason, so the two are distinguishable in the ledger.
+EVENTS = ("propose", "accept", "reject", "superseded")
 E_MEMORY_LINE = "E_MEMORY_LINE"
 _REQUIRED = ("event", "at", "actor", "proposal", "target", "action", "content_sha256")
 
 
-def record(bundle, event: str, *, actor: str, proposal: str, target: str | None,
+def record(bundle, event: str, *, actor: str, proposal: str | None, target: str | None,
            action: str, content_sha256: str, base_sha256: str | None = None,
-           reason: str | None = None, reopen: str | None = None) -> dict:
+           reason: str | None = None, reopen: str | None = None,
+           match_sha256: str | None = None, new_id: str | None = None,
+           by_proposal: str | None = None, origin: str | None = None,
+           channel: str | None = None) -> dict:
     if event not in EVENTS:
         raise ValueError(f"unknown memory event {event!r} (use: {list(EVENTS)})")
     row = {"event": event, "at": utc_now(), "actor": actor, "proposal": proposal,
            "target": target, "action": action, "content_sha256": content_sha256}
-    for k, v in (("base_sha256", base_sha256), ("reason", reason), ("reopen", reopen)):
+    for k, v in (("base_sha256", base_sha256), ("reason", reason), ("reopen", reopen),
+                 ("match_sha256", match_sha256), ("new_id", new_id),
+                 ("by_proposal", by_proposal), ("origin", origin),
+                 ("channel", channel)):
         if v is not None:
             row[k] = v
     path = bundle.root / MEMORY_FILE
@@ -84,6 +94,32 @@ def rejected_hashes(bundle) -> dict[str, dict]:
             standing[row["content_sha256"]] = row
         elif row["event"] == "propose" and row.get("reopen"):
             standing.pop(row["content_sha256"], None)
+    return standing
+
+
+def rejected_match_hashes(bundle) -> dict[str, dict]:
+    """match_sha256 -> the reject-or-delete event still standing against it.
+
+    A tombstone that survives rewording: sibling to `rejected_hashes`, but
+    keyed on the normalized-text fingerprint instead of the exact bytes, and
+    fed by two kinds of standing row — a `reject` (the owner said no to this
+    claim) and an accepted `delete` (the owner removed a concept that said
+    this). Both are lifted the same way: a later `propose` that carries
+    `reopen` and hashes to the same fingerprint pops the entry; rejecting or
+    re-deleting that reopened text puts it back. Old rows carry no
+    `match_sha256` and are silently invisible here — never refused, matching
+    v0.23 behaviour exactly."""
+    standing: dict[str, dict] = {}
+    for row in events(bundle)[0]:
+        mh = row.get("match_sha256")
+        if not mh:
+            continue
+        if row["event"] == "reject":
+            standing[mh] = row
+        elif row["event"] == "accept" and row["action"] == "delete":
+            standing[mh] = row
+        elif row["event"] == "propose" and row.get("reopen"):
+            standing.pop(mh, None)
     return standing
 
 

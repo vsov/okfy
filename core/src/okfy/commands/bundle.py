@@ -76,7 +76,7 @@ def cmd_release_check(a) -> int:
 def cmd_index(a) -> int:
     b = Bundle(a.bundle)
     if getattr(a, "usage", False):
-        _print(usage_report(b))
+        _print(usage_report(b, journal=getattr(a, "journal", None)))
         return 0
     idx = build_index(b)
     save_index(b, idx)
@@ -86,7 +86,8 @@ def cmd_index(a) -> int:
 
 def cmd_package(a) -> int:
     b = Bundle(a.bundle)
-    package(b, _archetype_for(b), demote_unretrieved=getattr(a, "demote_unretrieved", False))
+    package(b, _archetype_for(b), demote_unretrieved=getattr(a, "demote_unretrieved", False),
+           shard_index=getattr(a, "shard_index", False))
     _print({"packaged": str(b.root)})
     return 0
 
@@ -95,4 +96,18 @@ def cmd_log(a) -> int:
     b = Bundle(a.bundle)
     append_log(b, a.message)
     _print({"logged": a.message})
+    return 0
+
+
+def cmd_codes(a) -> int:
+    """The diagnostic code registry (okfy.codes.CODES), sorted by code. Not
+    bundle-specific — every E_/W_ code the core and MCP adapter can raise."""
+    from okfy.codes import CODES
+    if a.json:
+        _print(CODES)
+        return 0
+    for code in sorted(CODES):
+        row = CODES[code]
+        print(f"{code}  {row['kind']}  {row['summary']}")
+        print(f"  way out: {row['way_out']}")
     return 0

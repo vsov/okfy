@@ -156,6 +156,34 @@ def scan_text(path: str, text: str) -> list[Finding]:
     return findings
 
 
+def scan_values(path: str, values: list[str]) -> list[Finding]:
+    """v0.24: scan a list of author-controlled STRINGS — e.g. every
+    frontmatter VALUE (walked recursively) plus free-text fields like a
+    proposal's `note`/`reopen`/`query` — rather than a YAML dump. PyYAML
+    folds a long plain scalar at ~80 columns, and `scan_text`'s line-based
+    match would miss a phrase whose fold happens to land inside it; scanning
+    the values themselves (never the dump) sidesteps the fold entirely.
+
+    Each value is still scanned twice: once as given (`scan_text` already
+    handles a value that spans several of its OWN lines), and once with its
+    internal newlines collapsed to a single space — a phrase a multi-line
+    value's own line break happens to split is still caught. Findings from
+    both passes are combined and de-duplicated by (rule, excerpt); no rule
+    changes, this only widens what gets handed to the existing ones."""
+    seen: set[tuple[str, str]] = set()
+    out: list[Finding] = []
+    per_line = "\n".join(v for v in values if v)
+    collapsed = "\n".join(re.sub(r"\s*\n\s*", " ", v).strip() for v in values if v)
+    for text in (per_line, collapsed):
+        for f in scan_text(path, text):
+            key = (f.rule, f.excerpt)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(f)
+    return out
+
+
 def _scan_targets(bundle: Bundle) -> list[Path]:
     """Every markdown file an agent could be pointed at.
 

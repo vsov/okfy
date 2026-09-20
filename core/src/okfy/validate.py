@@ -5,11 +5,13 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 from okfy import frontmatter
-from okfy.bundle import Bundle
+from okfy.bundle import RESERVED_DIRS, Bundle
 from okfy.lexicon import row_problems
 from okfy.update import _embedded_prefix, _source_path
+from okfy.workspace import PROJECT_KEY_RE
 
 DATE_HEADING_RE = re.compile(r"^## (.+)$", re.MULTILINE)
 
@@ -117,14 +119,20 @@ META_REQUIRED = {"purpose": ["language", "write_policy", "test_queries"],
 
 
 def resolve_link(bundle: Bundle, concept_path, target: str) -> str | None:
-    """Return concept id a local md link points to, or None for external/anchor-only."""
+    """Return concept id a local md link points to, or None for external/anchor-only.
+
+    v0.24 review fix (finding 32): a shard link target may be percent-encoded
+    (`okfy.package._link_target`) — a directory name containing a space or
+    `)` would otherwise never round-trip through `LINK_RE`/`INDEX_LINE_RE`
+    (`[^)\\s]+` can't capture either character). Decoded after the
+    leading-`/` check, since that slash is never itself encoded."""
     target = target.split("#", 1)[0]
     if not target or target.startswith(("http://", "https://", "mailto:")):
         return None
     if not target.endswith(".md"):
         return None
     base = concept_path.parent if not target.startswith("/") else bundle.root
-    resolved = (base / target.lstrip("/")).resolve()
+    resolved = (base / unquote(target).lstrip("/")).resolve()
     try:
         return resolved.relative_to(bundle.root).with_suffix("").as_posix()
     except ValueError:
@@ -151,9 +159,11 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_execution(bundle, r, strict=strict_execution)
     _check_collisions(concepts, r)
     _check_stale(concepts, r)
+    _check_supersede(concepts, r)
     _check_verified(concepts, r)
     _check_memory_log(bundle, r)
     _check_review_due(concepts, r)
+    _check_applies_to(concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
     _check_coverage(bundle, concepts, r)
     _check_span_coverage(bundle, r)
@@ -163,6 +173,8 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     linked_ids = _check_links(bundle, concepts, r)
     _check_orphans(bundle, concepts, linked_ids, r, strict=strict_package)
     _check_index_drift(bundle, concepts, r)
+    _check_index_shard(bundle, concepts, r)
+    _check_reserved_dir_concepts(bundle, r)
     _check_quality(bundle, archetype, r, strict=strict_quality)
     _check_provenance(bundle, r, strict=strict_provenance)
     _check_package(bundle, r, strict=strict_package)
@@ -489,7 +501,7 @@ def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
     locally present and is a git repo, the pinned SHA must be a real commit
     of that repo — a mutated or unreachable pin is reported, never silently
     trusted (audit round 8 regulatory mutation M1)."""
-    import subprocess
+    from okfy.gitenv import run_git
     try:
         snap = bundle.get("meta/corpus")
     except frontmatter.FrontmatterError:
@@ -506,9 +518,8 @@ def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
         r.add(level, code, "meta/corpus.md",
               f"corpus snapshot git_sha is malformed: {sha!r}")
         return
-    probe = subprocess.run(
-        ["git", "-C", str(corpus), "cat-file", "-e", f"{sha}^{{commit}}"],
-        capture_output=True, text=True)
+    probe = run_git(corpus, "cat-file", "-e", f"{sha}^{{commit}}",
+                    capture_output=True, text=True)
     if probe.returncode != 0:
         r.add(level, code, "meta/corpus.md",
               f"corpus snapshot git_sha {sha[:12]}... is not a commit of "
@@ -592,6 +603,68 @@ def _check_stale(concepts, r: Report):
                   f"stale_since is not an ISO date: {c.meta['stale_since']!r}")
 
 
+
+
+def _check_supersede(concepts, r: Report):
+    """`supersedes` / `superseded_by` (action `supersede`, v0.24) must point to
+    an existing concept AND be reciprocal — an agent that follows one
+    direction must land somewhere the other direction confirms. Each finding
+    names both ids: `c.id` as the finding's own path, the id it points at in
+    the message."""
+    by_id = {c.id: c for c in concepts}
+    for c in concepts:
+        sb = c.meta.get("superseded_by")
+        if sb is not None:
+            target = by_id.get(str(sb))
+            if target is None or str(target.meta.get("supersedes")) != c.id:
+                r.add("error", "E_SUPERSEDE_DANGLING", c.id,
+                      f"superseded_by names {sb!r}, which does not exist or "
+                      f"does not itself carry `supersedes: {c.id}` — fix the "
+                      "link or remove it via `okfy refine`")
+        sp = c.meta.get("supersedes")
+        if sp is not None:
+            target = by_id.get(str(sp))
+            if target is None or str(target.meta.get("superseded_by")) != c.id:
+                r.add("error", "E_SUPERSEDE_DANGLING", c.id,
+                      f"supersedes names {sp!r}, which does not exist or does "
+                      f"not itself carry `superseded_by: {c.id}` — fix the "
+                      "link or remove it via `okfy refine`")
+
+
+def _check_applies_to(concepts, r: Report):
+    """`applies_to` (v0.24, personal memory, ADR-0015) is an optional list of
+    project keys — or `*` — naming which workspace(s) may see this concept
+    when it is read through a `personal`-role workspace member. Validated in
+    EVERY bundle (a personal bundle is an ordinary bundle when queried
+    directly) but only READ at query time for `personal` members
+    (federate.py). ERROR, not warning: a malformed value is neither
+    provably in scope nor provably out of it, and a fail-closed filter must
+    never guess — `federate.py` drops it either way, but a silent drop reads
+    as "no memory exists" instead of "this frontmatter is broken".
+
+    v0.24 review fix (finding 45): a value that is well-formed but shaped
+    like nothing `federate._in_scope` ever compares equal (whitespace-padded,
+    uppercase, an embedded space) can never match any legal
+    `workspace.PROJECT_KEY_RE` project_key either — it is just as
+    unmatchable as a malformed one, so it gets the same error rather than
+    silently costing recall on an owner typo."""
+    for c in concepts:
+        if "applies_to" not in c.meta:
+            continue
+        v = c.meta["applies_to"]
+        if not isinstance(v, list) or not v or \
+                any(not isinstance(x, str) or not x.strip() for x in v):
+            r.add("error", "E_APPLIES_TO", c.id,
+                  f"applies_to must be a non-empty list of project-key "
+                  f"strings (or `*`): {v!r}")
+            continue
+        bad = [x for x in v if x != "*" and not PROJECT_KEY_RE.match(x)]
+        if bad:
+            r.add("error", "E_APPLIES_TO", c.id,
+                  f"applies_to entries must be `*` or a project key matching "
+                  f"{PROJECT_KEY_RE.pattern} (a lowercase slug, no leading/"
+                  f"trailing whitespace, no uppercase): {bad!r} in {v!r} — "
+                  "fix by lowercasing/trimming to a valid slug")
 
 
 def review_due_date(value) -> datetime.date | None:
@@ -1128,9 +1201,34 @@ def _check_links(bundle, concepts, r: Report) -> set[str]:
     return linked
 
 
+def _index_mode(bundle: Bundle) -> str:
+    """"sharded" or "flat" (default), read from meta/package.json's `index`
+    key — written by `okfy package --shard-index`, absent otherwise. Read
+    here rather than by sniffing the `index/` directory so a leftover
+    hand-copied file cannot flip the mode a validator checks against."""
+    p = bundle.root / "meta" / "package.json"
+    if not p.is_file():
+        return "flat"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "flat"
+    return "sharded" if data.get("index") == "sharded" else "flat"
+
+
+def _shard_files(bundle: Bundle) -> list[Path]:
+    d = bundle.root / "index"
+    return sorted(d.glob("*.md")) if d.is_dir() else []
+
+
 def _check_orphans(bundle, concepts, linked_ids, r: Report, strict=False):
     """strict (--strict-package): an unreachable concept is an error — agents
-    following the consumption protocol through index.md must find everything."""
+    following the consumption protocol through index.md must find everything.
+
+    v0.24 (a): in sharded mode a concept listed in ANY `index/<dir>.md` shard
+    counts as listed — the resident index.md itself only carries directory
+    summary lines for sharded concepts, so reading it alone would call every
+    one of them an orphan."""
     idx = bundle.root / "index.md"
     indexed = set()
     if idx.is_file():
@@ -1138,6 +1236,12 @@ def _check_orphans(bundle, concepts, linked_ids, r: Report, strict=False):
             cid = resolve_link(bundle, idx, target)
             if cid:
                 indexed.add(cid)
+    if _index_mode(bundle) == "sharded":
+        for f in _shard_files(bundle):
+            for target in LINK_RE.findall(f.read_text(encoding="utf-8")):
+                cid = resolve_link(bundle, f, target)
+                if cid:
+                    indexed.add(cid)
     level, code = ("error", "E_ORPHAN") if strict else ("warning", "W_ORPHAN")
     for c in concepts:
         if c.id.startswith("meta/"):
@@ -1153,19 +1257,163 @@ def _check_index_drift(bundle, concepts, r: Report):
     """okfy package renders every index line from its concept's description, so
     a line that no longer carries it was edited by hand (or the concept changed
     after packaging) and the index now tells agents something the concept does
-    not say."""
+    not say.
+
+    v0.24 (a): in sharded mode the concept lines live in `index/<dir>.md`, not
+    index.md itself (which carries only directory summaries) — checked the
+    same way, file by file."""
     idx = bundle.root / "index.md"
     if not idx.is_file():
         return
     by_id = {c.id: c for c in concepts}
-    for line in _index_body(idx.read_text(encoding="utf-8")).splitlines():
-        m = INDEX_LINE_RE.match(line)
-        c = by_id.get(resolve_link(bundle, idx, m.group(1))) if m else None
-        desc = str(c.meta.get("description", "")).strip() if c else ""
-        if desc and _norm(desc) not in _norm(line):
-            r.add("warning", "W_INDEX_DRIFT", c.id,
-                  f"index.md line for {c.id} no longer carries its description — "
-                  "run okfy package to regenerate")
+
+    def _scan(path: Path):
+        for line in _index_body(path.read_text(encoding="utf-8")).splitlines():
+            m = INDEX_LINE_RE.match(line)
+            c = by_id.get(resolve_link(bundle, path, m.group(1))) if m else None
+            desc = str(c.meta.get("description", "")).strip() if c else ""
+            if desc and _norm(desc) not in _norm(line):
+                r.add("warning", "W_INDEX_DRIFT", c.id,
+                      f"index.md line for {c.id} no longer carries its description — "
+                      "run okfy package to regenerate")
+    _scan(idx)
+    if _index_mode(bundle) == "sharded":
+        for f in _shard_files(bundle):
+            _scan(f)
+
+
+def _package_is_stale(bundle: Bundle) -> bool:
+    """True when the concept set has changed since `okfy package` last ran —
+    the same signal `_check_package` compares (its own W_/E_STALE_PACKAGE),
+    reused here (finding 29) so `_check_index_shard` can tell drift an
+    ordinary accepted create/delete explains from real shard corruption."""
+    p = bundle.root / "meta" / "package.json"
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        recorded = data.get("fingerprint")
+    except (OSError, ValueError):
+        return True
+    return recorded != package_fingerprint(bundle)
+
+
+def _check_index_shard(bundle: Bundle, concepts, r: Report):
+    """v0.24 (a) integrity, only meaningful in sharded mode: every non-meta
+    concept must appear in EXACTLY ONE place — the resident index or exactly
+    one `index/<dir>.md` shard — no shard may list a concept that does not
+    exist, and no shard file may go unreferenced from the resident index's
+    directory listing.
+
+    v0.24 review fix (finding 29): `okfy review accept` never repackages, so
+    an accepted create or delete makes the shard set stale in exactly the
+    way `_check_package`'s fingerprint already detects — that is ordinary
+    package staleness (flat mode reports it as W_/E_STALE_PACKAGE, plus
+    orphan/dangling-link warnings that already fire independently; it must
+    not ALSO turn into a hard, always-error E_INDEX_SHARD that reddens every
+    `okfy validate` between an accept and the next repackage). Only
+    corruption staleness cannot explain — a concept listed twice, a shard
+    naming a concept missing even though the package is fresh, or a shard
+    file structurally disconnected from index.md — stays E_INDEX_SHARD.
+
+    v0.24 review fix (finding 30): a listing is only a line matching
+    `INDEX_LINE_RE` (the `- [title](target)` entries package.py itself
+    writes) — not every markdown link `LINK_RE` would find anywhere in the
+    file, which double-counted a concept merely because another concept's
+    `description` (or a plan `categories` value) happened to link to it."""
+    if _index_mode(bundle) != "sharded":
+        return
+    WAY_OUT = "re-run `okfy package --shard-index`"
+    idx = bundle.root / "index.md"
+    idx_text = idx.read_text(encoding="utf-8") if idx.is_file() else ""
+    shard_dir = bundle.root / "index"
+    shard_paths = _shard_files(bundle)
+    shard_refs = {unquote(t) for t in re.findall(r"\]\(index/([^)\s]+)\.md\)", idx_text)}
+    by_id = {c.id: c for c in concepts if not c.id.startswith("meta/")}
+    stale = _package_is_stale(bundle)
+
+    for f in shard_paths:
+        if f.stem not in shard_refs:
+            r.add("error", "E_INDEX_SHARD", f"index/{f.name}",
+                  f"shard file is not referenced from index.md — {WAY_OUT}")
+    for name in sorted(shard_refs):
+        if not (shard_dir / f"{name}.md").is_file():
+            r.add("error", "E_INDEX_SHARD", "index.md",
+                  f"index.md links index/{name}.md, which does not exist — {WAY_OUT}")
+
+    def _ids(path: Path) -> set[str]:
+        found = set()
+        for line in path.read_text(encoding="utf-8").splitlines():
+            m = INDEX_LINE_RE.match(line)
+            if not m:
+                continue
+            cid = resolve_link(bundle, path, m.group(1))
+            if cid is not None:
+                found.add(cid)
+        return found
+
+    resident_ids = _ids(idx) if idx.is_file() else set()
+    per_shard: dict[str, set[str]] = {}
+    for f in shard_paths:
+        ids = _ids(f)
+        per_shard[f.name] = ids
+        if stale:
+            continue  # a deleted-but-not-yet-repackaged concept explains this
+        for cid in sorted(ids - set(by_id)):
+            r.add("error", "E_INDEX_SHARD", f"index/{f.name}",
+                  f"lists {cid!r}, which is not a concept in this bundle — {WAY_OUT}")
+
+    for c in concepts:
+        if c.id.startswith("meta/"):
+            continue
+        places = (1 if c.id in resident_ids else 0) + \
+                 sum(1 for ids in per_shard.values() if c.id in ids)
+        if places == 0 and stale:
+            continue  # a created-but-not-yet-repackaged concept explains this
+        if places != 1:
+            r.add("error", "E_INDEX_SHARD", c.id,
+                  f"appears in {places} place(s) across the resident index and "
+                  f"its shards (want exactly 1) — {WAY_OUT}")
+
+
+def _check_reserved_dir_concepts(bundle: Bundle, r: Report):
+    """v0.24 (a): `index/` and `protocols/` are `bundle.RESERVED_DIRS` —
+    `okfy package` writes and prunes everything under them, and
+    `Bundle.iter_md_files` skips them unconditionally so nothing there ever
+    reaches concept discovery. That is correct for generated output, but it
+    means an owner who names a real concept category `protocols/` or
+    `index/` gets no error: the concepts just silently stop being validated
+    or retrieved. This check is the loud alternative — it reads the reserved
+    directories directly (the one place in this module that has to, since
+    `iter_md_files` will never yield these paths).
+
+    Telling a concept from generated output is NOT "starts with `---`":
+    `index/<dir>.md` shards open with `package.INDEX_HEAD`
+    (`---\\nokf_version: "0.2"\\n---`), so a bare frontmatter-block test would
+    flag every shard `okfy package --shard-index` ever writes. What no
+    renderer in package.py ever puts in a reserved-dir file is a `type:` key
+    — the same field `_check_type`'s E_TYPE requires of every real concept —
+    so that is the signal used here: a `.md` file under a reserved directory
+    whose frontmatter declares a non-empty `type:` looks like a concept that
+    wandered somewhere it will never be seen again."""
+    for name in sorted(RESERVED_DIRS):
+        d = bundle.root / name
+        if not d.is_dir():
+            continue
+        for p in sorted(d.rglob("*.md")):
+            text = p.read_text(encoding="utf-8")
+            if not text.startswith("---"):
+                continue
+            try:
+                meta, _ = frontmatter.parse(text)
+            except frontmatter.FrontmatterError:
+                continue  # E_FRONTMATTER's problem, not this check's
+            t = meta.get("type")
+            if isinstance(t, str) and t.strip():
+                rel = p.relative_to(bundle.root)
+                r.add("error", "E_RESERVED_DIR", rel,
+                      f"{rel} looks like a concept, but {name}/ is reserved "
+                      "for generated files — concepts there are invisible to "
+                      "validation and retrieval. Move it to another "
+                      f"directory (e.g. {name}-notes/)")
 
 
 QUALITY_FIELDS = ["date", "prompt_version", "selector_version", "seed",

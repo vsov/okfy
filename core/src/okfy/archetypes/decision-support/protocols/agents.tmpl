@@ -6,10 +6,12 @@ Canonical language: $language. Write policy: $write_policy.
 ## Consumption protocol (no tooling required)
 
 1. Read `meta/purpose.md` first — it defines what this bundle is for.
-2. Start navigation at `index.md`; never bulk-read concept files.
-3. Translate the user's phrasing into bundle vocabulary before searching:
-   check `glossary/` and `meta/lexicon.md` (if present) for canonical terms
-   and aliases. Then locate concepts via index sections and links.
+2. Start navigation at `index.md`; never bulk-read concept files.$index_note
+3. Search the user's own wording first: the lexicon's coverage notes are
+   keyed to phrasing, so a query rewritten before searching can miss one that
+   fires on the user's own words. Only then try `glossary/` and
+   `meta/lexicon.md` (if present) for canonical terms and aliases, and locate
+   concepts via index sections and links.
 4. Read snippets first (title + description in index.md); open full concept
    bodies only for concepts you actually need.
 5. Decision-support discipline: before recommending any Strategy or Playbook,

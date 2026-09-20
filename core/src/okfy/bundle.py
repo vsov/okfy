@@ -9,6 +9,13 @@ PROPOSAL_DIR = "proposals"
 CACHE_DIR = ".okfy-cache"
 SKIP_DIRS = {CACHE_DIR, ".git"}
 ROOT_DOC_FILES = {"README.md", "AGENTS.md", "CLAUDE.md"}  # generated docs, not concepts
+# v0.24: generated, non-resident output directories. `index/` holds the
+# per-directory listings `okfy package --shard-index` moves out of index.md;
+# `protocols/` holds packaged discipline text (e.g. protocols/memory.md) that
+# AGENTS.md only points at. Both are written by `okfy package`, never by an
+# owner or agent, so they are reserved the same way index.md/log.md are:
+# excluded from concept discovery unconditionally, at the bundle root only.
+RESERVED_DIRS = {"index", "protocols"}
 
 
 @dataclass
@@ -29,7 +36,7 @@ class Bundle:
         for p in sorted(self.root.rglob("*.md")):
             rel = p.relative_to(self.root)
             parts = rel.parts
-            if parts[0] in SKIP_DIRS or p.name in RESERVED_FILES:
+            if parts[0] in SKIP_DIRS or parts[0] in RESERVED_DIRS or p.name in RESERVED_FILES:
                 continue
             if len(parts) == 1 and p.name in ROOT_DOC_FILES:
                 continue

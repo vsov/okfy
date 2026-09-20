@@ -137,6 +137,37 @@ PY
 okfy show "$BUNDLE" strategies/widget-straddle >/dev/null || fail "okfy show"
 okfy links "$BUNDLE" strategies/widget-straddle >/dev/null || fail "okfy links"
 
+step "codes + fresh"
+okfy codes >/dev/null || fail "okfy codes"
+okfy show "$BUNDLE" glossary/gamma >/dev/null || fail "okfy show (re-check)"
+GAMMA_SHA=$(python - "$BUNDLE" <<'PY'
+import hashlib, sys
+from pathlib import Path
+p = Path(sys.argv[1]) / "glossary" / "gamma.md"
+print(hashlib.sha256(p.read_bytes()).hexdigest())
+PY
+) || fail "could not compute gamma.md's sha256"
+okfy fresh "$BUNDLE" --ids "glossary/gamma=$GAMMA_SHA" --json > "$WORK/fresh.json" \
+  || fail "okfy fresh"
+grep -q '"unchanged"' "$WORK/fresh.json" \
+  || { cat "$WORK/fresh.json"; fail "okfy fresh did not report the concept unchanged"; }
+
+step "propose --action flag / gap + review list"
+okfy propose "$BUNDLE" --target glossary/gamma --action flag --type out-of-date \
+  --as claude-code/1.0 --note "smoke: flagged for review" > "$WORK/flag.json" \
+  || fail "okfy propose --action flag"
+okfy propose "$BUNDLE" --action gap --query "smoke: what is theta" \
+  --as claude-code/1.0 --note "smoke: unanswered question" > "$WORK/gap.json" \
+  || fail "okfy propose --action gap"
+okfy review list "$BUNDLE" > "$WORK/review-list.json" || fail "okfy review list"
+python - "$WORK/review-list.json" <<'PY' || fail "review list did not show both proposals"
+import json, sys
+d = json.load(open(sys.argv[1]))
+proposals = d if isinstance(d, list) else d.get("proposals", d)
+actions = [p.get("action") for p in proposals]
+assert "flag" in actions and "gap" in actions, actions
+PY
+
 step "validate + package + release-check reports (not passes)"
 okfy validate "$BUNDLE" --quiet || true      # a two-concept stub is not release-ready
 okfy package "$BUNDLE" >/dev/null || fail "okfy package"

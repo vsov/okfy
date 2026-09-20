@@ -5,10 +5,10 @@ AFTER the artifact commit, so `commit` pins the bundle HEAD that already contain
 the outputs; `input_hashes` resolve from the corpus manifest so a third party can
 tell exactly what each transition consumed (or that a hash was 'unknown')."""
 import json
-import subprocess
 from pathlib import Path
 
 from okfy.bundle import Bundle
+from okfy.gitenv import run_git
 from okfy.proposals import _commit
 
 LEDGER = "meta/ledger.jsonl"
@@ -143,8 +143,7 @@ def _manifest(bundle: Bundle) -> dict:
 
 
 def _head(bundle: Bundle) -> str:
-    r = subprocess.run(["git", "-C", str(bundle.root), "rev-parse", "HEAD"],
-                       capture_output=True, text=True)
+    r = run_git(bundle.root, "rev-parse", "HEAD", capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else "unknown"
 
 

@@ -206,9 +206,15 @@ The third sibling, **research-synthesis**, serves whoever needs to know how firm
 
 An embedded map is only worth trusting if it stays honest, and code moves faster than anyone updates knowledge by hand. So the map *will* drift — the question is whether the drift is visible. OKFy's answer is a snapshot-and-diff loop.
 
-At extraction time OKFy records a **snapshot**: for every concept, a fingerprint of the corpus sources it was built from. When you want to know whether the map has fallen behind, run `okfy diff <bundle>`. It compares the current state of those sources against the snapshot and sorts every concept into three buckets, emitted as JSON keys: **`affected`** (its sources changed — the concept may now be wrong), **`uncovered_new`** (source files appeared that no concept covers), and **`stale_candidates`** (every source a concept was built from is gone). The diff is deterministic core logic, not a model call: same inputs, same verdict, every time. The third key's name is deliberate: these are *candidates* for the persisted `stale: true` trust flag, never the flag itself. The whole report is transient diagnosis, recomputed from scratch on every run — a diff describes drift; it never writes it down. Promoting a candidate into an actual `stale` flag is a reviewed owner decision (`okfy stale`), and §11 explains why the report and the flag are deliberately kept apart.
+At extraction time OKFy records a **snapshot**: for every concept, a fingerprint of the corpus sources it was built from. When you want to know whether the map has fallen behind, run `okfy diff <bundle>` (JSON, the shape below; `--text` for a human summary). It compares the current state of those sources against the snapshot and sorts every concept into three buckets, emitted as JSON keys: **`affected`** (its sources changed — the concept may now be wrong), **`uncovered_new`** (source files appeared that no concept covers), and **`stale_candidates`** (every source a concept was built from is gone). The diff is deterministic core logic, not a model call: same inputs, same verdict, every time. The third key's name is deliberate: these are *candidates* for the persisted `stale: true` trust flag, never the flag itself. The whole report is transient diagnosis, recomputed from scratch on every run — a diff describes drift; it never writes it down. Promoting a candidate into an actual `stale` flag is a reviewed owner decision (`okfy stale`), and §11 explains why the report and the flag are deliberately kept apart.
+
+Two more keys ride alongside `affected` (v0.24). **`protected[id]`** is true when the concept has been owner-verified or owner-accepted (a non-empty `verified` list, or an `accept` event against it in `meta/memory.jsonl`) — `okfy diff` marks it, in text output with a `[protected]` tag, so `/okfy:update` never silently overwrites owner-signed text in place; instead it re-files the change through `okfy propose <bundle> --as worker/run-42 --target <id> --action update --evidence external-source=<old_sha>..<new_sha> --from <file>`, which carries `base_sha256` so a lost update is refused, not silently applied. **`spans`/`reextract`** are report-only, and only meaningful once `okfy snapshot` has run at least once since v0.24: for each affected concept's cited spans, whether the exact bytes are still there (`span_intact`), moved verbatim elsewhere in the file (`span_moved` — pure reflow, e.g. lines inserted above it), gone (`span_changed`), or never anchored to a line range (`unpinned`); `reextract` is the subset of `affected` — those with a `span_changed`/`unpinned` source or a source in a removed file — actually worth a worker's attention. A concept that is `affected` purely because its citation shifted is measurably unchanged; `okfy diff` never re-anchors it itself, it only tells you that a worker probably doesn't need to.
 
 `okfy diff` only *reports* drift; the `/okfy:update` command *acts* on it. It runs the diff, then walks the affected and new concepts, re-extracting just those from the changed sources and reconsolidating them into the bundle — an incremental re-extraction that touches only what moved, instead of rebuilding the whole map. Concepts the diff called clean are left exactly as they are.
+
+Two more v0.24 fields round out the report. **`reanchor`** is a `{concept, source, moved_to}` TODO list — every source whose span classified `span_moved`: the cited text itself is unchanged and needs no worker, but its `#L..` anchor now points at the wrong lines and should be rewritten (through `okfy propose`, on an owner-verified concept) before the next `okfy snapshot`. In manifest mode (no corpus git history to read), `skipped_dangling_symlinks` counts corpus paths the walk skipped because they were a dangling symlink or another non-regular file (a FIFO, a socket) rather than silently missing them from every bucket; git mode always reports it as 0, because git tracks a dangling symlink as ordinary committed content, not a listing gap.
+
+`okfy snapshot` pins each cited source in `meta/source-pins.json` with a `kind` — `line`/`char` (a fixed window), `path` (the whole file — growth of the file is itself a change), or `heading` (the section the heading resolves to right now, re-resolved on every snapshot rather than kept at its old line numbers) — matching how `_classify_spans` must re-check it later. Re-pinning is not simply "trust the new bytes": a source whose span classified `span_moved` against the corpus keeps its OLD pin, flagged `anchor_stale` with a `moved_to` hint, instead of silently re-pinning to whatever text now sits at the old line numbers — taking the new pin there is exactly what let a later real edit of the cited text read back as `span_intact` next time. A source that classified `span_changed` DOES take the new pin, but flagged `repinned_after_change`, because accepting it is the owner's own act of running `okfy snapshot`, not a verified byte match.
 
 Re-extraction can leave a concept pointing at a link that no longer resolves — a renamed or merged concept id. `okfy repair-links` fixes these dangling references deterministically: for each broken link it finds the best-matching surviving concept id (via stdlib string matching, no model, no embeddings) and rewrites the reference, reporting anything it could not confidently repair for a human to resolve.
 
@@ -228,7 +234,13 @@ The hard part is that two independently-shaped bundles do not share a vocabulary
 
 Once linked, `query` over the workspace auto-detects the federation, pulls from every relevant member, and surfaces the binding constraints alongside the knowledge. When you are done, `okfy workspace export` fuses the members into a single frozen hand-off marked `exported: true` — at which point the update verbs refuse to touch it. An export is a snapshot for delivery, not a living bundle; if the members move, you re-federate and re-export rather than editing the frozen fusion in place.
 
+A `personal`-role member is not copied in whole. `okfy workspace export` applies the exact same in-scope predicate query-time federation already enforces (ADR-0015: `applies_to` narrows a personal member's content, never its own purpose/plan/snapshot, which stay structural and unscoped) — a concept the live query path would never surface is removed from the exported copy too, and any crosswalk row touching an excluded concept is dropped from both the injected see-also/constraints sections and the exported `links/*.md` row data. Nothing is dropped silently: kept/total/excluded counts per personal member land under `personal_scope` in the exported bundle's `meta/corpus.md`, and in `log.md`.
+
 Federated results also deduplicate honestly. When two members carry the same concept — a vendor bundle and your own both defining the same term — the accepted `same-as` crosswalk row now merges them into ONE result at query time: the scores add (two members agreeing is stronger evidence, not two rows eating two ranks), the stronger entry is canonical, and the absorbed refs are listed in `duplicates` so nothing is hidden. Only accepted rows merge — a proposed equivalence is a hypothesis, not an identity — and only within one role: a constraint that mirrors a knowledge concept stays visible in the constraints group, because collapsing a limit into the strategy it limits is exactly the kind of smoothing federation exists to prevent. Two more guarantees came out of the second audit: a constraint bound to an ABSORBED ref still fires — the auto-pull looks through `duplicates`, so merging never hides a limit; and stale crosswalk rows (a member concept changed since its SHA was pinned) stop influencing answers entirely — no expansion, no merge, no silent constraint — replaced by one explicit note telling you to re-review and re-pin. A third audit hardened the same seam twice more: the auto-pull now closes over the whole accepted same-as CLASS — a constraint bound to any member of the class fires even when that member was never retrieved — and a member whose baseline cannot be verified at all (no pin, a pin missing from history, a broken git repo) is treated as stale-by-definition: every row touching it is excluded and named in a note, because a git failure must never read as "nothing changed".
+
+### Personal memory, scoped and fail-closed
+
+A third member role, `personal` (ADR-0015), federates one owner's own bundle of preferences into a workspace without leaking it into every other workspace that owner works in. It needs a `project_key` on the workspace manifest — `okfy workspace init ... --project-key my-project`, or hand-add `project_key: my-project` to an existing `meta/workspace.md` — and each concept in the personal bundle declares which project(s) it applies to with `applies_to: [my-project]` (or `applies_to: ["*"]` for everywhere). A concept with no `applies_to`, or one that names a different project, is dropped from that workspace's results before ranking even runs — silently to the ranker, never silently to you: the federated result carries a note, `<member>: personal scope <project_key> — N of M concepts in scope`, so an empty-looking answer is legible as "nothing was labelled for this project" rather than "the memory is gone". A workspace with a `personal` member and no `project_key` refuses to load (`E_WS_PROJECT_KEY`) rather than guess. In-scope results come back in their own `personal` group next to `knowledge` and `constraints`. Querying the personal bundle directly, outside any workspace, is unfiltered — it is your own notes, and only `okfy query <workspace>` applies the scope. Nothing about this is access control: `applies_to` decides what a workspace's federation surfaces, not who may open the file.
 
 Cheatsheet: `okfy workspace init|status|export` manage the workspace lifecycle; `okfy link-candidates` proposes crosswalk rows; `okfy query <workspace>` auto-detects the federation and answers across members.
 
@@ -255,6 +267,8 @@ One more bridge needs tending. The vocabulary of the people asking questions dri
 
 Cheatsheet: `okfy propose` (agents file changes) → `/okfy:review` (owner accepts/rejects, CLI validates) is the loop; `okfy refine` is the owner's direct edit; `/okfy:lexicon` keeps the vocabulary bridge fresh.
 
+**Every CLI leaf declares whether it writes.** `okfy.commands.mutations.MUTATES` is an internal `{full subcommand path: bool}` table — `"review accept": True`, `"eval metrics": False`, and so on for all of it — kept honest by a test that walks the real argparse tree (fails on a missing or extra entry) and, for the commands it can cheaply exercise, proves every `False` leaf leaves a synthetic bundle byte-for-byte untouched. It is not a runtime gate and there is no `okfy mutates` command to query it — it exists so "does this write?" has one answer per verb instead of one guess per reader.
+
 ## 11. Verifying bundle quality
 
 Everything up to here has taken a bundle's quality on faith — the extraction was careful, the consolidation resolved the contradictions, the ten test queries pass. But *who says they pass?* For most of OKFy's life the answer was: the agent that built the bundle said so, in prose, in a log line. That is exactly the wrong witness. A model grading the output it just produced is a closed loop of well-formatted self-deception — it has every incentive to declare victory and no independent standard to fail against. So v0.5 replaces the narrative with three artifacts that live *inside the bundle* and can be replayed by anyone — an owner-judged **eval**, the **lexicon** as a machine-readable retrieval contract, and a reviewed notion of **staleness** — backed by three supporting checks on the extraction itself: verified **sources**, an extraction **ledger**, and a survey that reports what it skipped. None of them lets the machine certify itself.
@@ -269,6 +283,16 @@ Then the judging, in two roles that never collapse into one:
 - **The owner disposes.** `okfy eval verdict <bundle> latest <q-idx> pass|fail|partial --owner --note "…"` records the human's verdict. This is the only kind release acceptance counts.
 
 `okfy eval status` collapses the run to an effective verdict per query — owner wins over LLM, LLM-only is flagged provisional, neither is pending — and reports a top-level `provisional` flag that stays **true until every query carries an owner verdict**. **What that guarantee actually is, stated precisely.** The tool will not mark a run owner-confirmed on its own: something outside the tool has to write those verdicts. `owner` is a role in a JSON file, recorded by whoever operates this machine — it is not an authenticated identity, and nothing here verifies who they were. So the flag clearing means "a person with write access to this bundle judged every query", which is exactly the guarantee that matters for a bundle you built and run yourself, and noticeably weaker than a signature if you are handing the bundle to a third party as evidence. If that is your case, the honest options are to sign the eval run's digest out of band or to treat the verdicts as attributed rather than proven. That friction is still the point — it is the price of the claim "this bundle answers its purpose."
+
+### Metrics, compare, and qrels: read-only, over the recorded run
+
+`okfy eval run` already records, per adversarial query, whether the declared expectation held and the ordered hits that answered it. `okfy eval metrics <bundle> [--run latest] [--suite adversarial] [--k 5,10]` turns that into numbers — **nothing is re-run**. Per query: the declared concept's rank in `top_hits` (or `null`), and whether a not-covered coverage note fired. Aggregated: `recall@k` and `MRR` over rows with `expect: covered` and a declared concept (`n_covered_with_concept` printed beside them), and abstention precision/recall/F1 over the whole suite — computed over the JUDGED rows only (`expect` one of `covered`/`not-covered`; a row with neither does not count toward `n_judged`), where a positive prediction is "a not-covered note fired" and ground truth is `expect: not-covered` (`n_not_covered`, `n_fired` printed). A metric with a zero denominator is `null` with a reason string — never `0.0`, which would read as a measured failure rather than an empty row set. `recall@k` for a `k` beyond the run's own recorded hit depth (`query_options.n`, or the longest `top_hits` actually written for a legacy run) is also `null`: ranks past that depth were never looked at when the run was recorded, so there is nothing honest to report there, and a workspace's federated metrics pool the same way — the candidate pool a member contributes is every concept it holds, except a `personal`-role member, which contributes only the concepts its `applies_to`/project_key would put in scope.
+
+Every ranking number ships with **two control arms**, computed with no retrieval call: `oracle` is the metric's ceiling on this row set (the declared concept always at rank 1), and `random` is what the metric would average if that concept were placed uniformly at random among the bundle's non-meta concepts. When `oracle − random` is under 0.05 the row is labelled `degenerate: true` — the metric cannot distinguish a working retriever from a coin flip on that set (a small `covered` pool, or `k` close to the pool size, produces this honestly). Abstention gets the same treatment with two constant policies instead of a coin flip: `always_abstain` (fires on every query) and `never_abstain` (fires on none). This is the guard the v0.22 bake-off's own finding demands — abstention recall came out identical (0.444) across five different retrievers there, because phrase-keyed lexicon rows decide it, not ranking — so **recall alone proves nothing**; a retriever only earns credit if it beats `always_abstain`'s recall *and* precision together.
+
+`okfy eval compare <bundle> --base <run_id> [--head <run_id>|latest] [--suite ...]` is a pure diff of two already-recorded runs, joined by exact query string — no git, no re-running retrieval. Per query: ids that entered or left the top-k, rank moves for ids present in both, notes gained/lost, and for adversarial rows the declared concept's rank and outcome in both runs. Queries only in one run are listed separately. It reports differences; it hands down no verdict. Comparing runs of different suites refuses with `E_EVAL_COMPARE_SUITE` — pick two runs of the same suite, or pass `--suite` to disambiguate `latest`.
+
+`okfy eval qrels <bundle> --unit span` is a small, read-only export: for each adversarial row with `expect: covered`, it resolves every one of the declared concept's frontmatter `sources` through the same anchor grammar `okfy sourcemap` validates against, into `(file, start, end)`. Unresolvable anchors are listed, never dropped. This is the shared ground truth an out-of-tree raw-corpus retrieval arm can be scored against on the bundle's own terms.
 
 ### The lexicon as a retrieval contract
 
@@ -370,6 +394,38 @@ $ okfy ledger list ./bundle --run 2026-07-08T12-00
 ```
 
 A row records what went in (paths *and* content hashes, resolved from the corpus manifest), what came out, which prompt version did the work, the digest of the worker's **job artifact** (before each worker starts, `okfy job` freezes its exact contract — inputs with `lines`/`chars` spans and hashes, corpus snapshot, archetype — into `meta/jobs/<segment>.json`, and copies the exact prompt text into the bundle as `meta/prompts/<sha256>.txt`: a SHA alone proves the text existed, the copy preserves what it said. The digest is computed by the core from the frozen artifact — `ledger add --job <segment>` never accepts a hand-passed digest — and `okfy validate --strict-provenance` cross-checks the whole chain: artifact digests recompute, prompt copies match their hashes, ledger rows match their artifacts and cite no inputs outside them), and the commit that landed it. Consolidation rows additionally carry a **merge map** — `draft → final` — so you can trace any final concept back through the merge to the worker drafts and from there to the exact source files and their hashes at extraction time. The ledger is deliberately *shallow*: one row per artifact transition, not per claim or per sentence. Segment-level provenance answers the questions that actually come up ("what fed this concept?", "which prompt version was this batch?"); claim-level provenance would cost an order of magnitude more machinery, and it can be added later *if real failures ever show segment-level is not enough* — not before.
+
+### Segment status: a closed vocabulary
+
+`okfy segment-status <bundle> <segment-id> <status> [--reason "..."]` moves one
+segment's status in `meta/extraction-plan.md`. The vocabulary is closed —
+`pending`, `running`, `done`, `failed`, `skipped` — and only these moves are
+legal (anything else is `E_SEGMENT_TRANSITION`, naming the legal next states):
+
+| From | Legal next |
+|---|---|
+| `pending` | `running`, `skipped` |
+| `running` | `done`, `failed`, `pending` (re-queue) |
+| `failed` | `running`, `skipped` |
+| `skipped` | `pending` |
+| `done` | `pending` (re-extraction only) |
+
+An unrecognised status is `E_SEGMENT_STATUS`. Moving to `failed`/`skipped`, and
+moving a `done` segment back to `pending`, always need `--reason` — stored on
+the segment as `status_reason` plus a UTC `status_at`
+(`E_SEGMENT_REASON_REQUIRED` otherwise). Moving to `done` additionally
+requires the provenance a `done` status claims — a job artifact for this
+segment *and* a ledger row carrying its digest, the same predicate
+`release-check` composes over every done segment, just checked here for one
+segment before the status changes rather than after
+(`E_SEGMENT_DONE_UNBACKED` otherwise). A segment with NO job artifact at all
+(a legacy bundle, or one predating the job chain) is let through unbacked —
+the response labels it `legacy_unbacked: true` rather than pretending it was
+backed. `/okfy:extract`'s own Stage 4 sequence moves each segment `pending ->
+running` when its Worker starts, then writes the ledger row *before*
+`segment-status done` — both legal edges from the segment's current status,
+and the ledger row exists before the status change, precisely so it never
+hits that refusal.
 
 ### The purpose-fitness pass as an artifact
 
@@ -592,6 +648,8 @@ The scan reports two *kinds* of finding and the distinction is the whole point. 
 
 Per concept type it reports count, median, p90 and the archetype's declared target range, and lists the concepts below the floor as **thin**. Thin is a report, never an error, and the anti-padding sentence is printed in the tool's own output beside it: a concept that genuinely has less to say should stay short and be named, because padding it to reach a number makes the bundle worse while making the metric better. The targets live in `archetype.yaml` as an optional `budgets:` block — data, not code, following the same rule as every other archetype declaration — and only two shipped archetypes carry one, because targets were only added where the distribution had actually been measured. An archetype without the block reports `—` for every target and is not defective. The whole of this is advisory by design: `W_BUDGET_RESIDENT` is a warning at every strictness level, there is no strict flag that turns it into an error, and `release-check` never composes it.
 
+**`okfy package --shard-index` — a two-level index, built only after its bar was met.** `index.md` is the other half of the resident core budget describes, and on a bundle with hundreds of concepts it can dwarf `AGENTS.md`. v0.24 declared a threshold *before* building anything: on a synthetic 300-concept fixture spread over six directories, a sharded resident core would have to be at most 40% of the flat one, AND `okfy query`'s top-5 ids would have to be byte-for-byte identical with and without sharding, or the feature would ship nothing. Both held — the measured ratio was ~0.11, and top-5 parity was 12/12 (retrieval never reads `index.md` at all, only concept files, so parity was never really in doubt) — so `--shard-index` is opt-in and recorded (`meta/package.json`, `"index": "sharded"`). Resident `index.md` keeps one line per top-level concept directory — its count, and a category description copied **verbatim** from `meta/extraction-plan.md`'s `categories` mapping when the plan declares one for that directory, never invented otherwise. The full per-directory listings — same lines, same order the flat index prints — move to non-resident `index/<dir>.md` files under the reserved `index/` directory. `okfy validate` follows both: a concept listed in any shard counts as listed (orphan and drift checks), and a new check, `E_INDEX_SHARD`, demands every non-meta concept appear in exactly one place (resident index or exactly one shard), every shard concept actually exist, and every shard file be referenced from the resident index — the way out is always the same, re-run `okfy package --shard-index`. Repackaging without the flag returns a previously-sharded bundle to flat and deletes `index/`, because it is entirely generated output — but only once `okfy package` has checked that: a v0.24 fix makes every file `okfy package` itself writes under `index/` or `protocols/` open with a first line, `<!-- okfy:generated — do not edit; rewritten by okfy package -->`, the ONLY fact package trusts to tell its own output apart from a file it did not write. Before touching either directory, `okfy package` reads every `.md` file there and refuses (`E_RESERVED_DIR`) if any lacks that marker, rather than deleting or overwriting it on the old assumption that the whole directory was its own — the failure mode this closes is a pre-v0.24 bundle where `index/` or `protocols/` was an ordinary concept directory, holding a real owner concept `okfy package` would otherwise have destroyed silently. The generated pre-commit hook's own `proposals`-policy gate already excludes `index/`, `proposals/`, `drafts/` and `protocols/` from the "direct concept edit" check it runs — a package-only commit under those paths was never what that gate exists to block — so the marker check and the hook agree on which paths are package's own. Sharded `AGENTS.md` gains one sentence (under 30 tokens) pointing an agent at `index/<dir>.md` or `okfy query`.
+
 ### Probing a finished bundle: `/okfy:challenge`
 
 Every check above asks whether the bundle is internally consistent with its own record. None of them asks the harder question: *what does this bundle answer confidently and wrongly?* `/okfy:challenge <bundle>` is the adversarial pass that does. It authors questions from `meta/purpose.md` **without reading the concept index first** — the point is to ask what a user would ask, not what the bundle happens to contain — runs them, and hands back the ones where the answer was confident and unsupported.
@@ -697,13 +755,45 @@ Everything so far assumed the agent runs the `okfy` CLI itself. Many do not — 
 
 The adapter is a **separate package**, on purpose. The MCP SDK carries real dependencies, and the core's whole discipline is that it stays PyYAML-only and portable — just markdown and git, no runtime. So the SDK weight lives entirely in `adapters/mcp/`; the core never learns MCP exists. An adapter is exactly the place a dependency is allowed to sit, precisely so the thing everyone imports does not have to.
 
-It exposes five tools. Four are read: `okfy_query` (BM25 search → ranked snippets, running the same lexicon query expansion as the CLI — `expand` and `include_stale` default true, so an agent gets the bridged terms and sees stale hits marked without any extra work), `okfy_show` (one full concept by id — with a `section` heading to pull just one block and a `max_chars` cap for the rest), `okfy_links` (a concept's inbound and outbound links), and `okfy_overview` (the index — the first thing an agent should read, so it discloses progressively instead of bulk-reading the map, with `max_items` / `max_chars` caps). Every capped response carries a `truncated` flag, so a remote agent can bound its own context honestly instead of blowing its window on one call. The fifth is a *write*, but a deliberately narrow one: `okfy_propose` drops a full concept into `proposals/` and nowhere else. The v0.4a write-gate makes that a guarantee, not a request — a tool call physically cannot touch a final concept — so a remote agent that spots a gap can file a fix over the wire, and a human still reviews every one through `okfy review`. The enrichment loop closes across a transport with the gate intact. There is deliberately no `okfy_validate` tool: validation is a maintainer's job, not a consumer's.
+It exposes six tools. Five are read: `okfy_query` (BM25 search → ranked snippets, running the same lexicon query expansion as the CLI — `expand` and `include_stale` default true, so an agent gets the bridged terms and sees stale hits marked without any extra work), `okfy_show` (one full concept by id — with a `section` heading to pull just one block, a `max_chars` cap for the rest, and a `sha256` of the concept file's bytes), `okfy_links` (a concept's inbound and outbound links), `okfy_overview` (the index — the first thing an agent should read, so it discloses progressively instead of bulk-reading the map, with `max_items` / `max_chars` caps), and `okfy_fresh` (v0.24 — a read-only per-id freshness check; see below). Every capped response carries a `truncated` flag, so a remote agent can bound its own context honestly instead of blowing its window on one call. The sixth is a *write*, but a deliberately narrow one: `okfy_propose` drops a full concept into `proposals/` and nowhere else. The v0.4a write-gate makes that a guarantee, not a request — a tool call physically cannot touch a final concept — so a remote agent that spots a gap can file a fix over the wire, and a human still reviews every one through `okfy review`. The enrichment loop closes across a transport with the gate intact. There is deliberately no `okfy_validate` tool: validation is a maintainer's job, not a consumer's.
 
 One server serves exactly one bundle — the path is a launch argument, and that one server is one access boundary, matching private-by-default. To expose several bundles at once, point it at a **workspace** path instead: the adapter auto-detects the federation and the same tools answer across members, constraints pulled in, with no MCP-specific machinery. Transport is stdio only for now — local-first, no networked truth-daemon — and SSE is a later flag the SDK gives nearly for free.
 
-Setup is a paste, never an edit. OKFy will *print* you a correct config snippet — `okfy-mcp config <path> --client claude-code` — but it never writes to your client's config file, because those formats drift and would break silently. You paste the block into `.mcp.json`, restart the client, and the five `okfy_*` tools appear.
+Setup is a paste, never an edit. OKFy will *print* you a correct config snippet — `okfy-mcp config <path> --client claude-code` — but it never writes to your client's config file, because those formats drift and would break silently. You paste the block into `.mcp.json`, restart the client, and the six `okfy_*` tools appear.
 
 Cheatsheet: `uv tool install ./adapters/mcp` installs `okfy-mcp`; `okfy-mcp serve <path>` runs the stdio server for a bundle or workspace; `okfy-mcp config <path> --client claude-code` prints the snippet you paste into your client.
+
+### Fair-share output budgets (v0.24)
+
+`okfy_query`'s hit descriptions, and a multi-id `okfy_show`'s concept bodies, share ONE `max_tokens` token budget via water-filling instead of a flat per-item cap — short items pass through untouched, leftover budget flows to long ones, and a cut item keeps its `~70%` head / `~30%` tail around an explicit "N tokens omitted" marker. What the adapter cuts, it says it cut: shown + omitted always equals what the call started with, never a silent drop. A hit's id+title is never dropped for budget reasons — only its `description` — and it gains `view` (`full`\|`truncated`) plus `matched` (adapter-side query/hit token overlap, not the scorer's explanation); `okfy_show(concept_ids=[...])` names ids it could not fit as `omitted` and unknown ones as `missing`, each shown concept carrying up to 5 `neighbours` (`{id, description}`, no bodies). Zero query hits get a one-word `empty_reason`. Every result carries a constant `notice` that retrieved content is data, not instructions.
+
+### What the adapter observes
+
+The core cannot see whether an agent searched or read anything before it wrote a proposal — a CLI invocation carries no history. The stdio server is a different case: it is **one process per agent session**, so it can watch its own `okfy_query`/`okfy_show` calls across that one session and hand the trace to `okfy_propose` as an `observed` block (`by`, `queries`, `query_sha256`, `read_set`, `searched_before_propose`, `target_shown`). `okfy review show` renders it, marking each read concept `moved`/`deleted` against its current bytes.
+
+Read the label on it honestly: what is observed **proves tool calls happened, not that the agent understood anything**. It cannot see a CLI-filed proposal (which carries no `observed` key at all), a proposal read outside this session, or whether the agent actually used what it read. It is attested by the adapter process, never by the author — a proposal whose CONTENT tries to carry its own `observed`/`read_set` is refused (`E_PROPOSAL_OBSERVED_FORGED`).
+
+Because a long session can drift, `okfy_fresh` (and `okfy fresh` on the CLI) lets an agent re-check a concept it read earlier without re-reading it: pass `{id: sha256}` (the `sha256` `okfy_show` already returned) and get back one of `unchanged` | `changed` | `now-stale` | `unchanged-stale` | `deleted`, read-only, no git. Check freshness before relying on a concept read earlier in a long session.
+
+For real usage beyond one session, `okfy-mcp serve <path> --journal <file>` opt-in-logs one JSONL row per tool call (never inside the served bundle — `E_JOURNAL_INSIDE_BUNDLE` if it resolves there) — no query text unless `--journal-text` is also given. A `query` row carries `top_ids` (what search surfaced); a `show` row carries `shown_id` for a single-concept call or `shown_ids` (a list) for the v0.24 multi-id call — read back off the actual result, not the caller's requested ids, so an id that ended up in `missing`/`omitted` is never journaled as shown. `okfy index <bundle> --usage --journal <file>` folds it into the usage report as a second, separately-labelled section: real sessions, not the eval set — a concept counts as ever reached there when it appears in EITHER a query's `top_ids` or a show row's `shown_id`/`shown_ids`, reported combined (`ever_hit`/`zero_hit_ids`) and also as the two counts separately (`queried_ids_n`, `shown_ids_n`), because a concept an agent fetched directly (a link followed, an id copied from memory) never touches `okfy_query` at all.
+
+### Grading a host transcript instead: `okfy transcript-lint`
+
+The adapter's own `observed` block only exists when the agent goes through the MCP server. Most agents today do not — they run inside a HOST's own CLI (Claude Code and similar), calling `okfy` as a plain subprocess or an MCP tool the host wires up itself, and nothing in that path reports back to OKFy. `okfy transcript-lint <session.jsonl> --bundle <bundle> [--json]` reads that host's own session transcript AFTER THE FACT and reports the same kind of structural fact, from the other side: did tool calls happen, in what order, and what concept ids did the assistant's own text name.
+
+What it reports: counts and ordering of tool calls classified into SEARCH / SHOW / PROPOSE / MUTATION (`tool_calls`, `first_search`, `first_mutation`, `searched_before_first_mutation`), each `PROPOSE` call's own `searched_before` and `target_shown`, and `cited_ids` — concept-id-shaped strings named in the assistant's text, each checked against the bundle (`shown-in-session`, `exists-not-shown`, or `unknown`). Every report carries the same label, verbatim:
+
+> observed tool calls and id-shaped strings — not what the agent understood
+
+Its honest limits, stated because they are easy to miss:
+
+* it reads `tool_use` BLOCKS, never `tool_result` blocks — it knows a tool was called and with what input, never what the tool answered;
+* a `Bash` call is classified as a mutation by a small, NAIVE closed list of substrings (` > `, `>>`, `rm `, `mv `, `cp `, `sed -i`, `git commit`, `git add`, `tee `) — it misses any mutation made through a program not on that list, and it can misfire on a substring that merely appears in a command without being its effect;
+* it says nothing about answer quality. A session with a search before every edit and no unknown citations can still have gotten the wrong answer; this command cannot see that, on purpose — no prose matching, no verdict, no LLM in the loop.
+
+The transcript never leaves your machine and nothing here is written into the bundle: `transcript-lint` opens the session file and the bundle directory read-only, the same discipline as `okfy sourcemap` and `okfy merge-audit`. A malformed or truncated transcript line is counted and skipped rather than crashing the read — the report comes back `partial: true` with a `skipped_lines` count; a well-formed line whose CONTENT is the wrong shape (a `text` block whose `text` is not a string, a `tool_use` block malformed enough that no call can be classified from it) is counted separately, in `skipped_blocks`, same `partial: true`, so one malformed block never silently drops or miscounts an otherwise-readable line.
+
+A single `Bash` `command` chaining several `okfy` invocations (`okfy query ... && okfy propose ...`) is not read as one call: it is split on `&&`, `||`, `;`, `|` and newline — shlex-aware, so a separator sitting inside a quoted argument is not a split point — and each resulting segment is classified on its own tokens. Without this, a proposal chained after a search on the same Bash line would read as an unsearched mutation, or the reverse.
 
 
 ## The reference bundle, and what a green gate is worth
@@ -794,7 +884,7 @@ decision and its reasons, a constraint, a workaround that reproduces — can lea
 it in the bundle for the next agent. It never writes the bundle directly. It
 files a proposal, and the owner accepts or rejects it:
 
-    agent: okfy query → work → okfy propose --as … --evidence …
+    agent: okfy query → work → okfy propose --target <id> --as … --evidence …
     owner: okfy review list → okfy review accept | reject
     next agent, next session: okfy query finds it
 
@@ -802,6 +892,37 @@ files a proposal, and the owner accepts or rejects it:
 (`claude-code/1.0`) or `<prefix>:<id>` (`human:alice`). It is recorded as
 `generated` and survives later updates; the owner who accepts is recorded in
 `verified`.
+
+**What and how.** `--target <concept-id>` names the concept the proposal is
+about (required for `update`/`delete`/`supersede`); `--action` is `create`,
+`update`, `delete`, `supersede`, `flag`, or `gap` (default `update`); `--from
+<file>` supplies the full concept `.md` (frontmatter + body) for anything but
+a delete, a flag, a gap, or an update filed with `--patch-file`; `--note`
+records why in the proposal envelope. `flag` and `gap` are narrower intake
+kinds — see below.
+
+**Retiring a concept without erasing it: `--action supersede`.** `--target
+<old-id> --new-id <new-id> --from <successor.md>` files a successor concept.
+At accept, the OLD concept stays — flagged stale, exactly as `okfy stale`
+would flag it, with `superseded_by: <new-id>` — and the NEW concept is
+written with `supersedes: <old-id>`. Both links are checked reciprocally
+(`E_SUPERSEDE_DANGLING` otherwise). A retired conclusion stays visible to the
+next agent instead of quietly vanishing.
+
+    okfy propose <bundle> --target glossary/old-term --action supersede \
+        --new-id glossary/new-term --from successor.md --as claude-code/1.0
+
+**Replacing an open proposal: `--supersedes <proposal-id>`.** Any action can
+carry `--supersedes <old-proposal-id>` to replace one open proposal with this
+new one, instead of leaving both open — but only when the old proposal has
+the same `--as` actor and the same `--target`; otherwise `E_PROPOSAL_LANE`
+names what differs. On success the old proposal file is removed (like a
+reject) and `meta/memory.jsonl` gets a `superseded` event naming both ids.
+
+**A revert is an update that says so: `--reverts <git-sha>`.** With `--action
+update`, `--reverts <git-sha>` records the sha this proposal reverts to; at
+accept it is surfaced as `origin: revert` in the ledger row, distinguishing an
+owner-directed rollback from an ordinary accepted edit.
 
 **On what.** `--evidence <kind>=<ref>` states what the change rests on:
 `test-run` (a run id), `owner-decision` (where the owner decided it),
@@ -816,15 +937,159 @@ it is inference). "I checked" is not evidence, and a proposal can never carry
 | `E_PROPOSAL_ACTOR` | missing or malformed actor | `--as <producer>/<version>` |
 | `E_PROPOSAL_EVIDENCE` | unknown kind, missing ref, or a `verified` field | `--evidence <kind>=<ref>` |
 | `E_PROPOSAL_INJECTION` | the text reads as instructions to an agent | none for the agent; the owner may `okfy refine` |
-| `E_PROPOSAL_REJECTED` | the owner already rejected this exact text | `--reopen "<what changed>"`, with new evidence |
+| `E_PROPOSAL_REJECTED` | the owner already rejected this exact text, a reworded version of it, or a concept it matches was deleted | `--reopen "<what changed>"`, with new evidence |
 | `E_PROPOSAL_DUPLICATE` | a create whose title already names a concept | `--extends <id>` |
+| `E_PROPOSAL_SECRET` | the text carries a secret-shaped value (API key, token, private key) | remove it and refer to where it lives (env var name, vault path) |
 | `E_MEMORY_LINE` | `meta/memory.jsonl` has an unreadable line | the owner repairs it; `okfy validate` lists it |
+| `E_PROPOSAL_LANE` | `--supersedes` names an open proposal with a different actor or target | file a separate proposal, or ask the owner to reject the old one |
+| `E_PROPOSAL_GAP_CAP` | this actor already has 10 open `--action gap` proposals | the owner clears the queue (`okfy review list`/accept/reject), or withdraw one with `--supersedes` |
+| `E_GAP_ROW_EXISTS` | accepting a gap as not-covered would duplicate an existing lexicon row for that exact term | reject the proposal — the row is already there |
+| `E_PATCH_SHAPE` | `--patch-file` is not a non-empty list of `{old, new, count}` objects | fix the patch JSON |
+| `E_PATCH_COUNT` | a hunk's declared `count` does not match how many times `old` occurs in the target's current body | `okfy show` the concept, fix the hunk or its `count` |
+| `E_PROPOSAL_SOURCE` | a proposed `sources:` entry is not a file of this bundle's corpus (checked when a checker is available) | `okfy show <id>` for a real anchor, or `--evidence external-source=<url>` with no corpus source |
+| `E_BATCH_ENTRY` | an `--batch` JSONL entry could not even be parsed (malformed JSON, not an object, an unknown key) | fix that entry per the message, which names the line number |
+| `E_RESERVED_DIR` | a write target (`create`'s `--target`, `supersede`'s `--new-id`, `--extends`) is relative and `..`-free but its first path segment names a reserved/generated directory (`meta`, `proposals`, `drafts`, or `okfy package`'s own `index`/`protocols`) | choose another directory, e.g. `<dir>-notes/` |
+
+The injection (`E_PROPOSAL_INJECTION`) and secret (`E_PROPOSAL_SECRET`) scans run over **every author-controlled string that could end up persisted** — the proposal file, `meta/memory.jsonl`, or a committed `log.md` line at accept — not just the create/update body: `note`, `reopen`, `distinct_from` reasons, `reverts`, `query`, `target`/`new_id`, a patch hunk's `new`, and every frontmatter VALUE, walked recursively field by field rather than scanned off the YAML dump (a long plain scalar PyYAML folds at ~80 columns would otherwise split a flagged phrase across two lines and hide it from a line-by-line scanner). One collection point feeds one scan call for `create`/`update`/`delete`/`supersede`/`flag`/`gap`/`patch`, `--batch`, and the MCP path alike.
+
+**Four ways to bring something to the owner.** A proposal does not have to be
+a full create/update/delete — three narrower intake kinds exist for when an
+agent has less than a whole rewrite to offer:
+
+| Kind | When | Command shape |
+|---|---|---|
+| `--action flag` | something is wrong and you cannot fix it | `--type <contradicts-source\|merged-entities\|out-of-date\|coverage-gap\|other> (--target <id> \| --query "<text>") --note "<what is wrong>"` |
+| `--action gap` | the bundle could not answer a real question | `--query "<the user's own wording>" --note "<why it matters>"` |
+| `--action update --patch-file <hunks.json>` | you have the exact fix, as a small text replacement | `--patch-file hunks.json` (JSON: `[{"old": "...", "new": "...", "count": 1}]`), instead of `--from` |
+| `--action create\|update\|delete\|supersede --from <file>` | you have the whole new (or successor, or deleted) concept | as documented above |
+
+**`--action flag`** files "this is wrong" without pretending to have the fix.
+`--type` and either `--target` or `--query` are required; the proposal's body
+is the note. Another OPEN flag with the same target-or-query, the same
+`--type`, and the same (normalized) note is refused as `E_PROPOSAL_DUPLICATE`.
+`okfy review accept` on a flag is an acknowledgement — no concept is written,
+only the proposal removed and the ledger row appended; `reject` works as for
+any other proposal. `okfy review list` shows `flag_type`.
+
+**`--action gap`** files "the bundle could not answer this", in the user's own
+wording (`--query`). Rejection and open-duplicate dedup are keyed on the
+NORMALIZED query (Unicode NFKC, casefold, collapsed whitespace, trailing
+punctuation stripped) rather than the note's bytes, so two different notes
+about the same unanswered question collide — and a rewording of the SAME
+question does not dodge a standing rejection any more than it does for a
+create/update. Capped at 10 open gap proposals per actor (`E_PROPOSAL_GAP_CAP`);
+the owner clears the queue or the agent withdraws one with `--supersedes`. The
+owner's default disposition at accept is accept-as-not-covered: exactly one
+`meta/lexicon.md` row is appended, `status: not-covered`, `term:` the filed
+phrase verbatim — after which `okfy query <bundle> "<that phrase>"` carries the
+not-covered note. `E_GAP_ROW_EXISTS` if a row for that exact term already
+exists (reject the proposal instead). `reject` remembers the normalized-query
+hash, so the same gap re-filed unchanged is `E_PROPOSAL_REJECTED` (`--reopen`
+is the way out, same as everywhere else).
+
+**`--action update --patch-file <hunks.json>`** replaces `--from` with a JSON
+list of `{"old": str, "new": str, "count": int=1}` hunks, applied IN ORDER to
+the target's CURRENT body only — frontmatter is untouched. Each `old` must
+occur exactly `count` times at the moment its hunk is applied, else
+`E_PATCH_COUNT` names the real count; malformed JSON (not a list, an empty
+`old`, an unknown key) is `E_PATCH_SHAPE`. `--patch-file` and `--from` are
+mutually exclusive. At propose time the core materializes the full resulting
+body into the proposal exactly as a normal update would have, and separately
+stores the hunks — so injection/secret scanning, tombstones, archetype checks
+and `okfy review show` all work exactly as they do for any other update, and
+`E_PROPOSAL_BASE_MOVED` still applies at accept if the target changed underneath.
+
+**Proposed sources, checked when a checker exists.** When a proposal's meta
+carries `sources:` and this bundle has a way to check them (a corpus manifest
+travels with it, or its corpus is embedded and reachable — the same mechanism
+`okfy validate` uses), every entry is resolved and its file must be in the
+corpus, else `E_PROPOSAL_SOURCE`. When no checker is available, the proposal
+still files — `okfy propose` and `okfy review list`/`show` report
+`sources_state: unchecked` rather than silently skipping the question.
+
+**Batch intake: `okfy propose <bundle> --as <actor> --batch <file.jsonl>
+[--dry-run] [--partial]`.** One proposal per line, keys mirroring `propose`'s
+own parameters (`action`, `target`, `note`, `content` — the full concept
+`.md`, like `--from` — `evidence`, `extends`, `reopen`, `distinct_from`,
+`new_id`, `supersedes`, `reverts`, `flag_type`, `query`, `patch`); an entry
+naming any other key, including its own `actor` (`--as` covers the whole
+batch — an entry may not override it), is refused as `E_BATCH_ENTRY`. Every
+entry runs the SAME validation `propose` itself runs — parsing, injection and
+secret scanning, duplicate/rejection tombstone checks — before anything is
+written, and entries are also checked against EACH OTHER (two creates with
+the same title in one batch: the second is `E_PROPOSAL_DUPLICATE`, same as
+against the live bundle). If any entry is refused, the batch writes NOTHING
+and the command exits non-zero, unless `--partial` — then the entries that
+passed are filed, filing is still reported, and the exit is still non-zero.
+`--dry-run` never writes, whatever the verdicts are. The response is
+`{"entries": [{"index", "ok", "code", "message", "target"}, ...], "filed":
+[...], "ok": bool}` — a file with no non-blank lines is `"0 entries"`,
+`ok: true`.
+
+**What `okfy review show <bundle> <proposal-id> [--json]` reports.** For a
+`delete` or `supersede` proposal it computes a read-only `impact` block
+against the live bundle: `inbound_links` (concepts that link to the target),
+`verified_linkers` (how many of those carry a non-empty `verified`),
+`lexicon_rows` (`meta/lexicon.md` rows whose `maps_to` names it),
+`expectations` (`purpose.md` `test_queries`/`adversarial_queries` entries
+naming it), `index_line` (linked from `index.md`) and `open_proposals`
+(other open proposals against the same target). Nothing here writes
+anything — it is what an owner reads before accepting.
+
+**`E_DELETE_EXPECTED`: a delete an eval suite still expects.** `okfy review
+accept` on a `delete` refuses when `expectations` is non-empty — a suite that
+still expects the deleted concept can never pass. The message names the
+suite and the query; the way out is to edit the expectation in `meta/purpose.md`
+first, then accept again. `supersede` is never refused this way: the old
+concept stays in the bundle, so the expectation still finds it, only flagged
+stale.
+
+**Rejection and deletion survive rewording.** `E_PROPOSAL_REJECTED` compares
+two fingerprints of the text, not one: the exact bytes, and a normalized
+`match_sha256` that folds away case, whitespace, markdown emphasis and
+trailing punctuation. A rejected claim re-cased or re-wrapped is still
+refused; so is proposing the same content a deleted concept once held —
+that refusal names who deleted it and when. `--reopen` is the way out of
+both.
+
+**Near-duplicate warning, never a refusal.** A `create` whose title is close
+to an existing concept's (same type, title-token overlap), or whose alias
+names an existing concept exactly, gets `W_PROPOSAL_NEAR` in the response —
+the proposal still files. `--extends <id>` folds it into that concept
+instead; `--distinct-from <id>="reason"` (repeatable) records why it is a
+different thing and silences the warning for that id. `okfy review list`
+shows `near` and `distinct_from` per proposal.
+
+**Evidence-ref resolution, a label never a refusal.** A typed `--evidence`
+ref — `eval:<run_id>`, `concept:<id>`, `proposal:<id>`, `log:<date>` — is
+checked inside the bundle and reported as `resolved` or `not-found`; anything
+else (an external CI id, a commit, a URL) is honestly `unchecked` rather than
+guessed at. `okfy propose` and `okfy review list` both show
+`evidence_state: {kind: state}`, recomputed live — it can go stale between
+propose and review.
 
 **What `okfy review accept` refuses.** `E_PROPOSAL_BASE_MOVED`: the concept
 changed after the proposal was written against it, so accepting would erase that
 change. Every proposal records the sha256 of the file it was written against;
 accept compares it under a lock. A proposal filed before this existed carries no
 base and is accepted with `W_PROPOSAL_UNBASED` in the log line.
+
+**Owner-only verbs, and an honest `--as`.** `review accept`, `review reject`,
+`refine` and `stale` are the owner's decisions. `review accept`/`review
+reject` take an optional `--as <actor>` — omit it and the owner is the local
+git-config role, exactly as before; pass it and it is honoured ONLY when it
+is a `human:` actor. An agent DECLARING itself the owner (`--as
+claude-code/1.0`) is refused — `E_OWNER_ACTION_REQUIRED: <verb> is the
+owner's decision — ask the owner to run: <the exact command>` — a
+copy-pasteable retry for the real owner. This is honest-agent ergonomics, not
+a security boundary: actor strings are declarations everywhere in this
+project, and an agent with shell access could edit the ledger directly
+regardless. Every accept/reject also records `channel` on its
+`meta/memory.jsonl` row — `tty` or `non-tty`, MEASURED from
+`sys.stdin.isatty()` at the CLI layer (never a flag the caller asserts), or
+`api` for a direct library call (including the MCP adapter, which has no
+accept/reject tool at all). Rows from before this existed simply carry no
+`channel` and stay valid.
 
 **The ledger.** Every propose, accept and reject is appended to
 `meta/memory.jsonl`: who, when, which proposal, which text (by sha256), and the
@@ -837,8 +1102,19 @@ body it verified. If the text changes later — an owner `refine`, say —
 and the current text is not verified until it is accepted again.
 
 The consumer skill teaches agents the before-task and after-task half of this
-loop. Every packaged `AGENTS.md` carries a short version of it between
-`<!-- okfy:memory -->` markers.
+loop. A packaged `AGENTS.md` carries, between `<!-- okfy:memory -->` markers,
+a pointer to it — **only when `write_policy: proposals`** (v0.24; `direct` and
+any other policy render no block, since there is no propose flow for it to
+point at). The pointer is deliberately small: at most 60 tokens by okfy's own
+counter, because AGENTS.md is resident context billed on every turn, and the
+full discipline text this pointer used to carry inline measured 21.7–41% of
+the resident core on the smallest real bundles. The full text — search-first,
+evidence kinds, `--extends`, plus the v0.24 additions (gap/flag/supersede,
+search the user's own wording before rewriting it, `okfy fresh` instead of a
+blind re-read) — moved to a non-resident packaged file, `protocols/memory.md`,
+read on demand instead of paid for every turn. Both are written by `okfy
+package`; the protocol file disappears on repackage if the policy no longer
+allows proposals.
 
 ## Working memory, and what accept does not claim
 
