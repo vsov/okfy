@@ -268,7 +268,9 @@ def h_propose(t: Target, target: str, action: str, note: str,
     carry `near` (ids of close-enough existing concepts), `evidence_state`
     (`{kind: resolved|not-found|unchecked}` for the declared evidence ref),
     `sources_state` (`checked`/`unchecked` for a proposal's `sources:`) and
-    `warnings` (W_PROPOSAL_NEAR text) — none of these block anything.
+    `warnings` (W_PROPOSAL_NEAR text, and W_DISTINCT_ALIAS_OVERLAP text when a
+    `--distinct-from`-style claim still overlaps enough that retrieval would
+    conflate the two) — none of these block anything.
     action `supersede` (v0.24) needs `new_id`, the successor concept's id;
     `supersedes` (any action) replaces an open proposal that shares this one's
     actor and target — otherwise `E_PROPOSAL_LANE`. action `flag` ("this is
@@ -361,9 +363,16 @@ def h_propose(t: Target, target: str, action: str, note: str,
         out["evidence_state"] = ev_state
     if env.get("sources_state"):
         out["sources_state"] = env["sources_state"]
+    warnings = []
     warn = proposals.near_warning(near, dist)
     if warn:
-        out["warnings"] = [warn]
+        warnings.append(warn)
+    # v0.25: W_DISTINCT_ALIAS_OVERLAP — computed from the CALL's own
+    # (meta, distinct_from), not from `dist` (the persisted echo): see
+    # okfy.proposals.distinct_overlap_warnings' docstring.
+    warnings += proposals.distinct_overlap_warnings(t.bundle, meta, distinct_from)
+    if warnings:
+        out["warnings"] = warnings
     # v0.24 (b): only for a real create (an --extends turns one into an
     # update before this function ever sees "create") — the MCP result adds
     # one guidance sentence the CLI's JSON output does not.

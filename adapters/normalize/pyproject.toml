@@ -1,6 +1,6 @@
 [project]
 name = "okfy-normalize"
-version = "0.24.0"
+version = "0.25.0"
 description = "Raw documents to normalized Markdown plus an OKFy source-map sidecar"
 license = "Apache-2.0"
 requires-python = ">=3.11"

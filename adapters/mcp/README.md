@@ -78,6 +78,36 @@ tool call can never touch a final concept, so enrichment over a transport keeps
 the same review gate as a local agent. There is no `okfy_validate` tool —
 validation is a maintainer operation, not a consumption one.
 
+## The read contract is additive only
+
+Every tool response shape documented above has changed substantively across
+releases (v0.23 and v0.24 both added fields to more than one tool) with no
+stated rule governing how. v0.25 states one: **a field is added, never
+removed or renamed, without a recorded decision** (a PR that says so, or a
+line in this README noting the break). A consumer written against an older
+version of this README may therefore ignore fields it does not recognise,
+but may not assume a field it *does* recognise will vanish or change name
+out from under it — the same additive discipline `okfy codes` commits to
+for the diagnostic registry going forward (a code, once retired, is never
+silently reused for a different meaning). Nothing here promises a field's *value* is stable
+in shape release to release (`okfy_query`'s `matched` and `okfy_show`'s
+`neighbours`, for instance, are both v0.24 additions) — only that reading an
+old field never breaks because the field moved or disappeared.
+
+`adapters/mcp/tests/test_response_shapes_golden.py` backs this with a golden
+test: it pins the **key set** of a representative response from every tool
+(and, for `okfy_query`/`okfy_show`, of more than one call shape — bundle vs.
+workspace mode, single vs. multi `concept_id`, the error dicts a refusal
+returns), read off a live call against a small fixed bundle. It pins names,
+never values, so changing what the fixture bundle contains never reddens
+it — only adding, removing or renaming a key does. Two response fields are
+themselves keyed by caller-supplied data rather than a fixed schema
+(`okfy_fresh`'s `{concept_id: state}` map, and `okfy_query`'s per-member
+`expanded_query` in workspace mode); the golden test pins that those stay
+dict-shaped (and, for `okfy_fresh`, that every value stays inside the closed
+`FRESH_STATES` vocabulary) rather than pinning literal keys that were never
+part of the contract.
+
 ## Fair-share output budgets (v0.24)
 
 What the adapter cuts, it must say it cut. `okfy_query`'s hit descriptions and

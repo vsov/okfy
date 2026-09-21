@@ -5,7 +5,8 @@ from pathlib import Path
 from okfy.commands import HANDLERS
 from okfy.cost import DEFAULT_N as COST_N
 from okfy.guard import GuardError
-from okfy.proposals import FLAG_TYPES
+from okfy.memory import EVENTS
+from okfy.proposals import ACTIONS, FLAG_TYPES
 from okfy.segment import DEFAULT_BUDGET
 
 
@@ -167,6 +168,37 @@ def build_parser() -> argparse.ArgumentParser:
     # skill can say what it means; --text is the human summary.
     p.add_argument("--json", action="store_true")
     p.add_argument("--text", action="store_true")
+    p = sub.add_parser(
+        "changes",
+        help="read-only window query over meta/memory.jsonl — every ledger "
+             "row is judged by its OWN `at`, never by a related event's time "
+             "(see the module docstring in okfy.commands.changes)")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("--since", default=None,
+                   help="inclusive lower bound: a bare date (2026-01-31, "
+                        "read as 00:00:00Z) or a full RFC3339 UTC timestamp "
+                        "(2026-01-31T14:30:00Z); omit for no lower bound")
+    p.add_argument("--until", default=None,
+                   help="EXCLUSIVE upper bound, same accepted shapes as "
+                        "--since")
+    p.add_argument("--target", default=None, metavar="CONCEPT_ID")
+    p.add_argument("--event", action="append", choices=list(EVENTS),
+                   default=None,
+                   help="repeatable; filters on the ledger EVENT kind — "
+                        "propose/accept/reject/superseded (NOT the same as "
+                        "--action below)")
+    p.add_argument("--action", action="append", choices=sorted(ACTIONS),
+                   default=None,
+                   help="repeatable; filters on the underlying proposal's "
+                        "ACTION — create/update/delete/supersede/flag/gap "
+                        "(NOT the same as --event above: an accept EVENT can "
+                        "carry a delete ACTION)")
+    p.add_argument("--actor", default=None)
+    # JSON stays the default, as in `okfy diff`: --json is accepted so a
+    # skill can say what it means; --text is the human summary.
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--text", action="store_true")
+
     p = sub.add_parser("snapshot"); p.add_argument("bundle", type=Path)
 
     p = sub.add_parser("repair-links"); p.add_argument("bundle", type=Path)
@@ -402,6 +434,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "measurement the core made")
     d = dsub.add_parser("list");    d.add_argument("bundle", type=Path)
     d.add_argument("--run", default=None)
+    d.add_argument("--json", action="store_true",
+                   help="rows plus dropped_totals (per-reason counts summed "
+                        "across the listed rows' `dropped` blocks)")
 
     p = sub.add_parser("workspace")
     wsub = p.add_subparsers(dest="wcmd", required=True)

@@ -6,6 +6,7 @@ the per-verb logic, grouped by domain.
 """
 from .bundle import (cmd_codes, cmd_index, cmd_init, cmd_log, cmd_package,
                      cmd_release_check, cmd_sourcemap, cmd_validate)
+from .changes import cmd_changes
 from .corpus import (cmd_cluster, cmd_diff, cmd_glean, cmd_repair_links,
                      cmd_segment, cmd_segment_status, cmd_snapshot, cmd_survey)
 from .economics import cmd_budget, cmd_cost
@@ -36,6 +37,7 @@ HANDLERS = {
     "fresh": cmd_fresh,
     "sample": cmd_sample,
     "diff": cmd_diff,
+    "changes": cmd_changes,
     "snapshot": cmd_snapshot,
     "repair-links": cmd_repair_links,
     "package": cmd_package,

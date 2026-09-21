@@ -3,9 +3,9 @@ import sys
 
 from okfy import frontmatter
 from okfy.bundle import Bundle
-from okfy.proposals import (accept, evidence_state, list_proposals, near_warning,
-                            nearest, propose, propose_batch, refine, reject,
-                            show_proposal)
+from okfy.proposals import (accept, distinct_overlap_warnings, evidence_state,
+                            list_proposals, near_warning, nearest, propose,
+                            propose_batch, refine, reject, show_proposal)
 
 from .common import _archetype_for, _print
 
@@ -77,9 +77,17 @@ def cmd_propose(a) -> int:
         out["evidence_state"] = ev_state
     if env.get("sources_state"):
         out["sources_state"] = env["sources_state"]
+    warnings = []
     warn = near_warning(near, dist)
     if warn:
-        out["warnings"] = [warn]
+        warnings.append(warn)
+    # v0.25: W_DISTINCT_ALIAS_OVERLAP — computed from the CALL's own
+    # (meta, distinct_from), not from `dist` (the persisted echo): a
+    # distinct_from claim is only persisted when `near` was non-empty,
+    # which is narrower than "this id's overlap is worth a warning".
+    warnings += distinct_overlap_warnings(b, meta, distinct_from)
+    if warnings:
+        out["warnings"] = warnings
     # v0.24 (b): only meaningful for a real create (an --extends turns one
     # into an update before propose() ever sees "create").
     if env.get("action") == "create":

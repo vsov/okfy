@@ -16,6 +16,22 @@ folded into one, because a doc or a test may cite either half by name.
 Where the raise/emit site states no remedy — the finding is inherently
 unfixable, informational, or a judgment call left to the owner — `way_out` is
 exactly the string "owner decision — no mechanical way out".
+
+HOW A FINDING IS WRITTEN (v0.25 report item 4.3, after the donor's ADR 0017):
+when a check can only see that the bundle's own state disagrees with itself,
+it is a finding, never a verdict — the core cannot see past the bundle to
+know which side is wrong. A conforming finding states what is inconsistent,
+names two to four likely upstream causes, and points at the existing command
+that repairs each one; where the core cannot tell which cause applies, it
+says so instead of guessing. `_check_span_contradiction` (validate.py) does
+this in miniature: a span the ledger's worker declared `covered` whose file
+`_check_coverage` shows no concept cites states the contradiction and offers
+two honest readings without picking one — the worker may have folded the
+span into a concept citing a sibling path (nothing to repair), or the
+material may have been lost (re-extract the span). Not every finding needs
+invented causes: a shape violation with one deterministic cause — a
+malformed date, YAML that fails to parse — states that cause and its one
+repair, and padding it with three more would only bury the real one.
 """
 
 CODES: dict[str, dict] = {
@@ -162,6 +178,11 @@ CODES: dict[str, dict] = {
         "summary": "supersedes/superseded_by names a concept that does not exist, or the two concepts' links are not reciprocal",
         "way_out": "fix the link (correct the id, or add the missing reciprocal supersedes/superseded_by field) or remove it via `okfy refine`",
     },
+    "E_SUPERSEDES_CYCLE": {
+        "kind": "error",
+        "summary": "the supersedes/superseded_by graph closes into a ring — every pairwise link is reciprocal, but no concept in the ring is the current one",
+        "way_out": "run `okfy refine` on any one link in the ring (drop or repoint one supersedes/superseded_by pair) to break the cycle",
+    },
     "E_DELETE_EXPECTED": {
         "kind": "error",
         "summary": "accepting this delete would remove a concept a purpose.md test_queries/adversarial_queries expectation still names",
@@ -258,6 +279,11 @@ CODES: dict[str, dict] = {
         "kind": "warning",
         "summary": "a source anchor could not be checked (unreadable file, or a non-line fragment on a non-markdown source)",
         "way_out": "owner decision — no mechanical way out",
+    },
+    "W_QUOTE_NOT_IN_SPAN": {
+        "kind": "warning",
+        "summary": "an optional `source_quotes:` entry's quote was not found, after the seven permitted normalizations, inside the span its `sources:` ref resolves to",
+        "way_out": "fix the quote to match the cited text verbatim (copy it again from the span), or correct the anchor to the span it was actually read from",
     },
     "E_SOURCE_MANIFEST": {
         "kind": "error",
@@ -668,6 +694,11 @@ CODES: dict[str, dict] = {
         "summary": "a create is close to one or more existing concepts",
         "way_out": '`--extends <id>` if it is the same thing, or `--distinct-from <id>="reason"` if it is not',
     },
+    "W_DISTINCT_ALIAS_OVERLAP": {
+        "kind": "warning",
+        "summary": "a --distinct-from claim's target overlaps the proposed concept's title/alias tokens at or above the declared-distinct cutoff (0.6 Jaccard) — retrieval would conflate them despite the claim",
+        "way_out": "drop the --distinct-from claim if they really are the same thing, or rename/narrow the aliases (`okfy refine`) so retrieval can tell them apart",
+    },
     "E_PROPOSAL_OBSERVED_FORGED": {
         "kind": "error",
         "summary": "proposal content carries a top-level `observed`/`read_set` key, or `proposal.observed` — a claimed read/search history that is not the adapter's own",
@@ -702,6 +733,35 @@ CODES: dict[str, dict] = {
         "kind": "error",
         "summary": "a meta/memory.jsonl line is not JSON, not an object, missing a required key, or names an unknown event",
         "way_out": "fix or remove the reported line; `okfy propose`'s rejected-content gate refuses to run while any line is unreadable",
+    },
+    "E_LEDGER_REWRITTEN": {
+        "kind": "error",
+        "summary": "meta/memory.jsonl or meta/ledger.jsonl's working-tree content is not a byte-prefix of its committed HEAD version — an already-committed row was edited or removed instead of only ever being appended to; proves nothing about a rewrite that was itself already committed, only catches an uncommitted one",
+        "way_out": "restore the file from git (the committed HEAD blob), then re-append the corrected decision as a NEW row — the ledger never edits a row in place",
+    },
+    "W_LEDGER_UNVERIFIABLE": {
+        "kind": "warning",
+        "summary": "meta/memory.jsonl or meta/ledger.jsonl exists but the append-only byte-prefix check has no committed baseline to compare it against — the bundle has no git repository, or the file has never been committed",
+        "way_out": "commit the bundle (or this file) so a later edit can be checked against a real HEAD version; a file with no committed version yet cannot be verified, only observed",
+    },
+    "E_LEDGER_DROPPED": {
+        "kind": "error",
+        "summary": "a ledger row's optional `dropped` object is not a well-formed {reason: count} mapping — a non-string key, or a value that is negative, fractional, a string, or a nested object",
+        "way_out": "fix the offending key so dropped maps a non-empty string reason to a non-negative integer count",
+    },
+    "W_DROPS_UNEXPLAINED": {
+        "kind": "warning",
+        "summary": "a declared draft output resolves to nothing on disk (no concept file, and no directory holding at least one concept), is not named in any ledger row's merge_map (checked ledger-wide, since a later consolidation row legitimately absorbs a draft an earlier row declared), and is not accounted for by its OWN row's dropped entries (checked per row, never by another row's budget) — it vanished with no recorded reason; also raised when a row's own `outputs` field is not a list, naming the row as malformed",
+        "way_out": "record it in the SAME row's `dropped` block, or name the final that absorbed it in `merge_map`; if the row itself is reported malformed, fix its `outputs` field to be a list of draft ids",
+    },
+    "E_CHANGES_WINDOW": {
+        "kind": "error",
+        "summary": "`okfy changes` was given a --since/--until that does not "
+                   "parse as a bare date or RFC3339 UTC timestamp, or a "
+                   "--until earlier than --since",
+        "way_out": "pass a bare date (e.g. 2026-01-31, read as 00:00:00Z) or "
+                  "a full RFC3339 UTC timestamp (e.g. 2026-01-31T14:30:00Z) "
+                  "for --since/--until, with --until later than --since",
     },
     "E_DIFF_PARTIAL_LISTING": {
         "kind": "error",

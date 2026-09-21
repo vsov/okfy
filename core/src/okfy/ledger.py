@@ -31,6 +31,15 @@ E_SPAN_EMPTY_DRAFTS = "E_SPAN_EMPTY_DRAFTS"
 E_SPAN_NO_JOB = "E_SPAN_NO_JOB"
 E_SPAN_OUTPUT = "E_SPAN_OUTPUT"
 
+# DROP ACCOUNTING (v0.25, report item 2.2). The donor's costliest bug was
+# four unnamed early-exits that swallowed 12 of 12 proposals with no counter
+# anywhere. The optional `dropped` block on a ledger row is how a run says
+# what it dropped instead of dropping it silently: a plain {reason: count}
+# object in the WRITER'S OWN vocabulary — the core never interprets a reason
+# string, only counts it (see validate._check_drops_unexplained, which reads
+# these totals back to decide whether a declared output was accounted for).
+E_LEDGER_DROPPED = "E_LEDGER_DROPPED"
+
 
 def unknown_covered_outputs(spans: dict, outputs) -> list[str]:
     """Draft ids a `covered` span names that the row does not list in `outputs`.
@@ -110,6 +119,34 @@ def check_spans(spans) -> dict:
     return out
 
 
+def check_dropped(dropped) -> dict:
+    """Validate a writer's optional `dropped: {reason: count}` object and
+    return it normalised (string reason -> non-negative int count), or `{}`
+    for `None`. Same discipline as `check_spans` above: a malformed shape is
+    refused rather than reaching the ledger, naming the offending key, because
+    a `dropped` block computed from garbage would be silently COUNTED as an
+    explanation by `validate._check_drops_unexplained` — worse than no block
+    at all. Reasons are the writer's own vocabulary; this function (and the
+    validator that reads it back) never interprets one, only counts it."""
+    if dropped is None:
+        return {}
+    if not isinstance(dropped, dict):
+        raise ValueError(f"{E_LEDGER_DROPPED}: dropped must be an object "
+                         "mapping reason -> non-negative integer count, got "
+                         f"{type(dropped).__name__}")
+    out: dict[str, int] = {}
+    for key, value in dropped.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{E_LEDGER_DROPPED}: {key!r} is not a valid "
+                             "reason key — dropped keys must be non-empty strings")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{E_LEDGER_DROPPED}: {key!r} has value {value!r} "
+                             "— dropped counts must be non-negative integers, "
+                             "never negative, fractional, or another shape")
+        out[key] = value
+    return out
+
+
 def ledger_path(bundle: Bundle) -> Path:
     return bundle.root / "meta" / "ledger.jsonl"
 
@@ -160,7 +197,8 @@ def _check(row: dict) -> None:
 
 def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: str,
             outputs, validation: str, merge_map: dict | None = None,
-            job_digest: str | None = None, spans: dict | None = None) -> dict:
+            job_digest: str | None = None, spans: dict | None = None,
+            dropped: dict | None = None) -> dict:
     """Append one transition row to meta/ledger.jsonl and commit the ledger
     --no-verify. input_hashes come from the corpus manifest ('unknown' when the
     path is absent); commit captures the current bundle HEAD (the artifact commit
@@ -207,6 +245,12 @@ def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: s
                 "the two halves of one row disagree. Add them to outputs if they "
                 "were written, or move the span to reviewed_empty if nothing was")
         row["spans"] = checked
+    if dropped is not None:
+        # Appended last, same reasoning as spans/merge_map/job_digest: a row
+        # written without a dropped block must stay byte-identical to what
+        # pre-v0.25 wrote, or every already-accepted bundle's ledger moves
+        # under it. Refuses before anything is written — see check_dropped.
+        row["dropped"] = check_dropped(dropped)
 
     path = ledger_path(bundle)
     path.parent.mkdir(parents=True, exist_ok=True)

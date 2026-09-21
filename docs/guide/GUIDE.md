@@ -316,6 +316,8 @@ Deliberately, the default is a *warning*, not an error. The check arrived after 
 
 Anchors got the same treatment (v0.6c). A source may cite more than a file — `foo.h#L20-L40`, `guide.md#memory-ownership` — and for most of OKFy's life the fragment was stripped before checking, so the citation proved only that the file existed. Now, whenever the corpus tree is locally readable, a line-range anchor must fall inside the file and a heading anchor on markdown must slug-match a real heading (`W_BAD_ANCHOR`, escalated by the same `--strict-sources`). A non-line fragment on a non-markdown file has no checkable meaning, so it stays a warning (`W_ANCHOR_UNCHECKED`) even under strict — a code or binary corpus must never fail falsely. Provenance stays shallow; the citation just stops being decorative.
 
+A resolvable anchor still only proves a *file and a line range* exist — not that the words an agent claims to have read are actually there. v0.25 adds one more, optional layer: a concept may carry `source_quotes:`, a mapping from one of its `sources:` ref strings to the literal text the agent copied from that span (`quote:` on a proposal's `evidence` works the same way, carried alongside `kind`/`ref`, though evidence refs are not all corpus-anchored and an unresolvable one is simply carried, not checked). `sources:` itself never changes shape — the quote is a separate, sibling field, precisely so that every existing reader of `sources:` (a dozen call sites across the core) stays untouched by a bundle that never uses it. When the corpus is locally readable and the anchor resolves, `okfy validate` normalizes both the quote and the cited span — Unicode NFKC, then line-wrap dehyphenation (a hyphen immediately followed by a newline, joined while the newline still exists — an early defect had this running *after* whitespace collapse, which made it a dead rule; the order below is the corrected one), whitespace-run collapse, a strip, typographic quote/dash folding to ASCII, and soft-hyphen removal, seven rules and no others, deliberately excluding case folding (a capitalized defined term is a different thing from the common noun) and anything fuzzy — and checks the quote is a substring of the span. This is what lets an agent copy a word as a reader actually would — continuously, across a hyphenated line wrap — and still match a span that stores it broken across two lines. A mismatch is `W_QUOTE_NOT_IN_SPAN`, never escalated by any `--strict-*` flag: the field is new, and nothing here retroactively fails a bundle for a claim it never made. A quote whose span cannot even be resolved is `W_BAD_SOURCE`/`W_BAD_ANCHOR`/`W_ANCHOR_UNCHECKED`'s finding, not this one. The field is optional forever — a concept without it validates exactly as it did before this section existed.
+
 ### The corpus that was never read
 
 Everything above checks one direction: every path a concept cites is real. That check stays perfectly green when an entire segment produces nothing at all — the concepts that *do* exist cite files that *do* exist, and the files nobody read are invisible, because nothing in the bundle points at them. A bundle can look fully provenanced and still have skipped a chapter.
@@ -371,6 +373,8 @@ What the core **cannot** check is whether a worker read anything. A `reviewed_em
 
 The payoff is where the two halves **disagree**. A span declared `covered` whose file appears in `coverage.uncited` is a contradiction neither check finds alone — the ledger has no idea what the concepts cite, and the coverage check has no idea what was claimed. `W_SPAN_COVERAGE_CONTRADICTION` reports it, once per (segment, path) no matter how many spans the file was split into. It is a warning at every strictness, because the benign reading is common: a worker may have folded that span's content into a concept citing a sibling path. It gives a reader something to judge, not a verdict to obey.
 
+**This is the house convention for every contradiction-shaped finding, not just this one** — stated for code authors in `core/src/okfy/codes.py`'s module docstring: a finding states what is inconsistent, names two to four likely upstream causes, and points at the existing command that repairs each, because the core can see that the bundle disagrees with itself but never which side is wrong. `E_CHANGES_WINDOW`, `E_SUPERSEDES_CYCLE`, `W_DISTINCT_ALIAS_OVERLAP`, `E_LEDGER_REWRITTEN`, `W_LEDGER_UNVERIFIABLE`, `E_LEDGER_DROPPED`, `W_DROPS_UNEXPLAINED` and `W_QUOTE_NOT_IN_SPAN` — every code v0.25 added — were audited against it. Most already conformed; a shape violation with exactly one deterministic cause (a malformed `--since`, YAML that fails to parse) states that cause and its one repair rather than inventing three more that were never there.
+
 ### Proving a PDF citation: `okfy sourcemap`
 
 Raw documents cannot be handed to a worker, so they are converted to Markdown and the corpus holds the Markdown. That conversion is normally where provenance dies: a concept cites `handbook.md#L811-L824` and nothing connects those lines to page 47 of the PDF they came from.
@@ -394,6 +398,8 @@ $ okfy ledger list ./bundle --run 2026-07-08T12-00
 ```
 
 A row records what went in (paths *and* content hashes, resolved from the corpus manifest), what came out, which prompt version did the work, the digest of the worker's **job artifact** (before each worker starts, `okfy job` freezes its exact contract — inputs with `lines`/`chars` spans and hashes, corpus snapshot, archetype — into `meta/jobs/<segment>.json`, and copies the exact prompt text into the bundle as `meta/prompts/<sha256>.txt`: a SHA alone proves the text existed, the copy preserves what it said. The digest is computed by the core from the frozen artifact — `ledger add --job <segment>` never accepts a hand-passed digest — and `okfy validate --strict-provenance` cross-checks the whole chain: artifact digests recompute, prompt copies match their hashes, ledger rows match their artifacts and cite no inputs outside them), and the commit that landed it. Consolidation rows additionally carry a **merge map** — `draft → final` — so you can trace any final concept back through the merge to the worker drafts and from there to the exact source files and their hashes at extraction time. The ledger is deliberately *shallow*: one row per artifact transition, not per claim or per sentence. Segment-level provenance answers the questions that actually come up ("what fed this concept?", "which prompt version was this batch?"); claim-level provenance would cost an order of magnitude more machinery, and it can be added later *if real failures ever show segment-level is not enough* — not before.
+
+**Proving the ledgers were appended to, not rewritten.** `meta/memory.jsonl` and `meta/ledger.jsonl` are append-only *by contract* — nothing enforced that until now. `okfy validate` reads each file's committed content at HEAD (one `git show HEAD:<path>` per file, never a history walk) and checks it is a **byte-prefix** of the working-tree file: an append only ever extends the file, so the prefix always holds, and an edit to an already-committed row, or a deletion of a row or the whole file, breaks it. A break is reported as **`E_LEDGER_REWRITTEN`**, naming the file, the first byte offset that differs, the row that offset falls in, and the repair — restore the file from git, then re-append the corrected decision as a *new* row, because neither ledger ever edits a row in place. When the file cannot be checked against a committed baseline at all — the bundle has no git repository of its own, or the file exists in the working tree but has never been committed — that is reported too, as **`W_LEDGER_UNVERIFIABLE`**, naming which of the two it is and the same repair either way — commit the bundle (or just this file) so a later edit has a real HEAD version to be checked against; a file that exists nowhere makes no append-only claim and is reported as nothing at all. **What this does not prove:** it compares the working tree against HEAD only, so a rewrite that was itself committed leaves no trace here — it catches an *uncommitted* edit, which is the case that actually happens.
 
 ### Segment status: a closed vocabulary
 
@@ -473,6 +479,27 @@ Five recovery states, and the distinction between them is the point:
 | `git-error` | the bundle is not a usable git repository |
 
 The last three never report "no findings". They populate an `unverifiable` list instead, and the human output prints `N group(s) NOT AUDITED` where a clean run prints `unverifiable: 0`. This is not decoration: an earlier defect elsewhere in the codebase had a failed `git diff` collapse into an empty list that read as "nothing changed", and a tool that cannot distinguish *nothing was lost* from *nothing was checked* is worse than no tool. Relatedly, passing `--ref` explicitly overrides live drafts — a caller who names a ref means that ref, and quietly auditing something else would be the same class of surprise.
+
+### Saying what a run dropped, instead of dropping it silently
+
+A donor system this project measured against had its costliest bug in four unnamed early-exits that swallowed 12 of 12 proposals with no counter anywhere. OKFy's own ledger row recorded what a pass produced, but nothing recorded what it *dropped* — a draft could be declared an output and then simply never show up again, with no way to tell "consolidation merged it" from "it fell on the floor".
+
+The ledger row schema (`core/src/okfy/ledger.py`) grows one optional field: `dropped: {reason: count}` — a plain object mapping a reason string to a non-negative integer count.
+
+```
+$ okfy ledger add ./bundle --run <run> --segment segment-04 --inputs ... \
+    --outputs drafts/segment-04/a,drafts/segment-04/b --validation ok
+```
+
+`dropped` is not passed on the CLI today; it is written by callers of the Python `add_row(..., dropped={...})` API. The reasons are the **writer's own vocabulary** — `"low-quality"`, `"duplicate-of-sibling"`, `"out-of-scope"`, whatever the pipeline that ran the pass calls its own drop classes — and the core never interprets a reason string, only counts it. A malformed shape (a non-string key; a value that is negative, fractional, a string, or a nested object) is refused with `E_LEDGER_DROPPED`, naming the offending key, before anything is written. A row from before this release, carrying no `dropped` key at all, still validates unchanged.
+
+`okfy validate` closes the loop with `W_DROPS_UNEXPLAINED`. A **declared output** is a draft id some ledger row's `outputs` claims to have written. It is accounted for if it still **resolves to something on disk** — a concept file at that exact id, or a directory at that path that still exists and holds at least one concept — or if some row's `merge_map` names the final that absorbed it; `merge_map` is checked **ledger-wide** (unioned across every row) because a consolidation row's `merge_map` routinely lives on a later row than the one that first declared the draft. What is left after that is the *unaccounted* count for that row; each row's own `dropped` total (summed by reason, never resolved to specific ids — a `dropped` block only ever counts, it does not say *which* draft each count covers) is then subtracted from **that same row's own** unaccounted count, never from another row's — a large `dropped` recorded for one segment must never mask a different segment's genuinely vanished drafts. Whatever gap remains, summed across every row that still has one, genuinely vanished with no recorded reason. A row whose `outputs` is not a list at all (a hand-edited or externally produced row) is reported as malformed rather than reasoned about character by character.
+
+The check's formula was **not** the phase's original one, and went through two corrections before it matched reality. First, a read-only sweep of real bundles' ledger rows tried "outputs fewer than inputs" and killed it before anything shipped: `inputs` are corpus files and `outputs` are concepts, and a segment legitimately turns many files into few concepts (`rayforce-api-okf`: 74 inputs, 9 outputs, ordinary compilation) or one file into many (`sec-cftc-sfp-okf`: 387 inputs, 671 outputs) — the formula fired on every healthy bundle. Second, the same sweep found a **granularity trap** — `rayforce-api-okf` declares some outputs as whole directories, not concept ids — and the first fix for it was a PATH-PREFIX rule: anything shaped like `drafts/<segment>` was exempted from drop accounting outright. Running that rule against `rayforce-api-okf` by path proved it backwards: the bundle's nine declared outputs are five CATEGORY directories (`contracts`, `operations`, `types`, `topics`, `recipes` — 117 concepts between them, every one still present) plus four `drafts/segment-01..04` rows whose directories no longer exist at all, consolidated into the category directories with no `merge_map` ever recording where they went. A prefix rule silences the five directories sitting right there on disk and reports the four that are the actual unrecorded drop — exactly backwards, because it answers "what does the path look like" instead of "does this exist". The check now resolves every declared output against the filesystem directly (`_output_exists`), for either granularity. Measured on the reference bundles: `sec-cftc-sfp-okf` and `vrp-research-okf` account for every draft they declared (zero unaccounted); `rayforce-py-okf` does not — 71 of its 118 declared drafts have neither a final concept nor a `merge_map` entry; `desk-risk-limits-okf` has 11 unaccounted; `rayforce-api-okf` has 4 — the four vanished draft directories, not the five present category directories.
+
+Like every other check in this layer, `W_DROPS_UNEXPLAINED` never blocks: `okfy validate`'s exit status is unchanged by its presence, at every strictness. The message names the gap, a couple of example draft ids, and the way out — record them in a `dropped` block, or name the final that absorbed them in `merge_map`.
+
+Per-reason totals are surfaced where ledger state is already read back: `okfy ledger list --json` adds a `dropped_totals` key, summed across every listed row's `dropped` block, alongside the rows themselves.
 
 ### Recording who ran the job: execution identity
 
@@ -912,6 +939,19 @@ next agent instead of quietly vanishing.
     okfy propose <bundle> --target glossary/old-term --action supersede \
         --new-id glossary/new-term --from successor.md --as claude-code/1.0
 
+**`E_SUPERSEDES_CYCLE`: a chain that never lands on a current concept.**
+Reciprocity, checked pairwise, is not enough — a ring A supersedes B
+supersedes C supersedes A satisfies every pairwise reciprocity check and
+still means there is no member the chain ever lets you call "the latest
+one". `okfy validate` walks the `supersedes`/`superseded_by` graph for
+cycles and reports ONE finding per ring (never one per member), naming the
+full chain in order, attached to the ring's lexicographically smallest id so
+the report always points at the same path regardless of which member was
+read first. A self-loop (a concept naming itself as its own successor) is a
+cycle of one and is reported the same way. The way out is the same one
+`E_SUPERSEDE_DANGLING` names: `okfy refine` on any one link in the ring
+breaks it.
+
 **Replacing an open proposal: `--supersedes <proposal-id>`.** Any action can
 carry `--supersedes <old-proposal-id>` to replace one open proposal with this
 new one, instead of leaving both open — but only when the old proposal has
@@ -1060,6 +1100,18 @@ instead; `--distinct-from <id>="reason"` (repeatable) records why it is a
 different thing and silences the warning for that id. `okfy review list`
 shows `near` and `distinct_from` per proposal.
 
+**`W_DISTINCT_ALIAS_OVERLAP`: a distinct-from claim retrieval would not
+honour.** Declaring `--distinct-from` silences `W_PROPOSAL_NEAR`, but it does
+not change what BM25 actually sees. When the proposed concept's title/alias
+tokens and the declared-distinct concept's overlap at 0.6 Jaccard or above —
+the same cutoff `okfy`'s own draft-clustering (`cluster_drafts`) already uses
+to decide two drafts are the same thing — `okfy propose` adds
+`W_DISTINCT_ALIAS_OVERLAP` to the response, naming the measured overlap and
+the cutoff. Still never a refusal: the proposal files either way. The way
+out is the same choice the near-duplicate warning offers — drop the
+`--distinct-from` claim if they really are the same thing, or rename/narrow
+the aliases (`okfy refine`) so retrieval can actually tell them apart.
+
 **Evidence-ref resolution, a label never a refusal.** A typed `--evidence`
 ref — `eval:<run_id>`, `concept:<id>`, `proposal:<id>`, `log:<date>` — is
 checked inside the bundle and reported as `resolved` or `not-found`; anything
@@ -1146,6 +1198,51 @@ released state, and the count restarts from what `meta/package.json` recorded.
 This is a profile, stated and visible, not an exception: nothing is exempted,
 no gate is relaxed, and a working-memory bundle can never pass `release-check`
 by accident.
+
+### Asking what changed: `okfy changes`
+
+`okfy changes <bundle> [--since <date>] [--until <date>] [--target <id>]
+[--event <kind>] [--action <action>] [--actor <name>] [--text]` is a
+read-only window query over `meta/memory.jsonl` — every propose, accept,
+reject and `superseded` row the ledger holds, filtered by who, what, and
+when. JSON is the default output: `{"bundle", "since", "until", "count",
+"window_applies_to": "event time", "events": [...]}`, rows kept exactly as
+the ledger wrote them, in file order; `--text` prints one line per event.
+`--since`/`--until` accept a bare date (`2026-01-31`, read as `00:00:00Z`)
+or a full RFC3339 UTC timestamp (`2026-01-31T14:30:00Z`); the window is
+half-open, `[--since, --until)` — an event whose `at` equals `--until` is
+excluded, one whose `at` is a second earlier is included. `--target`,
+`--event` (repeatable — one of `propose`/`accept`/`reject`/`superseded`,
+the ledger's own event kind), `--action` (repeatable — one of
+`create`/`update`/`delete`/`supersede`/`flag`/`gap`, the underlying
+proposal's action) and `--actor` all combine with the window, and with each
+other, as AND. **`--event` and `--action` filter two different fields on
+the same row, not one field under two names** — an `accept` event can carry
+a `delete` action, and `--event accept --action delete` finds exactly that
+combination, while `--event accept --action update` finds none. A malformed
+date, or `--until` earlier than `--since`, is refused as
+`E_CHANGES_WINDOW`, naming both accepted shapes; an empty window is not an
+error — `count: 0`, exit 0.
+
+**Every event is judged by its own `at`, never by a related event's.** A
+`propose` row filed before the window whose `accept` lands inside it
+contributes the `accept` row, once, and never the `propose` row — reading
+"proposed in the window" as "settled in the window" is exactly the mistake
+this command refuses to make. Ask "what changed last week" and you get the
+week's accepts, rejects and still-open proposes, each dated by when THAT
+row itself happened, not by when its proposal was first filed.
+
+**No time words in the core.** `--since`/`--until` only ever accept a literal
+date or timestamp (`parse_window_bound`, `core/src/okfy/memory.py`) — never
+"last week" itself. This is deliberate and permanent, not a missing feature:
+the core's only job on a date is to check it is real and refuse it
+otherwise (`E_CHANGES_WINDOW` names both accepted shapes); resolving what
+"last week" means is the caller's job, every time. `okf-consumer/SKILL.md`
+states the same rule for an agent proposing a date-bearing field
+(`review_due`, `stale_since`): write the literal date, don't describe it.
+`core/tests/test_no_time_words.py` backs this with a tripwire over core
+module logic — preventive, since OKFy has no relative-date parsing to
+remove today, only a rule against ever adding it.
 
 ### A review date is not staleness
 

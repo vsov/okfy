@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "okfy"
-version = "0.24.0"
+version = "0.25.0"
 source = { editable = "../../core" }
 dependencies = [
     { name = "pyyaml" },
@@ -39,7 +39,7 @@ dev = [
 
 [[package]]
 name = "okfy-normalize"
-version = "0.24.0"
+version = "0.25.0"
 source = { editable = "." }
 dependencies = [
     { name = "okfy" },

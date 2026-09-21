@@ -40,6 +40,7 @@ MUTATES: dict[str, bool] = {
     "links": False,
     "sample": False,
     "diff": False,
+    "changes": False,         # v0.25: read-only window query over meta/memory.jsonl
     "snapshot": True,         # writes meta/corpus-manifest.json, meta/source-pins.json, meta/corpus.md
     "repair-links": True,     # default apply=True; --dry-run does not write, but the leaf's intent is a write
     "package": True,

@@ -170,7 +170,19 @@ def cmd_ledger(a) -> int:
                       job_digest=jd, spans=spans)
         _print(row)
     else:
-        for r in read_rows(b, run_id=a.run):
+        rows = read_rows(b, run_id=a.run)
+        if getattr(a, "json", False):
+            # Per-reason totals (v0.25, report item 2.2): summed across every
+            # listed row's `dropped` block — the writer's own vocabulary, the
+            # core only counts. No new command: this is the existing
+            # ledger-state-reporting command's JSON, per the phase spec.
+            totals: dict[str, int] = {}
+            for r in rows:
+                for reason, count in (r.get("dropped") or {}).items():
+                    totals[reason] = totals.get(reason, 0) + count
+            _print({"rows": rows, "dropped_totals": totals})
+            return 0
+        for r in rows:
             mm = r.get("merge_map")
             extra = f" merge={len(mm)}" if mm else ""
             sp = r.get("spans")
@@ -178,6 +190,9 @@ def cmd_ledger(a) -> int:
                 extra += (f" spans=c{len(sp.get('covered') or {})}"
                           f"/e{len(sp.get('reviewed_empty') or {})}"
                           f"/d{len(sp.get('dropped') or {})}")
+            dr = r.get("dropped")
+            if dr:
+                extra += f" dropped={sum(dr.values())}"
             print(f"{r['run_id']} {r['segment']} [{r['validation']}] "
                   f"{r['prompt_version']} in={len(r['inputs'])} "
                   f"out={len(r['outputs'])} @{r['commit'][:7]}{extra}")

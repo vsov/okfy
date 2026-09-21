@@ -67,6 +67,15 @@ Read what the project already knows before you act on it.
 - If the bundle holds a decision that conflicts with what you were asked to
   do, raise the conflict before acting — do not quietly follow either side.
 
+**Write dates, don't describe them.** Any date field you propose
+(`review_due`, `stale_since`, a `--evidence` ref, a date inside a concept's
+body) must be a literal ISO date (`2026-11-03`), never a relative phrase —
+"next quarter", "last week", "since the merger". You are the one who knows
+what "next quarter" means right now; resolve it to a real date yourself
+before writing it down. The core enforces this from its side by refusing to
+parse relative language at all — it only ever checks that a date you gave it
+is a real one, never interprets what you meant.
+
 ## After the task
 
 Most of what happened in a task is not worth remembering. Before proposing,

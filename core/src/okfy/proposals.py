@@ -15,7 +15,7 @@ from okfy import frontmatter, memory
 from okfy.actor import check_actor, check_owner_actor, owner_actor, utc_now
 from okfy.bm25 import tokenize
 from okfy.bundle import DRAFT_DIR, PROPOSAL_DIR, RESERVED_DIRS, SKIP_DIRS, Bundle, Concept
-from okfy.cluster import _jaccard
+from okfy.cluster import _alias_keys, _jaccard, _title_key
 from okfy.gitenv import run_git
 from okfy.package import append_log
 from okfy.sourcemap import cited_span
@@ -45,6 +45,7 @@ E_REJECTED = "E_PROPOSAL_REJECTED"
 E_DUPLICATE = "E_PROPOSAL_DUPLICATE"
 W_UNBASED = "W_PROPOSAL_UNBASED"
 W_NEAR = "W_PROPOSAL_NEAR"
+W_DISTINCT_OVERLAP = "W_DISTINCT_ALIAS_OVERLAP"
 
 # v0.24 lifecycle actions
 E_DELETE_EXPECTED = "E_DELETE_EXPECTED"
@@ -90,6 +91,16 @@ E_PROPOSAL_OBSERVED_FORGED = "E_PROPOSAL_OBSERVED_FORGED"
 _TYPED_REF_RE = re.compile(r"^(eval|concept|proposal|log):(.+)$")
 
 NEAR_THRESHOLD = 0.6
+
+# v0.25: the declared-distinct/alias-overlap cutoff, fixed BEFORE the
+# real-bundle sweep that measures how many existing `distinct_from` claims
+# would fire ran. 0.6 is not a fresh
+# choice — it is the number `cluster_drafts` (okfy.cluster) already uses to
+# decide that two DRAFT concepts are near-duplicates of each other. A
+# `--distinct-from` pair scoring at or above it is exactly the pair the
+# clusterer would merge; picking any other cutoff here would leave the core
+# holding two different opinions about sameness at once.
+DISTINCT_OVERLAP_THRESHOLD = 0.6
 
 
 def _file_sha256(path: Path) -> str:
@@ -186,14 +197,26 @@ def _flag_reject_hashes(flag_type: str | None, target: str | None,
 
 
 def check_evidence(evidence) -> dict | None:
+    """`{kind, ref}`, and now optionally a third key: `quote`, the literal
+    words the agent read at `ref` — the same optional field `sources:`
+    carries via `source_quotes:` (`okfy.validate._check_quotes`), offered
+    here too since evidence is itself a citation. `quote` is CARRIED, not
+    independently verified at propose time: `ref` here is a typed ref
+    (`eval:`/`concept:`/`proposal:`/`log:`) or an untyped id/URL/commit, not
+    necessarily a corpus-relative `path#L10-L20` `cited_span` can resolve —
+    `ref_state` already only checks the four typed prefixes and calls
+    everything else `unchecked`, honestly, rather than guessing. A quote
+    without a ref to check it against is unconditionally rejected, the same
+    reasoning the CLI `--evidence <kind>=<ref>` flag has no syntax for."""
     if evidence is None:
         return None
     how = "pass it as `okfy propose --evidence <kind>=<ref>`"
     if not isinstance(evidence, dict):
         raise ValueError(f"{E_EVIDENCE}: evidence must be a mapping with kind and ref — {how}")
-    unknown = sorted(set(evidence) - {"kind", "ref"})
+    unknown = sorted(set(evidence) - {"kind", "ref", "quote"})
     if unknown:
-        raise ValueError(f"{E_EVIDENCE}: unknown evidence key(s) {unknown}, only kind and ref — {how}")
+        raise ValueError(f"{E_EVIDENCE}: unknown evidence key(s) {unknown}, only "
+                         f"kind, ref and quote — {how}")
     kind = evidence.get("kind")
     if kind not in EVIDENCE_KINDS:
         raise ValueError(f"{E_EVIDENCE}: kind {kind!r} is not one of "
@@ -202,7 +225,17 @@ def check_evidence(evidence) -> dict | None:
     if kind != "agent-inference" and not ref:
         raise ValueError(f"{E_EVIDENCE}: {kind} evidence needs a ref (a run id, "
                          f"commit, decision or URL) — `--evidence {kind}=<ref>`")
-    return {"kind": kind, "ref": ref} if ref else {"kind": kind}
+    quote = evidence.get("quote")
+    if quote is not None and not isinstance(quote, str):
+        raise ValueError(f"{E_EVIDENCE}: quote must be a string — {how}")
+    quote = quote.strip() if isinstance(quote, str) else ""
+    if quote and not ref:
+        raise ValueError(f"{E_EVIDENCE}: a quote needs a ref to check it "
+                         f"against — {how}")
+    out = {"kind": kind, "ref": ref} if ref else {"kind": kind}
+    if quote:
+        out["quote"] = quote
+    return out
 
 
 def _validate_patch(patch) -> list[dict]:
@@ -949,6 +982,68 @@ def near_warning(near_ids: list[str], distinct_from: dict[str, str] | None = Non
     ids = ", ".join(near_ids)
     return (f'{W_NEAR}: close to {ids} — if it is the same thing use --extends '
             '<id>; if not, say why with --distinct-from <id>="reason"')
+
+
+def distinct_overlap_warnings(bundle: Bundle, meta: dict,
+                              distinct_from: dict[str, str] | None) -> list[str]:
+    """W_DISTINCT_ALIAS_OVERLAP: one warning per `--distinct-from <id>="..."`
+    claim whose target still looks like the proposed concept once title and
+    aliases are compared the way `cluster.py` compares them — title-key
+    against title-key, and the WHOLE SET of alias-keys against the other's
+    whole set of alias-keys (each alias kept as one atomic key, never broken
+    apart into pooled tokens), taking the higher of the two jaccard scores.
+    `--distinct-from` suppresses W_PROPOSAL_NEAR by asserting two concepts
+    are different things; when the overlap says retrieval would conflate
+    them anyway, that suppression is hiding a real collision rather than
+    resolving one, and the owner should see that even though the
+    near-duplicate warning itself stayed silent.
+
+    An earlier version pooled title AND alias tokens into one bag before
+    scoring it (v0.25 first draft). `cluster.py`'s own module docstring
+    documents MEASURING that exact pooling on real bundles and rejecting it:
+    on the 363-, 304- and 117-concept bundles, "any shared alias" was
+    overwhelmingly false — 337 pairs in one bundle bridged by nothing more
+    than a shared category word, 311 in another by one cited authority
+    string. A single shared category/authority alias between two otherwise
+    unrelated concepts pooled straight into the same false-positive shape
+    here: a category alias sitting in an otherwise small token bag was
+    enough to push a pooled jaccard score over the cutoff for two concepts
+    that share nothing else. Comparing whole alias-KEYS (one concept's set
+    of alias-keys against the other's, same as comparing whole title-keys)
+    instead of pooled tokens means one alias in common among several does
+    not, by itself, decide the score — the same discipline `cluster.py`
+    already applies by keeping aliases out of its own title bag.
+
+    Never a refusal — same shape as `near_warning`, computed the same way at
+    propose time from the caller's own (meta, distinct_from), not from what
+    ended up persisted on the proposal (which only stores `distinct_from`
+    when `near` was non-empty for a create/supersede — a narrower condition
+    than "this specific id overlaps enough to matter").
+
+    Reuses cluster.py's own machinery (`_jaccard`, `_title_key`,
+    `_alias_keys`) rather than a new tokenizer or a new similarity measure."""
+    if not distinct_from:
+        return []
+    mine_title = _title_key(meta)
+    mine_aliases = _alias_keys(meta)
+    out = []
+    for did in sorted(distinct_from):
+        target = bundle.get(did)
+        if target is None:
+            continue  # _gate already refuses an unknown --distinct-from id
+        theirs_title = _title_key(target.meta)
+        theirs_aliases = _alias_keys(target.meta)
+        overlap = max(_jaccard(mine_title, theirs_title),
+                      _jaccard(mine_aliases, theirs_aliases))
+        if overlap >= DISTINCT_OVERLAP_THRESHOLD:
+            out.append(
+                f"{W_DISTINCT_OVERLAP}: declared distinct from {did}, but "
+                f"title/alias tokens overlap {overlap:.2f} (cutoff "
+                f"{DISTINCT_OVERLAP_THRESHOLD}) — retrieval would conflate "
+                "them despite the claim; drop the --distinct-from claim if "
+                "they really are the same thing, or rename/narrow the "
+                "aliases (`okfy refine`) so retrieval can tell them apart")
+    return out
 
 
 def ref_state(bundle: Bundle, ref: str) -> str:

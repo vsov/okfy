@@ -22,7 +22,7 @@ from okfy_normalize.backends import (BackendUnavailable, check_options,
                                      get_backend,
                                      options_digest)
 
-__version__ = "0.24.0"
+__version__ = "0.25.0"
 SOURCE_MAP = "source-map.jsonl"
 
 __all__ = ["BackendUnavailable", "normalize_tree", "__version__", "SOURCE_MAP"]

@@ -160,15 +160,19 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_collisions(concepts, r)
     _check_stale(concepts, r)
     _check_supersede(concepts, r)
+    _check_supersede_cycles(concepts, r)
     _check_verified(concepts, r)
     _check_memory_log(bundle, r)
+    _check_ledger_append_only(bundle, r)
     _check_review_due(concepts, r)
     _check_applies_to(concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
     _check_coverage(bundle, concepts, r)
     _check_span_coverage(bundle, r)
     _check_span_contradiction(bundle, r)  # needs both halves above
+    _check_drops_unexplained(bundle, r)
     _check_anchors(bundle, concepts, r, strict=strict_sources)
+    _check_quotes(bundle, concepts, r)
     _check_lexicon(concepts, r)
     linked_ids = _check_links(bundle, concepts, r)
     _check_orphans(bundle, concepts, linked_ids, r, strict=strict_package)
@@ -631,6 +635,84 @@ def _check_supersede(concepts, r: Report):
                       "link or remove it via `okfy refine`")
 
 
+def _check_supersede_cycles(concepts, r: Report):
+    """Cycle detection over the `supersedes`/`superseded_by` graph — a
+    concern `_check_supersede` above does not cover. That function checks
+    each PAIR for reciprocity only: does `superseded_by` point at a concept
+    whose own `supersedes` points back. A ring A -> B -> C -> A satisfies
+    every one of those pairwise checks (each link's reciprocal exists and
+    agrees) and still means no concept in the ring is current — there is no
+    member the chain ever lets an agent call "the latest one".
+
+    ONE finding per cycle, never one per member: a concept sitting in a
+    3-ring is not three separate problems, it is one topology, reported once.
+
+    The finding's IDENTITY — the key two runs must agree on for it to count
+    as "the same finding" — is the SORTED TUPLE of the ring's ids, never the
+    order `concepts` happened to be read or walked in. This is not a style
+    choice: the donor project's migrations 0052-0054 exist ONLY because a
+    hash-map traversal order once changed which id a cycle's key was built
+    from, which silently orphaned the human accept/reject decisions that had
+    been recorded against the OLD key — a dict/list iteration order must
+    never leak into a finding's identity. The finding is attached to the
+    ring's lexicographically smallest id, so the report has a stable path to
+    point at regardless of which member the traversal happened to enter the
+    ring through.
+
+    A self-loop — `superseded_by` naming its own id, reciprocated by
+    `supersedes` naming its own id right back — is a cycle of one member,
+    reported the same way: it is exactly as true that "no concept here is
+    current" as it is for a longer ring.
+
+    Traversal: `superseded_by` gives each concept at most one outgoing edge
+    (old -> new), so this is a functional graph — three-colour DFS (white/
+    grey/black) finds every cycle in one pass over `by_id`, scanned in
+    SORTED id order so which node a walk starts from can never vary with
+    `concepts`' own order (and so the SAME ring is never rediscovered twice
+    under a different rotation). Dangling edges — pointing at an id that does
+    not exist, which `_check_supersede` above already flags — are dead ends
+    here, not cycles."""
+    by_id = {c.id: c for c in concepts}
+
+    def next_id(cid: str) -> str | None:
+        target = by_id[cid].meta.get("superseded_by")
+        if target is None:
+            return None
+        target = str(target)
+        return target if target in by_id else None
+
+    WHITE, GREY, BLACK = 0, 1, 2
+    color: dict[str, int] = {}
+    seen_rings: set[tuple[str, ...]] = set()
+    for start in sorted(by_id):
+        if color.get(start, WHITE) != WHITE:
+            continue
+        path: list[str] = []
+        cur = start
+        while cur is not None and color.get(cur, WHITE) != BLACK:
+            if color.get(cur, WHITE) == GREY:
+                idx = path.index(cur)
+                ring = path[idx:]
+                key = tuple(sorted(ring))
+                if key not in seen_rings:
+                    seen_rings.add(key)
+                    anchor = min(ring)
+                    i = ring.index(anchor)
+                    ordered = ring[i:] + ring[:i]
+                    chain = " -> ".join([*ordered, ordered[0]])
+                    r.add("error", "E_SUPERSEDES_CYCLE", anchor,
+                          f"supersedes cycle: {chain} — no concept in this "
+                          "ring is current; `okfy refine` on any one link "
+                          "(drop or repoint one supersedes/superseded_by "
+                          "pair) breaks it")
+                break
+            color[cur] = GREY
+            path.append(cur)
+            cur = next_id(cur)
+        for n in path:
+            color[n] = BLACK
+
+
 def _check_applies_to(concepts, r: Report):
     """`applies_to` (v0.24, personal memory, ADR-0015) is an optional list of
     project keys — or `*` — naming which workspace(s) may see this concept
@@ -711,6 +793,125 @@ def _check_memory_log(bundle: Bundle, r: Report):
         r.add("warning", "W_MEMORY_LINE", memory.MEMORY_FILE,
               problem.removeprefix(f"{memory.E_MEMORY_LINE}: ")
               + " — `okfy propose` refuses until it is fixed")
+
+
+def _check_ledger_append_only(bundle: Bundle, r: Report):
+    """meta/memory.jsonl (okfy.memory) and meta/ledger.jsonl (okfy.ledger) are
+    append-only BY CONTRACT and nothing enforced it. The check: the file's
+    committed content at HEAD must be a byte-prefix of the working-tree file.
+    An append only ever extends the file, so the prefix always holds; an edit
+    to an already-committed row, or a deletion (of a row, or of the whole
+    file), breaks it and is reported as E_LEDGER_REWRITTEN.
+
+    HONESTY LABEL: this proves nothing about a rewrite that was itself
+    committed — it only ever compares the working tree against HEAD, so a
+    rewrite laundered through its own commit is invisible to it. It catches
+    an UNCOMMITTED edit, which is the case that actually happens (a hand
+    edit or an agent touching an already-written row before the next
+    commit); see the finding text below and GUIDE.md/GUIDE.ru.md for the
+    same wording.
+
+    Both files are checked and reported separately. When the file exists in
+    the working tree but cannot be verified against a committed baseline —
+    no git repository at all, or a repository whose HEAD has no version of
+    this file yet — that is reported too, as W_LEDGER_UNVERIFIABLE, at the
+    same level a real finding would be: an unverifiable ledger is not a
+    verified one, the same call `_check_injection` above already makes for a
+    file it could not scan. A file that exists NOWHERE (no committed
+    version, no working-tree file) is the ONE case reported as nothing at
+    all — there is no append-only claim to make about a file that is not
+    there, and whether it should exist is another check's business (see
+    `_check_one_ledger_append_only` below); the asymmetry is deliberate, not
+    an oversight. A file that IS committed but has since been deleted
+    entirely from the working tree is neither of those — it has a real
+    baseline to compare against, so it falls through to the ordinary
+    byte-prefix check below and reports E_LEDGER_REWRITTEN, the limit case
+    of "a row was deleted".
+
+    Reads exactly one committed blob per file (`git show HEAD:<path>`), never
+    a walk of history."""
+    from okfy import ledger, memory
+    for relpath in (memory.MEMORY_FILE, ledger.LEDGER):
+        _check_one_ledger_append_only(bundle, relpath, r)
+
+
+def _check_one_ledger_append_only(bundle: Bundle, relpath: str, r: Report):
+    from okfy.gitenv import run_git
+    wt_path = bundle.root / relpath
+    has_repo = (bundle.root / ".git").exists()
+    committed = None  # bytes of the committed HEAD blob, or None if there isn't one
+    if has_repo:
+        shown = run_git(bundle.root, "show", f"HEAD:{relpath}", capture_output=True)
+        if shown.returncode == 0:
+            committed = shown.stdout  # capture_output without text=True: bytes
+    has_working = wt_path.is_file()
+
+    if committed is None and not has_working:
+        # Nothing to verify and nothing to be silent about: no committed
+        # version AND no working-tree file — there is no append-only claim
+        # to make about a file that is not there at all. Whether the file
+        # OUGHT to exist is a different check's business.
+        return
+
+    if committed is None:
+        # A working-tree file exists but there is nothing committed yet to
+        # compare it against — reported at the same level a real finding
+        # would be (a registered warning), never silently passed.
+        if not has_repo:
+            r.add("warning", "W_LEDGER_UNVERIFIABLE", relpath,
+                  f"{relpath}: append-only cannot be verified — {bundle.root} "
+                  "is not a git repository, so there is no committed baseline "
+                  "to compare the working tree against; commit the bundle so "
+                  "a later edit can be checked against a real HEAD version — "
+                  "until then this file is observed, not verified")
+        else:
+            r.add("warning", "W_LEDGER_UNVERIFIABLE", relpath,
+                  f"{relpath}: append-only cannot be verified — the file "
+                  "exists in the working tree but has no committed version "
+                  "at HEAD yet (never committed), so there is nothing to "
+                  "compare it against; commit this file so a later edit can "
+                  "be checked against a real HEAD version — until then it is "
+                  "observed, not verified")
+        return
+
+    # A committed baseline exists. `has_working` may be False here — the
+    # whole file was deleted from the working tree — which the byte-prefix
+    # comparison below catches on its own (an empty working copy can never
+    # be a superset of a non-empty committed prefix): the limit case of
+    # "a row was deleted", not a third skip path.
+    working = wt_path.read_bytes() if has_working else b""
+    # Line endings are normalized on BOTH sides before the prefix comparison
+    # (CRLF, and lone CR, folded to LF). Under `core.autocrlf=true` (git's
+    # own Windows-installer default) or a `.gitattributes` text-
+    # normalization rule, git's smudge filter re-materializes a committed LF
+    # file with CRLF line endings in the working tree — an untouched,
+    # freshly checked-out file would otherwise diverge from the committed
+    # blob at row 1 and be reported as rewritten. Both ledgers are JSONL, so
+    # a line terminator carries no information of its own; an edit to a row
+    # still changes bytes INSIDE the line, which normalization never
+    # touches, so this keeps the check's teeth.
+    working_n = working.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    committed_n = committed.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if working_n.startswith(committed_n):
+        return
+    n = min(len(committed_n), len(working_n))
+    offset = 0
+    while offset < n and committed_n[offset] == working_n[offset]:
+        offset += 1
+    row = committed_n[:offset].count(b"\n") + 1
+    r.add("error", "E_LEDGER_REWRITTEN", relpath,
+          f"{relpath} was rewritten, not appended: the working tree diverges "
+          f"from the committed HEAD version at byte offset {offset} (row "
+          f"{row}) — {relpath} is append-only, so committed content must "
+          "stay a byte-prefix of the working copy, and an already-committed "
+          "row was edited or removed. Repair: restore the file from git "
+          f"(the committed HEAD:{relpath} blob), then re-append the "
+          "corrected decision as a NEW row — the ledger never edits a row "
+          "in place. This check compares the working tree against HEAD only "
+          "and proves nothing about a rewrite that was itself already "
+          "committed; it catches an uncommitted edit, which is the case "
+          "that actually happens.")
+
 
 def _check_verified(concepts, r: Report):
     """A verification binds to the text it verified (`content`, sha256 of the
@@ -1043,8 +1244,226 @@ def _check_span_contradiction(bundle: Bundle, r: Report):
                   "is the worker's report and the citation is the measurement")
 
 
+def _output_exists(bundle: Bundle, output: str) -> bool:
+    """Does this declared output resolve to something on disk right now?
+
+    Two ways to resolve, both against the FILESYSTEM, never against the
+    shape of the path string:
+
+    - CONCEPT granularity: `bundle.get(output)` finds the exact `.md` file
+      (e.g. `drafts/segment-02/access-table-data`, or an already-final
+      `strategies/x`).
+    - DIRECTORY granularity: `output` names a directory that still exists
+      and holds at least one concept (e.g. `operations`, standing in for
+      "these concepts were written under here") — the directory itself is
+      never a concept, so its presence is judged by what is demonstrably
+      inside it.
+
+    v0.25 first tried a PATH-PREFIX rule instead of a filesystem check:
+    anything shaped like `drafts/<segment>` (two path parts under `drafts/`)
+    was exempted from drop accounting outright, on the theory that a sweep of
+    the real bundles found `rayforce-api-okf` declaring outputs that way. Running the corrected check against that
+    real bundle by path proved the prefix rule backwards: its nine declared
+    outputs are five CATEGORY directories (`contracts`, `operations`,
+    `types`, `topics`, `recipes` — 117 concepts between them, every one
+    still present) plus four `drafts/segment-01..04` rows whose directories
+    no longer exist at all, consolidated into the category directories with
+    no `merge_map` ever recording where they went. A prefix rule silences
+    exactly the wrong five and reports exactly the wrong four — it answers
+    "what does the path look like" when the only question that matters is
+    "does this exist". This function asks that question directly, for
+    either granularity, against the bundle's actual files."""
+    if bundle.get(output) is not None:
+        return True
+    d = (bundle.root / output).resolve()
+    if not d.is_relative_to(bundle.root) or not d.is_dir():
+        return False
+    return next(d.rglob("*.md"), None) is not None
+
+
+def _check_drops_unexplained(bundle: Bundle, r: Report):
+    """W_DROPS_UNEXPLAINED (v0.25, report item 2.2): a declared output — a
+    draft id some ledger row claims to have written, at either granularity
+    (see `_output_exists`) — that vanished with no recorded reason.
+
+    The phase's original formula ("warn when a row's outputs are fewer than
+    its inputs") was discarded before anything shipped: the sweep measured
+    `inputs` (corpus files) against `outputs` (concepts) on five real bundles
+    and found the invariant false — `rayforce-api-okf` turns 74 inputs into
+    9 outputs by normal compilation, `sec-cftc-sfp-okf` turns 387 into 671.
+    A check on that formula would have fired constantly on healthy bundles.
+
+    The honest invariant the sweep replaced it with: a declared output is
+    ACCOUNTED FOR if it still resolves to something on disk
+    (`_output_exists`), or if some row's `merge_map` names the final that
+    absorbed it. What remains is the UNACCOUNTED count.
+
+    `merge_map` is read ledger-WIDE, unioned across every row, on purpose: a
+    consolidation row's `merge_map` routinely lives on a LATER, different
+    ledger row than the one that first declared the draft as an output — a
+    separate 'consolidate' pass, not the worker's own row — so a draft named
+    by ANY row's merge_map is accounted for, no matter which row declared it.
+
+    `dropped` is read the OPPOSITE way, per row (v0.25 fix, report item 2):
+    each row's own `dropped` budget offsets only THAT row's own unaccounted
+    outputs, never another row's. `dropped` records why a row's OWN pass
+    lost drafts, so a large count recorded on one row must never mask a
+    completely different row's genuinely vanished drafts — a bundle-wide
+    single budget let one segment's tidy bookkeeping hide another segment's
+    real data loss, exactly the mixed-hygiene case (some segments record
+    `dropped`, others don't) this check exists to catch. The `dropped` block
+    only ever records counts by reason, never which specific draft each
+    count covers, so even per row this can only ever budget against that
+    row's total, not resolve individual ids — what is left after that
+    subtraction genuinely vanished with no recorded reason, and the warning
+    names that gap (summed across every row that still has one).
+
+    A row whose `outputs` is not a list (a hand-edited or externally
+    produced row — `add_row`'s own `_check` refuses this on the write path,
+    but the reader does not re-verify it) is reported as malformed rather
+    than iterated character by character into bogus one-letter draft ids.
+
+    Never blocks, at any strictness — see the phase spec's acceptance
+    criterion 6. This is a warning about missing bookkeeping, not a defect in
+    the concepts themselves; the way out is to record `dropped`, or to name
+    the absorbing final in `merge_map`, not to change the concepts."""
+    from okfy.ledger import read_rows
+    try:
+        purpose = bundle.purpose()
+    except frontmatter.FrontmatterError:
+        return  # layer 1's problem
+    if purpose.get("exported"):
+        return  # drafts/meta/ledger routinely do not survive a public export
+    rows = read_rows(bundle)
+    if not rows:
+        return
+
+    merge_map: dict[str, str] = {}
+    for row in rows:
+        mm = row.get("merge_map")
+        if isinstance(mm, dict):
+            merge_map.update({str(k): str(v) for k, v in mm.items()})
+
+    total_gap = 0
+    examples: list[str] = []
+    for row in rows:
+        outputs = row.get("outputs")
+        if outputs is None:
+            continue
+        if not isinstance(outputs, list):
+            where = f"{row.get('run_id')}/{row.get('segment')}"
+            r.add("warning", "W_DROPS_UNEXPLAINED", "meta/ledger.jsonl",
+                  f"ledger row {where} is malformed: `outputs` must be a "
+                  f"list of draft ids, got {type(outputs).__name__} — "
+                  "treated as reporting nothing rather than reasoned about "
+                  "character by character; fix the row so outputs is a list")
+            continue
+        row_declared = sorted({str(o) for o in outputs})
+        row_unaccounted = [o for o in row_declared
+                           if o not in merge_map and not _output_exists(bundle, o)]
+        dropped = row.get("dropped")
+        row_dropped_total = 0
+        if isinstance(dropped, dict):
+            # Booleans are ints in Python, but `ledger.check_dropped`
+            # explicitly refuses a boolean count on the write path — the
+            # reader must agree, not silently count `True` as 1.
+            row_dropped_total = sum(v for v in dropped.values()
+                                    if isinstance(v, int) and not isinstance(v, bool))
+        row_gap = len(row_unaccounted) - row_dropped_total
+        if row_gap > 0:
+            total_gap += row_gap
+            for o in row_unaccounted:
+                if len(examples) >= 2:
+                    break
+                if o not in examples:
+                    examples.append(o)
+
+    if total_gap > 0:
+        examples_str = ", ".join(examples)
+        r.add("warning", "W_DROPS_UNEXPLAINED", "meta/ledger.jsonl",
+              f"{total_gap} declared draft(s) vanished with no recorded reason "
+              f"(e.g. {examples_str}) — record them in the SAME row's "
+              "`dropped` block, or name the final that absorbed them in "
+              "`merge_map`")
+
+
 ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L(\d+))?$")
 MD_EXTS = {".md", ".markdown"}
+
+
+# --------------------------------------------------------------------------
+# v0.25 quote check (phase 6, report item 2.1): whether an optional `quote:`
+# — the literal words an agent read at a cited span — matches the span it
+# names. The seven normalizations below, and nothing else, are the ones
+# the release's measurement permitted, fixed before any quote was sampled: at most 2 of 50 genuine quotes may fail to be found, every
+# failure attributable to one of these seven, and all 20 seeded wrong quotes
+# must be caught.
+#
+# AMENDED (same file, "Amendment, declared before re-measuring", committed
+# after the first 0/50 run): that first run found rule 7 dead — rule 2's
+# whitespace collapse ran first and replaced every newline with a space
+# before rule 7 could ever see a hyphen immediately followed by one. The
+# 0/50 was real for what it measured, but the protocol's own genuine-quote
+# construction (a byte-literal slice of the span) put the identical
+# hyphen+newline on both sides of the comparison, so it canceled out and
+# never exercised rule 7 either way. QUOTE_NORMALIZATION_RULES is now
+# ORDERED BY APPLICATION, not by the threshold file's original numbering —
+# rule 7 runs second, right after NFKC and before rule 2, so a hyphen+
+# newline is joined while the newline still exists. The set of seven rules
+# is unchanged; only the sequence changed, and only to make a rule that was
+# declared to function actually function. Pinned as data — not re-derived
+# from prose — so a test can assert against it directly
+# (`core/tests/test_quote_match.py`).
+# --------------------------------------------------------------------------
+QUOTE_NORMALIZATION_RULES = (
+    "1. Unicode NFKC",
+    "7. hyphen immediately followed by U+000A removed with the newline",
+    "2. run of whitespace (incl. tab, newline, U+00A0) -> single space",
+    "3. strip leading/trailing whitespace",
+    "4. typographic quotes/apostrophes U+2018/2019/201C/201D -> ASCII '/\"",
+    "5. dashes U+2010-U+2015 -> ASCII '-'",
+    "6. soft hyphen U+00AD removed",
+)
+
+_QUOTE_TYPOGRAPHIC = {"‘": "'", "’": "'", "“": '"', "”": '"'}
+_QUOTE_DASH_TRANSLATE = {cp: "-" for cp in range(0x2010, 0x2016)}
+_QUOTE_WS_RE = re.compile(r"\s+")
+_QUOTE_DEHYPHENATE_RE = re.compile(r"-\n")
+
+
+def normalize_quote(s: str) -> str:
+    """Exactly the seven rules named in `QUOTE_NORMALIZATION_RULES`, applied
+    in THAT (application) order — NFKC, then dehyphenation, then whitespace
+    collapse, strip, typographic-quote mapping, dash mapping, soft-hyphen
+    removal. Dehyphenation runs before the whitespace collapse specifically
+    so the newline it looks for still exists when it runs — see the
+    amendment note above. Applied identically to the quote and to the span
+    before the substring check."""
+    s = unicodedata.normalize("NFKC", s)
+    s = _QUOTE_DEHYPHENATE_RE.sub("", s)
+    s = _QUOTE_WS_RE.sub(" ", s)
+    s = s.strip()
+    for typo, ascii_ in _QUOTE_TYPOGRAPHIC.items():
+        s = s.replace(typo, ascii_)
+    s = s.translate(_QUOTE_DASH_TRANSLATE)
+    s = s.replace("­", "")
+    return s
+
+
+def _quote_first_divergence(quote: str, span: str) -> str:
+    """A short, human-readable description of where a normalized `quote`
+    (known not to be a substring of normalized `span`) stops matching:
+    grows the matched prefix as long as it stays a substring of `span`
+    (monotonic — if quote[:k+1] is in span then so is quote[:k], at the same
+    position), then reports what comes right after."""
+    lo = 0
+    while lo < len(quote) and quote[:lo + 1] in span:
+        lo += 1
+    matched = quote[:lo]
+    tail = quote[lo:lo + 20]
+    if not matched:
+        return f"quote does not match the span from its first character: {tail!r}"
+    return f"matched {matched!r}, then {tail!r} was not found next"
 
 
 def _heading_slugs(text: str) -> set[str]:
@@ -1147,6 +1566,88 @@ def _check_anchors(bundle: Bundle, concepts, r: Report, strict=False):
                 r.add("warning", "W_ANCHOR_UNCHECKED", c.id,
                       f"anchor {s}: non-line fragment on non-markdown source — "
                       "not checkable")
+
+
+def _check_quotes(bundle: Bundle, concepts, r: Report):
+    """Optional `source_quotes:` (a concept-level mapping of one of its
+    `sources:` ref strings to the literal words the agent read there) lets a
+    citation carry proof, not just a pointer. This checks that proof.
+
+    Deliberately a SEPARATE field from `sources:`, not a richer shape for
+    each `sources:` entry: a dozen call sites across the core (merge_audit,
+    sampling, cost, eval_metrics, update.py, sourcemap.py, this module's own
+    `_check_sources`/`_check_anchors`) coerce every `sources:` entry with
+    `str(s)` or split it on `#`, and none of them are touched by this
+    feature — a bundle without `source_quotes:` is byte-identical in every
+    code path that matters to it, and `sources:` itself never changes shape.
+    This is what "optional forever, backwards compatible" means in practice,
+    not just in the schema.
+
+    A quote's span failing to RESOLVE at all (bad ref, unreadable file, no
+    locally readable corpus) is `W_BAD_SOURCE`/`W_BAD_ANCHOR`/
+    `W_ANCHOR_UNCHECKED`'s finding, not this one — this only fires once the
+    span resolved and the (normalized) quote was not found inside it. Always
+    a warning, never escalated by any `--strict-*` flag: the field is new,
+    nothing here retroactively fails a bundle for not having verified a
+    thing it never claimed to."""
+    try:
+        snap = bundle.get("meta/corpus")
+        purpose = bundle.purpose()
+    except frontmatter.FrontmatterError:
+        return
+    if snap is None or purpose.get("exported") or snap.meta.get("exported"):
+        return
+    corpus = Path(str(snap.meta.get("corpus") or ""))
+    if not corpus.is_dir():
+        return  # no local corpus — nothing to check a quote against
+    root = corpus.resolve()
+    from okfy.sourcemap import cited_span  # local: see _check_source_map
+    # Per-run cache, keyed by resolved path, LOCAL to this one call — never a
+    # module-level global, which would go stale between validate runs in the
+    # same process. Many concepts routinely cite the same corpus file (the
+    # common case: many drafts drawn from one source document), and without
+    # this the file was read and re-split into lines once per QUOTE rather
+    # than once per file.
+    lines_cache: dict[str, list[str] | None] = {}
+    for c in concepts:
+        quotes = c.meta.get("source_quotes")
+        if not isinstance(quotes, dict) or not quotes:
+            continue
+        srcs = c.meta.get("sources") or []
+        srcs = {str(s) for s in (srcs if isinstance(srcs, list) else [srcs])}
+        for ref, quote in quotes.items():
+            ref = str(ref)
+            if ref not in srcs or not isinstance(quote, str) or not quote.strip():
+                continue  # a stray/malformed entry — not this check's finding
+            path, start, end = cited_span(ref, root)
+            if start is None:
+                continue  # unresolved span: an anchor/source finding, not this one
+            f = (root / path).resolve()
+            if not f.is_relative_to(root) or not f.is_file():
+                continue
+            key = str(f)
+            if key not in lines_cache:
+                try:
+                    lines_cache[key] = f.read_text(encoding="utf-8").splitlines(keepends=True)
+                except (OSError, UnicodeDecodeError):
+                    lines_cache[key] = None
+            lines = lines_cache[key]
+            if lines is None:
+                continue
+            if start < 1 or end < start or end > len(lines):
+                continue  # invalid line range: W_BAD_ANCHOR's finding, not this one
+            span = "".join(lines[start - 1:end])
+            norm_quote = normalize_quote(quote)
+            norm_span = normalize_quote(span)
+            if norm_quote in norm_span:
+                continue
+            r.add("warning", "W_QUOTE_NOT_IN_SPAN", c.id,
+                  f"quote for {ref} not found in the cited span ({path}#L{start}-"
+                  f"L{end}) after normalization — "
+                  f"{_quote_first_divergence(norm_quote, norm_span)} — fix the "
+                  "quote to match the cited text verbatim (copy it again from "
+                  "the span), or correct the anchor to the span it was "
+                  "actually read from")
 
 
 def _check_lexicon(concepts, r: Report):
