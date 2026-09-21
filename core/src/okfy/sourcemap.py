@@ -226,11 +226,32 @@ def _corpus(bundle: Bundle) -> Path | None:
     return root if root and root.is_dir() else None
 
 
-def span_text(path: Path, start: int, end: int) -> str:
+def span_text(path: Path, start: int, end: int,
+              lines_cache: dict[str, list[str] | None] | None = None) -> str:
     """The cited lines, joined with their line endings intact. `text_sha256` is
     the SHA-256 of this string's UTF-8 bytes — defined once, here, so a converter
-    and this validator cannot disagree about whether the trailing newline counts."""
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    and this validator cannot disagree about whether the trailing newline counts.
+
+    `lines_cache`: optional, the same shape and key (`str(path.resolve())`)
+    as `cited_span`'s — added so a caller that already resolved `start`/`end`
+    via `cited_span(..., lines_cache=...)` can read THIS span through the same
+    cache instead of paying for a second, independent open+read of a file
+    `cited_span`'s own bounds check (v0.25 audit F11) just read. Absent (the
+    default), this behaves exactly as it always has — a private
+    `path.read_text()` — so every existing caller is unaffected."""
+    if lines_cache is None:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        return "".join(lines[start - 1:end])
+    lines = _cited_lines(path, lines_cache)
+    if lines is None:
+        # The cache already recorded this file as unreadable (it can only get
+        # here after a caller resolved a span against it, which means a prior
+        # read through this same cache failed). Re-attempt the read so the
+        # ORIGINAL exception (FileNotFoundError, UnicodeDecodeError, ...)
+        # propagates exactly as the uncached path above would raise it —
+        # this only ever runs on that already-failing path, never on the
+        # shared hot path a cache hit takes.
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
     return "".join(lines[start - 1:end])
 
 
@@ -368,8 +389,51 @@ def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return out
 
 
-def cited_span(source: str, corpus: Path | None) -> tuple[str, int | None,
-                                                          int | None]:
+def _cited_lines(f: Path,
+                 lines_cache: dict[str, list[str] | None] | None
+                 ) -> list[str] | None:
+    """The lines of `f` (split with endings kept, so the count is exact and
+    the same list a caller like `_check_quotes` slices for text) — read once
+    and shared through `lines_cache` when one is supplied.
+
+    Follow-up to v0.25 audit F11: making `cited_span` bounds-check a citation
+    against the corpus was correct and stays, but the read it does to check
+    those bounds used to be its OWN, private `Path.read_text` call — even
+    when the caller (`_check_quotes`, `check_source_map`'s coverage loop,
+    `eval_qrels`) had already read and cached this exact file for its own
+    purposes. `lines_cache is None` (the default) is a caller that built no
+    such cache; behaviour is then exactly the private read `cited_span` has
+    always done. A caller that passes one gets a read-through: a hit costs a
+    dict lookup, a miss reads once and fills the cache for every span after
+    it, in this call and (if the caller reuses its own dict, as
+    `_check_quotes` already did before this) in the caller's own reads too.
+
+    The key is the RESOLVED path, matching `_check_quotes`'s own key
+    (`(root / path).resolve()`) exactly — `corpus / path` here and `root /
+    path` there name the same file whenever `corpus` and `root` are the same
+    object, which every current caller passes. An unresolvable path (rare;
+    `Path.resolve()` does not require the file to exist) falls back to the
+    unresolved string rather than failing the lookup."""
+    if lines_cache is None:
+        try:
+            return f.read_text(encoding="utf-8").splitlines(keepends=True)
+        except (OSError, UnicodeDecodeError):
+            return None
+    try:
+        key = str(f.resolve())
+    except OSError:
+        key = str(f)
+    if key not in lines_cache:
+        try:
+            lines_cache[key] = f.read_text(encoding="utf-8").splitlines(keepends=True)
+        except (OSError, UnicodeDecodeError):
+            lines_cache[key] = None
+    return lines_cache[key]
+
+
+def cited_span(source: str, corpus: Path | None,
+               lines_cache: dict[str, list[str] | None] | None = None
+               ) -> tuple[str, int | None, int | None]:
     """A cited source resolved to (path, start, end), 1-based inclusive.
 
     The coverage check used to compare the WHOLE source string against a bare
@@ -385,22 +449,58 @@ def cited_span(source: str, corpus: Path | None) -> tuple[str, int | None,
     `(path, None, None)` means the citation could not be resolved to lines —
     an unreadable file, or a heading that is not in it. That is reported as
     unresolved rather than guessed at, because a guess here silently decides
-    whether provenance holds."""
+    whether provenance holds.
+
+    v0.25 audit F11: a line/ledger anchor used to be returned on grammar
+    alone — `int(m.group(1))`, no existence check, no bounds check — so
+    `missing.md#L1-L5`, a reversed `L9-L4`, `L0-L1` and a beyond-EOF
+    `L9-L99` all came back as if resolved. Three things are now checked, in
+    the same order `_check_row` already checks them for a source-map row:
+    ascending and 1-based (a grammar fact, independent of corpus, so this
+    runs even when `corpus is None`), then — only when corpus bytes are
+    actually available — that the file exists and that `end` does not run
+    past it. A span that passes the ascending/1-based check but had no
+    corpus to verify against is still returned as real ints: it PARSED, it
+    is just not VERIFIED, and the caller (`eval_qrels`, the one caller that
+    can receive `corpus=None` here and still looks at the ints) is the one
+    that knows to label that UNVERIFIABLE rather than resolved — see its
+    docstring.
+
+    `lines_cache`: optional, `dict[str, list[str] | None]` keyed by resolved
+    path — the same shape `_check_quotes` already builds. When supplied, the
+    bare-path and line-anchor branches below (the two that read a file just
+    to count or bound-check its lines) read through it instead of opening
+    the file themselves; see `_cited_lines`. Absent, they behave exactly as
+    they always have. The char-anchor and heading branches need the file's
+    full text, not its line list, so they are unaffected either way."""
     path, _, frag = source.partition("#")
     if not frag:
         # A bare path claims the whole file, so the whole file must be mapped.
         if corpus is None:
             return path, None, None
         f = corpus / path
-        try:
-            n = len(f.read_text(encoding="utf-8").splitlines())
-        except (OSError, UnicodeDecodeError):
+        lines = _cited_lines(f, lines_cache)
+        if lines is None:
             return path, None, None
-        return path, 1, max(n, 1)
+        return path, 1, max(len(lines), 1)
     m = ANCHOR_LINE_RE.match(frag) or LEDGER_LINE_RE.match(frag)
     if m:
         start = int(m.group(1))
-        return path, start, int(m.group(2) or start)
+        end = int(m.group(2) or start)
+        if start < 1 or end < start:
+            # Not a line range at all, corpus or no corpus — the same
+            # structural check `_check_row` runs before it ever looks at a
+            # file.
+            return path, None, None
+        if corpus is None:
+            return path, start, end
+        f = corpus / path
+        lines = _cited_lines(f, lines_cache)
+        if lines is None:
+            return path, None, None
+        if end > len(lines):
+            return path, None, None
+        return path, start, end
     m = ANCHOR_CHAR_RE.match(frag)
     if m:
         # Character anchors are what the ledger writes for a `chars` span. They
@@ -561,8 +661,14 @@ def check_source_map(bundle: Bundle) -> dict:
         cited = {str(s) for c in bundle.concepts()
                  for s in (c.meta.get("sources") or [])}
         uncovered, unresolved = [], []
+        # Per-run cache, local to this one call, same shape and reasoning as
+        # `_check_quotes`'s: distinct citations of the same corpus file are
+        # the normal case (many concepts drawn from one source document), and
+        # `cited_span`'s own bounds check (v0.25 audit F11) must not re-read
+        # a file this loop has already read for an earlier citation.
+        lines_cache: dict[str, list[str] | None] = {}
         for s in sorted(cited):
-            path, start, end = cited_span(s, corpus)
+            path, start, end = cited_span(s, corpus, lines_cache=lines_cache)
             if start is None:
                 unresolved.append(s)
                 continue

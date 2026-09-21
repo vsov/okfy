@@ -77,13 +77,13 @@ def record(bundle, event: str, *, actor: str, proposal: str | None, target: str 
     return row
 
 
-def events(bundle) -> tuple[list[dict], list[str]]:
-    """(readable events in file order, problems). A problem names its line."""
-    path = bundle.root / MEMORY_FILE
-    if not path.is_file():
-        return [], []
+def _parse_lines(raw_text: str) -> tuple[list[dict], list[str]]:
+    """The JSONL row parser shared by `events` (working tree) and
+    `events_at_head` (v0.25 F05: the committed HEAD blob) — identical
+    per-line validation and problem-naming regardless of which source the
+    text came from."""
     out, problems = [], []
-    for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for n, raw in enumerate(raw_text.splitlines(), start=1):
         if not raw.strip():
             continue
         where = f"{E_MEMORY_LINE}: {MEMORY_FILE} line {n}"
@@ -106,6 +106,33 @@ def events(bundle) -> tuple[list[dict], list[str]]:
     return out, problems
 
 
+def events(bundle) -> tuple[list[dict], list[str]]:
+    """(readable events in file order, problems). A problem names its line."""
+    path = bundle.root / MEMORY_FILE
+    if not path.is_file():
+        return [], []
+    return _parse_lines(path.read_text(encoding="utf-8"))
+
+
+def events_at_head(bundle) -> tuple[list[dict], list[str]]:
+    """Same shape as `events` — (readable events, problems) — read from the
+    COMMITTED HEAD blob instead of the working tree. `([], [])` when there is
+    no git repository, or no committed version of this file yet.
+
+    v0.25 F05: `propose`'s rejected-content gate falls back to this when
+    `okfy.validate.ledger_prefix_check` reports the working copy REWRITTEN.
+    The working copy cannot answer either way once that is true — a `None`
+    result could be a genuine "never rejected" or a scrubbed one — but HEAD
+    can: it is the exact trust boundary `ledger_prefix_check` itself already
+    draws (its HONESTY LABEL: proves nothing about a rewrite that was itself
+    already committed, only ever compares the working tree against HEAD)."""
+    from okfy.gitenv import run_git
+    shown = run_git(bundle.root, "show", f"HEAD:{MEMORY_FILE}", capture_output=True)
+    if shown.returncode != 0:
+        return [], []
+    return _parse_lines(shown.stdout.decode("utf-8", errors="replace"))
+
+
 # `changes()` below takes an `events=` keyword filter, which as a local
 # parameter would shadow the `events` function name inside its own body —
 # this alias is what it calls instead, so the public `events(bundle)` name
@@ -113,12 +140,17 @@ def events(bundle) -> tuple[list[dict], list[str]]:
 _read_events = events
 
 
-def rejected_hashes(bundle) -> dict[str, dict]:
+def rejected_hashes(bundle, *, from_events: list[dict] | None = None) -> dict[str, dict]:
     """content_sha256 -> the reject event still standing against it. A later
     propose of the same text that carried `reopen` lifts it; rejecting that
-    reopened text again puts it back."""
+    reopened text again puts it back.
+
+    `from_events` (v0.25 F05): an already-read event list to fold instead of
+    re-reading `events(bundle)` — how `propose`'s gate reuses the SAME
+    predicate machinery against `events_at_head`'s output when the working
+    tree is untrustworthy, without a second copy of this loop."""
     standing: dict[str, dict] = {}
-    for row in events(bundle)[0]:
+    for row in (from_events if from_events is not None else events(bundle)[0]):
         if row["action"] == "delete":
             continue
         if row["event"] == "reject":
@@ -128,7 +160,7 @@ def rejected_hashes(bundle) -> dict[str, dict]:
     return standing
 
 
-def rejected_match_hashes(bundle) -> dict[str, dict]:
+def rejected_match_hashes(bundle, *, from_events: list[dict] | None = None) -> dict[str, dict]:
     """match_sha256 -> the reject-or-delete event still standing against it.
 
     A tombstone that survives rewording: sibling to `rejected_hashes`, but
@@ -139,9 +171,12 @@ def rejected_match_hashes(bundle) -> dict[str, dict]:
     `reopen` and hashes to the same fingerprint pops the entry; rejecting or
     re-deleting that reopened text puts it back. Old rows carry no
     `match_sha256` and are silently invisible here — never refused, matching
-    v0.23 behaviour exactly."""
+    v0.23 behaviour exactly.
+
+    `from_events`: see `rejected_hashes` — same v0.25 F05 reuse against
+    `events_at_head`'s output."""
     standing: dict[str, dict] = {}
-    for row in events(bundle)[0]:
+    for row in (from_events if from_events is not None else events(bundle)[0]):
         mh = row.get("match_sha256")
         if not mh:
             continue
@@ -161,14 +196,24 @@ def parse_window_bound(value: str, *, flag: str) -> str:
     (`2026-01-31T14:30:00Z`). `datetime.strptime` also rejects a
     calendar date that does not exist (e.g. `2026-02-30`), not just a
     wrong shape. Anything that matches neither shape is refused, naming
-    both accepted shapes with an example and the way out."""
+    both accepted shapes with an example and the way out.
+
+    v0.25 F12a: `strptime` accepts unpadded fields (`2026-9-01`, `T2:00:00Z`)
+    as well as the canonical zero-padded ones — it validates the CALENDAR
+    shape, not the SPELLING. The parsed `datetime` is reformatted through
+    `strftime` below rather than returned as the original string, so every
+    accepted spelling of the same instant comes back byte-identical and
+    downstream lexicographic comparison against `utc_now`-written `at`
+    values (`_in_window`) stays chronological order, never string order."""
     v = str(value).strip()
     for fmt in _WINDOW_FORMATS:
         try:
-            datetime.datetime.strptime(v, fmt)
+            dt = datetime.datetime.strptime(v, fmt)
         except ValueError:
             continue
-        return v if fmt == "%Y-%m-%dT%H:%M:%SZ" else v + "T00:00:00Z"
+        if fmt == "%Y-%m-%dT%H:%M:%SZ":
+            return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return dt.strftime("%Y-%m-%dT00:00:00Z")
     raise ValueError(
         f"{E_CHANGES_WINDOW}: {flag} {value!r} is not a recognized date — "
         "use a bare date (e.g. 2026-01-31, read as 00:00:00Z) or a full "
@@ -197,12 +242,11 @@ def _in_window(at: str, since: str | None, until: str | None, *,
 def changes(bundle, *, since: str | None = None, until: str | None = None,
            target: str | None = None, events: tuple[str, ...] | None = None,
            actions: tuple[str, ...] | None = None,
-           actor: str | None = None) -> list[dict]:
-    """Ledger rows, in file order, whose OWN `at` falls in the half-open
-    window `[since, until)` — `since`/`until` must already be normalized
-    RFC3339 UTC strings (see `parse_window_bound`), or `None` for no bound.
-    `target`/`events`/`actions`/`actor` filter further and combine with the
-    window, and with each other, as AND.
+           actor: str | None = None) -> tuple[list[dict], list[str]]:
+    """(matching rows in file order, reader problems) — `since`/`until` must
+    already be normalized RFC3339 UTC strings (see `parse_window_bound`), or
+    `None` for no bound. `target`/`events`/`actions`/`actor` filter further
+    and combine with the window, and with each other, as AND.
 
     `events` and `actions` filter two DIFFERENT fields a row carries: `events`
     restricts `row["event"]` (this module's `EVENTS`: propose/accept/reject/
@@ -217,9 +261,17 @@ def changes(bundle, *, since: str | None = None, until: str | None = None,
     inside it contributes the `accept` row, once, and never the `propose`
     row: reading "proposed in the window" as "settled in the window" is
     exactly the mistake this function (and `okfy changes`) refuses to make.
-    """
+
+    v0.25 F12b: the second element is `_read_events(bundle)[1]` verbatim —
+    the lines the reader could not parse (named `E_MEMORY_LINE`, same as
+    `validate`'s W_MEMORY_LINE finding). Earlier this was discarded here, so
+    a ledger of nothing but unreadable lines came back exactly like a
+    genuinely empty one: `[]`. A caller (`cmd_changes`) that drops this
+    return value on the floor reintroduces that bug — it must surface it in
+    both the payload and the exit code, never just one."""
+    readable, problems = _read_events(bundle)
     out = []
-    for row in _read_events(bundle)[0]:
+    for row in readable:
         if not _in_window(row["at"], since, until):
             continue
         if target is not None and row.get("target") != target:
@@ -231,7 +283,7 @@ def changes(bundle, *, since: str | None = None, until: str | None = None,
         if actor is not None and row.get("actor") != actor:
             continue
         out.append(row)
-    return out
+    return out, problems
 
 
 def accepted_since(bundle, when: str | None) -> int:

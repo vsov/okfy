@@ -8,7 +8,9 @@ the bundle before acting. A host session transcript is the only record of
 that. This module reads one and reports what happened, mechanically:
 
 * the ORDER and COUNT of tool calls, classified into four coarse buckets
-  (SEARCH / SHOW / PROPOSE / MUTATION);
+  (SEARCH / SHOW / PROPOSE / MUTATION), plus a fifth, UNKNOWN, for a Bash
+  call whose `command` text this module could not reliably tokenize at
+  all;
 * which concept-id-shaped strings the assistant's own TEXT named, checked
   against the bundle (shown earlier in-session, exists-but-never-shown, or
   unknown).
@@ -39,17 +41,27 @@ subset is understood — everything else is ignored, not an error:
 ## The Bash mutation heuristic, and its ceiling
 
 `Edit` / `Write` / `NotebookEdit` / `MultiEdit` tool calls are unambiguously
-mutations. A `Bash` call is not self-describing, so this module falls back to
-a small CLOSED list of mutating starts/operators found anywhere in
-`input.command`: ` > `, `>>`, `rm `, `mv `, `cp `, `sed -i`, `git commit`,
-`git add`, `tee `. This is a NAIVE heuristic, stated plainly:
+mutations. A `Bash` call is not self-describing, so a `command` string is
+first split into simple commands (`_split_bash_command`, on `&&`, `||`,
+`;`, `|`, and newline) and EACH segment is classified independently, by the
+command actually being run — never by regex-matching the segment's joined
+argument text. A segment is:
 
-* it MISSES any mutation made through a program not on the list (`python
-  -c "open(...).write(...)"`, a package manager, an editor macro, `perl -i`,
-  ...) — the list is not, and cannot be, complete;
-* it can flag a command that merely CONTAINS one of these substrings without
-  it being the command's own effect (inside a quoted string, a comment, or a
-  subshell that never runs).
+* an `okfy` invocation when its OWN `tokens[0]` is `okfy` (bare, or a path
+  ending in `/okfy`, e.g. `/usr/local/bin/okfy`, `./okfy`) and `tokens[1]`
+  is `query` / `show` / `propose` — classified SEARCH / SHOW / PROPOSE.
+  `printf '%s\n' 'okfy query ...'` is NOT a search: the command run is
+  `printf`, and the query text is only an argument it prints;
+* otherwise checked against a small CLOSED list of mutating
+  starts/operators found anywhere in the segment's own text: ` > `, `>>`,
+  `rm `, `mv `, `cp `, `sed -i`, `git commit`, `git add`, `tee ` — MUTATION
+  on a hit. This is a NAIVE heuristic, stated plainly:
+  * it MISSES any mutation made through a program not on the list (`python
+    -c "open(...).write(...)"`, a package manager, an editor macro,
+    `perl -i`, ...) — the list is not, and cannot be, complete;
+  * it can flag a segment that merely CONTAINS one of these substrings
+    without it being the segment's own effect (inside a quoted string, a
+    comment, or a subshell that never runs).
 
 The upgrade path is a host-provided mutation flag on the tool call itself,
 which this module would trust directly instead of guessing from `command`
@@ -57,15 +69,32 @@ text. Until a host provides that, this is what "did the agent mutate
 anything" can mean from a transcript alone.
 
 A Bash call running `okfy propose` is classified PROPOSE, never MUTATION,
-even though it can also match the naive list (e.g. its own git-add-shaped
-text) — the more specific match wins.
+even though its own argument text can also match the naive mutation list
+(e.g. a `--note` containing git-add-shaped text) — an `okfy` invocation
+recognized by position always wins over the naive marker check, WITHIN
+that one segment.
 
-A single Bash `command` chaining multiple `okfy` invocations with `&&`,
-`||`, `;`, `|`, or a newline (e.g. `okfy query ... && okfy propose ...`)
-contributes ONE class per invocation, in textual order — never only the
-first match. `searched_before`/`target_shown` (below) are computed from
-that full, in-order sequence, so a search or a show earlier in the SAME
-Bash call counts.
+A single Bash `command` chaining multiple simple commands with `&&`, `||`,
+`;`, `|`, or a newline (e.g. `printf changed > file; okfy query ...`)
+contributes ONE class per segment, independently — recognizing an `okfy`
+invocation in one segment never discards another segment's own
+MUTATION (or any other class). `searched_before`/`target_shown` (below)
+are computed from that full, in-order sequence, so a search or a show
+earlier in the SAME Bash call counts.
+
+`_split_bash_command` tokenizes with `shlex`; when `command` has
+unbalanced quotes shlex cannot parse it at all, and this module falls back
+to a naive, NOT quote-aware, regex split. Token POSITION from that
+fallback is not trustworthy (the words may not correspond to real shell
+arguments at all), so no conclusion — okfy invocation or otherwise — is
+drawn from it: the whole Bash call is classified UNKNOWN instead, a third
+state distinct from both "searched" and "no search". A caller that reads
+UNKNOWN as "searched" learns nothing from it; this module instead reads it
+as neither confirming nor denying a search happened, so an UNKNOWN segment
+never sets `search_seen`, `first_search`, or `first_mutation` — it also
+never counts as a MUTATION it can't actually see. The cost is that a real
+search or mutation inside an unparseable command goes uncounted rather
+than guessed at.
 
 ## Cited-id extraction
 
@@ -109,10 +138,6 @@ MUTATION_TOOLS = {"Edit", "Write", "NotebookEdit", "MultiEdit"}
 # see the module docstring for exactly what that misses.
 BASH_MUTATION_MARKERS = (" > ", ">>", "rm ", "mv ", "cp ", "sed -i",
                          "git commit", "git add", "tee ")
-
-BASH_QUERY_RE = re.compile(r"\bokfy query\b")
-BASH_SHOW_RE = re.compile(r"\bokfy show\b")
-BASH_PROPOSE_RE = re.compile(r"\bokfy propose\b")
 
 # Shell operators a Bash tool_use's `command` can chain multiple `okfy`
 # invocations with — each is its own simple command, classified separately
@@ -163,29 +188,84 @@ def _bash_target(tokens: list[str]) -> str | None:
     return None
 
 
+def _is_okfy_invocation(tokens: list[str]) -> bool:
+    """True when `tokens[0]` — the command actually being run in this ONE
+    already-split simple command — IS `okfy`: bare, or a path ending in
+    `/okfy` (`/usr/local/bin/okfy`, `./okfy`). Never a substring match
+    against later argument text: `printf '%s\n' 'okfy query ...'` is
+    `printf`, not an okfy invocation, however its arguments read."""
+    return bool(tokens) and (tokens[0] == "okfy" or tokens[0].endswith("/okfy"))
+
+
+def _classify_okfy_invocation(tokens: list[str]
+                              ) -> tuple[str, str | None, str | None] | None:
+    """The (class, concept_id, target) for ONE already-split simple
+    command's tokens, when it is recognized as `okfy query` / `okfy show` /
+    `okfy propose` by position (see `_is_okfy_invocation`; `tokens[1]` is
+    the subcommand). `None` when `tokens[0]` is not `okfy` at all, OR it is
+    `okfy` running some OTHER subcommand this module does not track
+    (`okfy sync`, ...) — in neither case does `None` mean "not a
+    mutation": the caller still checks the naive marker heuristic on this
+    segment's own text."""
+    if not _is_okfy_invocation(tokens) or len(tokens) < 2:
+        return None
+    sub = tokens[1]
+    if sub == "propose":
+        return ("PROPOSE", None, _bash_target(tokens))
+    if sub == "query":
+        return ("SEARCH", None, None)
+    if sub == "show":
+        return ("SHOW", _bash_show_concept_id(tokens), None)
+    return None
+
+
+def _classify_bash_segment(tokens: list[str]
+                           ) -> tuple[str, str | None, str | None] | None:
+    """ONE already-split simple command's own classification: an `okfy`
+    invocation recognized by position wins when there is one (see
+    `_classify_okfy_invocation`) — including over its OWN argument text
+    that happens to also match the naive mutation-marker list (e.g. an
+    `okfy propose --note 'git add screenshot'`). Otherwise, the naive
+    marker heuristic runs on THIS segment's own text only, so one
+    segment's conclusion never depends on another's. `None` when neither
+    applies — this segment contributes nothing this module tracks."""
+    okfy_class = _classify_okfy_invocation(tokens)
+    if okfy_class is not None:
+        return okfy_class
+    if _is_bash_mutation(" ".join(tokens)):
+        return ("MUTATION", None, None)
+    return None
+
+
 def _is_bash_mutation(command: str) -> bool:
     return any(marker in command for marker in BASH_MUTATION_MARKERS)
 
 
-def _split_bash_command(command: str) -> list[list[str]]:
+def _split_bash_command(command: str) -> tuple[list[list[str]], bool]:
     """Split a Bash `command` string into one TOKEN LIST per simple command,
     on `&&`, `||`, `;`, `|` and newline — the separators a host's Bash tool
     call can chain multiple `okfy` invocations with. shlex-aware: a
     separator INSIDE a quoted argument (`echo "a && b"`) is not a split
     point, and a quoted multi-word argument stays one token (so a later
     re-parse of just that command's own tokens, e.g. `_bash_target`, never
-    needs to re-tokenize free text). Falls back to a plain, NOT
-    quote-aware, regex split on the same separator text when shlex cannot
-    parse the command at all (unbalanced quotes) — an occasional over-split
-    there beats silently treating a chained command as one."""
+    needs to re-tokenize free text).
+
+    Returns `(segments, reliable)`. `reliable` is False exactly when shlex
+    could not parse `command` at all (unbalanced quotes) and a plain, NOT
+    quote-aware, regex split was used instead — those tokens do not
+    reliably correspond to real shell words, so their POSITION (tokens[0],
+    tokens[1], ...) cannot be trusted for anything, including recognizing
+    an `okfy` invocation. Callers must treat an unreliable split as
+    UNKNOWN, never as "no `okfy` call found here"."""
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=";|&\n")
         lex.whitespace = " \t\r"
         lex.whitespace_split = True
         tokens = list(lex)
     except ValueError:
-        return [seg.split() for seg in re.split(r"&&|\|\||[;|\n]", command)
-               if seg.strip()]
+        segments = [seg.split() for seg in re.split(r"&&|\|\||[;|\n]", command)
+                   if seg.strip()]
+        return segments, False
     segments: list[list[str]] = []
     current: list[str] = []
     for tok in tokens:
@@ -197,7 +277,7 @@ def _split_bash_command(command: str) -> list[list[str]]:
             current.append(tok)
     if current:
         segments.append(current)
-    return segments
+    return segments, True
 
 
 def _classify_tool_use(block: dict
@@ -207,9 +287,13 @@ def _classify_tool_use(block: dict
     `classes` is EVERY (class, concept_id_for_SHOW, target_for_PROPOSE) this
     ONE tool_use block contributes, in the order its own effect happened —
     almost always a single-item list. A `Bash` `command` chaining multiple
-    `okfy` invocations (`&&`, `||`, `;`, `|`, or a newline) contributes one
-    entry per invocation, in textual order, instead of only the first match
-    winning (see `_split_bash_command`). A v0.24 batch
+    simple commands (`&&`, `||`, `;`, `|`, or a newline) contributes one
+    entry per SEGMENT, classified independently (see `_split_bash_command`
+    and `_classify_bash_segment`) — recognizing an `okfy` invocation in one
+    segment never discards another segment's own class, e.g. a MUTATION. A
+    Bash `command` shlex cannot tokenize at all (unbalanced quotes)
+    contributes exactly one `("UNKNOWN", None, None)` for the whole call,
+    never a guess drawn from unreliable token positions. A v0.24 batch
     `okfy_show(concept_ids=[...])` contributes one SHOW per listed id — every
     one of them was shown, not just a single `concept_id`.
 
@@ -256,27 +340,20 @@ def _classify_tool_use(block: dict
         command = tool_input.get("command")
         if not isinstance(command, str):
             return [], command is not None
+        segments, reliable = _split_bash_command(command)
+        if not reliable:
+            # shlex could not tokenize this command at all (unbalanced
+            # quotes): no conclusion drawn from token POSITION is
+            # trustworthy, so this reports UNKNOWN rather than a confident
+            # "no search happened" — see `_split_bash_command` and the
+            # module docstring.
+            return [("UNKNOWN", None, None)], False
         out: list[tuple[str, str | None, str | None]] = []
-        for tokens in _split_bash_command(command):
-            text = " ".join(tokens)
-            # More specific match wins WITHIN a segment: `okfy propose` is
-            # never a MUTATION even though it can also contain e.g. a
-            # `git add`-shaped substring.
-            if BASH_PROPOSE_RE.search(text):
-                out.append(("PROPOSE", None, _bash_target(tokens)))
-            elif BASH_QUERY_RE.search(text):
-                out.append(("SEARCH", None, None))
-            elif BASH_SHOW_RE.search(text):
-                out.append(("SHOW", _bash_show_concept_id(tokens), None))
-        if out:
-            return out, False
-        # No `okfy` invocation anywhere in this command: fall back to the
-        # naive mutation-marker heuristic over the FULL raw text (a marker
-        # can straddle a separator, e.g. `foo > bar; baz`, which per-segment
-        # text would miss).
-        if _is_bash_mutation(command):
-            return [("MUTATION", None, None)], False
-        return [], False
+        for tokens in segments:
+            cls = _classify_bash_segment(tokens)
+            if cls is not None:
+                out.append(cls)
+        return out, False
     return [], False
 
 
@@ -311,7 +388,7 @@ def lint_transcript(bundle: Bundle, session_path: Path) -> dict:
 
     top_dirs = _top_dirs(bundle)
 
-    tool_calls = {"SEARCH": 0, "SHOW": 0, "PROPOSE": 0, "MUTATION": 0}
+    tool_calls = {"SEARCH": 0, "SHOW": 0, "PROPOSE": 0, "MUTATION": 0, "UNKNOWN": 0}
     first_search = None
     first_mutation = None
     proposes: list[dict] = []
@@ -404,6 +481,10 @@ def lint_transcript(bundle: Bundle, session_path: Path) -> dict:
                     tool_calls["MUTATION"] += 1
                     if first_mutation is None:
                         first_mutation = {"index": call_index, "tool": block.get("name")}
+                elif cls == "UNKNOWN":
+                    # Neither confirms nor denies a search/mutation: never
+                    # sets search_seen, first_search, or first_mutation.
+                    tool_calls["UNKNOWN"] += 1
 
     if first_mutation is None:
         searched_before_first_mutation = None

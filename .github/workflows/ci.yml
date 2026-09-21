@@ -155,18 +155,23 @@ jobs:
       # `uv run` silently updates a stale lockfile, so a green local test run hides
       # the divergence — exactly how adapters/mcp/uv.lock sat at 0.11.1 while both
       # pyprojects declared 0.12.0. This is the step that makes it visible.
+      #
+      # Each lockfile used to be guarded by `if [ -f ... ]; then check; fi`,
+      # which made DELETING a lockfile a silent pass instead of a failure —
+      # the three lockfiles below are declared, not optional, so their
+      # absence is itself a fault, checked before any `uv lock --check` runs.
       - shell: bash
         run: |
           set -euo pipefail
-          if [ -f adapters/mcp/uv.lock ]; then
-            (cd adapters/mcp && uv lock --check)
-          fi
-          if [ -f core/uv.lock ]; then
-            (cd core && uv lock --check)
-          fi
-          if [ -f adapters/normalize/uv.lock ]; then
-            (cd adapters/normalize && uv lock --check)
-          fi
+          for lock in adapters/mcp/uv.lock core/uv.lock adapters/normalize/uv.lock; do
+            if [ ! -f "$lock" ]; then
+              echo "missing declared lockfile: $lock" >&2
+              exit 1
+            fi
+          done
+          (cd adapters/mcp && uv lock --check)
+          (cd core && uv lock --check)
+          (cd adapters/normalize && uv lock --check)
 
   versions-agree:
     name: version strings agree

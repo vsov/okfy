@@ -1,5 +1,6 @@
 """Pure MCP tool handlers: import okfy core in-process, return JSON-able dicts.
 No MCP types here — server.py owns the protocol surface, this owns the logic."""
+import hashlib
 import inspect
 import re
 
@@ -18,6 +19,25 @@ _FED_PARAMS = inspect.signature(federate.federated_query).parameters
 # complete, not that the text is wrong — a different way out (resend) than
 # a genuinely malformed block. See h_propose below.
 E_PROPOSAL_TRUNCATED = "E_PROPOSAL_TRUNCATED"
+
+# v0.25 (R2): `content` missing for an action that requires it — this used
+# to be a bare `ValueError` (no `E_` prefix, so it never matched `_CODED`
+# and reached the caller as a raw ToolError instead of the adapter's
+# promised {error, message, way_out}). See h_propose below.
+E_PROPOSAL_CONTENT_REQUIRED = "E_PROPOSAL_CONTENT_REQUIRED"
+
+# v0.25 (R2): the remaining bare-`ValueError` guards reachable through a
+# registered MCP tool (server.py's docstring promises {error, message,
+# way_out} for every refusal — a bare ValueError becomes a raw ToolError
+# instead). Each guard below keeps its own code and wording rather than
+# sharing one, matching the existing E_PROPOSAL_TRUNCATED/E_FRONTMATTER
+# precedent in h_propose.
+E_SHOW_ID_REQUIRED = "E_SHOW_ID_REQUIRED"
+E_LINKS_WORKSPACE = "E_LINKS_WORKSPACE"
+E_OVERVIEW_TYPE_WORKSPACE = "E_OVERVIEW_TYPE_WORKSPACE"
+E_PROPOSE_WORKSPACE = "E_PROPOSE_WORKSPACE"
+E_PROPOSAL_PATCH_CONTENT = "E_PROPOSAL_PATCH_CONTENT"
+E_FRESH_WORKSPACE = "E_FRESH_WORKSPACE"
 
 
 def _cap(text: str, max_chars: int) -> tuple[str, bool]:
@@ -69,6 +89,29 @@ def _bundle_empty_reason(t: Target, text: str, type_: str | None, tag: str | Non
     return "no-term-matched"
 
 
+def surfaced_ids(result: dict) -> list[str]:
+    """Every concept id/ref an `h_query` result actually surfaced to the
+    agent, deduplicated once. Bundle mode: the flat `results` list. Workspace
+    mode: the federated `knowledge`/`constraints`/`personal` groups PLUS
+    `pulled` — the auto-pulled `constrains` targets `federate.federated_query`
+    returns as a fourth group (core/src/okfy/federate.py) — a concept the
+    agent genuinely saw but that two separate enumerations here used to drop
+    (F14). The one function both `h_query`'s session record and the server's
+    usage journal call, so `n_results` and `top_ids` always name the same
+    set."""
+    if result.get("mode") == "bundle":
+        ids = [h["id"] for h in result.get("results", [])]
+    else:
+        ids = [h.get("ref") or h.get("id")
+               for group in ("knowledge", "constraints", "personal", "pulled")
+               for h in result.get(group, []) if isinstance(h, dict)]
+    seen: list[str] = []
+    for i in ids:
+        if i not in seen:
+            seen.append(i)
+    return seen
+
+
 def h_query(t: Target, text: str, type_: str | None = None,
             tag: str | None = None, n: int = 10, expand: bool = True,
             include_stale: bool = True,
@@ -82,9 +125,6 @@ def h_query(t: Target, text: str, type_: str | None = None,
             kw["include_stale"] = include_stale
         out = federate.federated_query(t.workspace, text, **kw)
         result = {"mode": "workspace", **out}
-        ids = [h.get("ref") or h.get("id")
-               for group in ("knowledge", "constraints", "personal")
-               for h in out.get(group, []) if isinstance(h, dict)]
     else:
         out = q.query(t.bundle, text, type_=type_, tag=tag, n=n,
                       expand=expand, include_stale=include_stale)
@@ -99,10 +139,9 @@ def h_query(t: Target, text: str, type_: str | None = None,
             out["empty_reason"] = _bundle_empty_reason(
                 t, text, type_, tag, expand, include_stale)
         result = {"mode": "bundle", **out}
-        ids = [h["id"] for h in out.get("results", [])]
     result["notice"] = render.NOTICE
     if session is not None:
-        session.record_query(text, ids)
+        session.record_query(text, surfaced_ids(result))
     return result
 
 
@@ -135,11 +174,16 @@ def _neighbours(t: Target, c) -> tuple[list[dict], int]:
 def _h_show_one(t: Target, concept_id: str, max_chars: int,
                 section: str | None, session: Session | None) -> dict:
     c = _resolve_concept(t, concept_id)
-    # v0.24 (c): the FILE's bytes, same function proposals._file_sha256 uses —
-    # independent of section/truncation, so it always names what is actually
-    # on disk, not what this particular call happened to return.
-    file_sha256 = proposals._file_sha256(c.path)
-    content = c.path.read_text(encoding="utf-8")
+    # v0.25 (F06): ONE read of the file's bytes — the digest and the
+    # returned content must be two derivations of that SAME capture. Two
+    # independent reads (hash the file, then separately read its text) let
+    # an edit land between them and hand back content under a digest that
+    # names different bytes than what was actually returned; a later
+    # okfy_fresh call would then wrongly answer "unchanged" for content the
+    # agent never received.
+    raw = c.path.read_bytes()
+    file_sha256 = hashlib.sha256(raw).hexdigest()
+    content = raw.decode("utf-8")
     if section is not None:
         content = _section(content, section)
     content, truncated = _cap(content, max_chars)
@@ -175,14 +219,25 @@ def _h_show_many(t: Target, concept_ids: list[str], max_tokens: int,
             missing.append(cid)
     ok_ids = [cid for cid in seen if cid in resolved]
 
-    # `.body` (frontmatter already stripped by Bundle.get) is what gets
-    # budgeted — repeating each concept's YAML frontmatter inside a shared
-    # token budget would waste it on fixed overhead already visible via the
-    # concept's own id/type/title (okfy_overview) and via `neighbours`
-    # below; `sha256` stays the FILE's bytes regardless, same as single-id
-    # show.
-    bodies = [resolved[cid].body for cid in ok_ids]
-    shas = {cid: proposals._file_sha256(resolved[cid].path) for cid in ok_ids}
+    # Body (frontmatter stripped) is what gets budgeted — repeating each
+    # concept's YAML frontmatter inside a shared token budget would waste
+    # it on fixed overhead already visible via the concept's own
+    # id/type/title (okfy_overview) and via `neighbours` below; `sha256`
+    # stays the FILE's bytes regardless, same as single-id show.
+    #
+    # v0.25 (F06): ONE read of each concept's bytes here — body and digest
+    # must be two derivations of that SAME capture, not `resolved[cid]`'s
+    # earlier (separate) read paired with a later, independent hash read.
+    # Two independent reads let an edit land between them and hand back a
+    # stale body under the new file's digest; a later okfy_fresh call would
+    # then wrongly answer "unchanged" for content the agent never received.
+    bodies = []
+    shas: dict[str, str] = {}
+    for cid in ok_ids:
+        raw = resolved[cid].path.read_bytes()
+        shas[cid] = hashlib.sha256(raw).hexdigest()
+        _, body = frontmatter.parse(raw.decode("utf-8"))
+        bodies.append(body)
     rendered = render.fair_share(bodies, max_tokens) if bodies else []
 
     concepts: list[dict] = []
@@ -207,9 +262,13 @@ def h_show(t: Target, concept_id: str | None = None,
            section: str | None = None, session: Session | None = None) -> dict:
     if concept_ids is not None:
         out = _h_show_many(t, concept_ids, max_tokens, session)
+    elif concept_id is None:
+        out = {"error": E_SHOW_ID_REQUIRED,
+              "message": f"{E_SHOW_ID_REQUIRED}: either concept_id or "
+                        "concept_ids is required",
+              "way_out": "pass concept_id (one id) or concept_ids "
+                        "(a list, max 10)"}
     else:
-        if concept_id is None:
-            raise ValueError("either concept_id or concept_ids is required")
         out = _h_show_one(t, concept_id, max_chars, section, session)
     out["notice"] = render.NOTICE
     return out
@@ -217,8 +276,12 @@ def h_show(t: Target, concept_id: str | None = None,
 
 def h_links(t: Target, concept_id: str) -> dict:
     if t.is_workspace:
-        raise ValueError("links works on a single bundle; query a member "
-                         "bundle path directly for its link graph")
+        return {"error": E_LINKS_WORKSPACE,
+                "message": f"{E_LINKS_WORKSPACE}: links works on a single "
+                          "bundle; query a member bundle path directly for "
+                          "its link graph",
+                "way_out": "point the server at the member bundle's own "
+                          "path, not the workspace"}
     return q.links(t.bundle, concept_id)
 
 
@@ -226,8 +289,14 @@ def h_overview(t: Target, type_: str | None = None, max_items: int = 50,
                max_chars: int = 20000) -> dict:
     if type_ is not None:
         if t.is_workspace:
-            raise ValueError("type listing is a single-bundle view; point at a "
-                             "member bundle path for its concept list")
+            return {"error": E_OVERVIEW_TYPE_WORKSPACE,
+                    "message": f"{E_OVERVIEW_TYPE_WORKSPACE}: type listing "
+                              "is a single-bundle view; point at a member "
+                              "bundle path for its concept list",
+                    "way_out": "point the server at the member bundle's "
+                              "own path, not the workspace, or call "
+                              "okfy_overview with no type for the "
+                              "workspace's member list"}
         matches = [c for c in load_index(t.bundle)["concepts"]
                    if c.get("type") == type_]
         concepts = [{"id": c["id"], "type": c.get("type"),
@@ -281,18 +350,31 @@ def h_propose(t: Target, target: str, action: str, note: str,
     BM25 hits for the proposal's own text, computed fresh — never a refusal)
     and, when non-empty, `nearest_guidance`."""
     if t.is_workspace:
-        raise ValueError("propose targets a single member bundle; point the "
-                         "server at that bundle's path, not the workspace")
+        return {"error": E_PROPOSE_WORKSPACE,
+                "message": f"{E_PROPOSE_WORKSPACE}: propose targets a "
+                          "single member bundle; point the server at that "
+                          "bundle's path, not the workspace",
+                "way_out": "point the server at the target member bundle's "
+                          "own path, not the workspace"}
     if patch is not None and content:
-        raise ValueError("patch and content are mutually exclusive — a patch "
-                         "is applied to the target's CURRENT body, content "
-                         "supplies the whole new body")
+        return {"error": E_PROPOSAL_PATCH_CONTENT,
+                "message": f"{E_PROPOSAL_PATCH_CONTENT}: patch and content "
+                          "are mutually exclusive — a patch is applied to "
+                          "the target's CURRENT body, content supplies the "
+                          "whole new body",
+                "way_out": "pass either patch (hunks against the current "
+                          "body) or content (the whole new body), not both"}
     if action in ("delete", "flag", "gap") or patch is not None:
         meta, body = {}, ""
     else:
         if not content:
-            raise ValueError("content (a full concept .md) is required unless "
-                             "action=delete|flag|gap or patch is given")
+            return {"error": E_PROPOSAL_CONTENT_REQUIRED,
+                    "message": f"{E_PROPOSAL_CONTENT_REQUIRED}: content (a "
+                              "full concept .md) is required unless "
+                              "action=delete|flag|gap or patch is given",
+                    "way_out": ("pass content (frontmatter + body), or use "
+                               "action=delete|flag|gap, or pass patch "
+                               "instead of content")}
         # v0.24 (e): truncated vs malformed intake — a proposal `content`
         # that got cut off mid-generation (frontmatter opens with `---` but
         # never closes, or the string just stops inside the block) needs a
@@ -389,6 +471,9 @@ def h_fresh(t: Target, ids: dict) -> dict:
     `okfy.proposals.fresh` for the five states. Single bundle only (a
     workspace has no one root to resolve `id` against)."""
     if t.is_workspace:
-        raise ValueError("fresh targets a single bundle; point the server at "
-                         "a member bundle path")
+        return {"error": E_FRESH_WORKSPACE,
+                "message": f"{E_FRESH_WORKSPACE}: fresh targets a single "
+                          "bundle; point the server at a member bundle path",
+                "way_out": "point the server at the member bundle's own "
+                          "path, not the workspace"}
     return proposals.fresh(t.bundle, ids)

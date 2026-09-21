@@ -11,17 +11,6 @@ from okfy_mcp.resolve import Target
 from okfy_mcp.session import Session, query_sha256
 
 
-def _query_top_ids(out: dict) -> list[str]:
-    """Concept ids a query result actually surfaced — bundle mode's flat
-    `results`, or a workspace's federated `knowledge`/`constraints`/
-    `personal` groups."""
-    if out.get("mode") == "bundle":
-        return [h["id"] for h in out.get("results", [])]
-    return [h.get("ref") or h.get("id")
-           for group in ("knowledge", "constraints", "personal")
-           for h in out.get(group, []) if isinstance(h, dict)]
-
-
 def build_server(path: Path, journal: Path | None = None,
                  journal_text: bool = False) -> FastMCP:
     target = Target(path)                       # validates now, fails fast
@@ -80,7 +69,7 @@ def build_server(path: Path, journal: Path | None = None,
                                expand=expand, include_stale=include_stale,
                                max_tokens=max_tokens, session=session)
         if jrnl is not None:
-            top_ids = _query_top_ids(out)
+            top_ids = handlers.surfaced_ids(out)
             jrnl.write("query", query_sha256=query_sha256(text),
                       n_results=len(top_ids), top_ids=top_ids,
                       note_fired=bool(out.get("notes")), query=text)

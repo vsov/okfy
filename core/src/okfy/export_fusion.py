@@ -56,11 +56,38 @@ def export_workspace(ws: Workspace, out: Path) -> Path:
 
     for m in ws.members:
         dst = out / m.name
-        shutil.copytree(m.path, dst,
-                        ignore=shutil.ignore_patterns(".git", CACHE_DIR))
-        for p in dst.rglob("*.md"):
-            if p.name in {"index.md", "log.md"}:
-                continue
+        dst.mkdir(parents=True)
+        # Allowlist, not subtraction (audit F01): copy exactly the member's
+        # ordinary concept files — what Bundle(m.path).concepts() yields,
+        # which already excludes proposals/, drafts/, index/, protocols/,
+        # index.md, log.md and the generated root docs (README.md, AGENTS.md,
+        # CLAUDE.md) — plus the member's own meta/ tree. Nothing else is ever
+        # copied, so a pending proposal or an out-of-scope draft is never a
+        # candidate for the export and cannot ride along the way a post-hoc
+        # subtraction over a wholesale copytree let it (a nested member path
+        # defeats bundle.py's root-only reserved-dir/file checks, so that
+        # subtraction could never see what it needed to remove).
+        in_scope = scope_ids.get(m.name, set())
+        excluded: list[str] = []
+        total = 0
+        copied: list[Path] = []
+        for c in Bundle(m.path).concepts():
+            if m.role == "personal" and not c.id.startswith("meta/"):
+                # structural meta is never scoped (ADR-0015 — applies_to
+                # narrows CONTENT, not the bundle's own purpose/plan/snapshot)
+                total += 1
+                if c.id not in in_scope:
+                    excluded.append(c.id)
+                    continue
+            dst_file = dst / f"{c.id}.md"
+            dst_file.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(c.path, dst_file)
+            copied.append(dst_file)
+        if m.role == "personal":
+            personal_scope_report[m.name] = {
+                "project_key": ws.project_key(), "kept": total - len(excluded),
+                "total": total, "excluded": sorted(excluded)}
+        for p in copied:
             try:
                 meta, body = frontmatter.parse(p.read_text(encoding="utf-8"))
             except frontmatter.FrontmatterError:
@@ -68,24 +95,6 @@ def export_workspace(ws: Workspace, out: Path) -> Path:
             new_body = _prefix_links(body, m.name)
             if new_body != body:
                 p.write_text(frontmatter.serialize(meta, new_body), encoding="utf-8")
-        if m.role == "personal":
-            in_scope = scope_ids.get(m.name, set())
-            excluded = []
-            total = 0
-            for c in Bundle(m.path).concepts():
-                if c.id.startswith("meta/"):
-                    continue          # structural, never scoped (ADR-0015 —
-                                       # applies_to narrows CONTENT, not the
-                                       # bundle's own purpose/plan/snapshot)
-                total += 1
-                if c.id not in in_scope:
-                    excluded.append(c.id)
-                    f = dst / f"{c.id}.md"
-                    if f.is_file():
-                        f.unlink()
-            personal_scope_report[m.name] = {
-                "project_key": ws.project_key(), "kept": total - len(excluded),
-                "total": total, "excluded": sorted(excluded)}
 
     links_out = out / "links"
     n_rows_dropped = 0

@@ -200,9 +200,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--text", action="store_true")
 
     p = sub.add_parser("snapshot"); p.add_argument("bundle", type=Path)
+    # v0.25 audit F03: git mode now pins HEAD's committed tree, never the
+    # working tree, so a DIRTY corpus is refused by default (E_CORPUS_DIRTY)
+    # rather than silently advancing the baseline past uncommitted changes —
+    # --force overrides, and says so in `okfy snapshot`'s own output.
+    p.add_argument("--force", action="store_true")
 
     p = sub.add_parser("repair-links"); p.add_argument("bundle", type=Path)
     p.add_argument("--dry-run", dest="dry_run", action="store_true")
+
+    p = sub.add_parser(
+        "reanchor",
+        help="v0.25 audit F02: repair a moved anchor — the ONLY thing that "
+             "clears a pin's anchor_stale flag. Rewrites the concept's own "
+             "citation text from the stale anchor to its measured moved_to; "
+             "does not touch concept content.")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("--only", action="append", default=None,
+                   metavar="CONCEPT_ID:SOURCE",
+                   help="repeatable; restrict repair to this concept:source "
+                        "pair (as named by `okfy diff`'s reanchor list) "
+                        "instead of every unresolved anchor")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="report what would be repaired without writing")
 
     p = sub.add_parser("package");  p.add_argument("bundle", type=Path)
     p.add_argument("--demote-unretrieved", action="store_true")

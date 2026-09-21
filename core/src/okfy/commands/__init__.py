@@ -7,8 +7,9 @@ the per-verb logic, grouped by domain.
 from .bundle import (cmd_codes, cmd_index, cmd_init, cmd_log, cmd_package,
                      cmd_release_check, cmd_sourcemap, cmd_validate)
 from .changes import cmd_changes
-from .corpus import (cmd_cluster, cmd_diff, cmd_glean, cmd_repair_links,
-                     cmd_segment, cmd_segment_status, cmd_snapshot, cmd_survey)
+from .corpus import (cmd_cluster, cmd_diff, cmd_glean, cmd_reanchor,
+                     cmd_repair_links, cmd_segment, cmd_segment_status,
+                     cmd_snapshot, cmd_survey)
 from .economics import cmd_budget, cmd_cost
 from .quality import (cmd_dissent, cmd_eval, cmd_job, cmd_ledger, cmd_merge_audit,
                       cmd_stale, cmd_transcript_lint)
@@ -40,6 +41,7 @@ HANDLERS = {
     "changes": cmd_changes,
     "snapshot": cmd_snapshot,
     "repair-links": cmd_repair_links,
+    "reanchor": cmd_reanchor,
     "package": cmd_package,
     "log": cmd_log,
     "propose": cmd_propose,

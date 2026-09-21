@@ -40,6 +40,17 @@ E_SPAN_OUTPUT = "E_SPAN_OUTPUT"
 # these totals back to decide whether a declared output was accounted for).
 E_LEDGER_DROPPED = "E_LEDGER_DROPPED"
 
+# DROP CORRECTIONS (v0.25 audit F09). The ledger is append-only — an already
+# committed row can never explain a loss after the fact, only a NEW row can.
+# The optional `corrects` block on a row is that new row: it names an
+# EARLIER row (`run_id`/`segment`) and the specific `output` it accounts
+# for, carrying its own `dropped` explanation. It never edits history, only
+# adds to it — see `check_corrects` and `validate._check_drops_unexplained`,
+# which credits the named row/output, and only that row/output, never a
+# bundle-wide pool.
+E_LEDGER_CORRECTION = "E_LEDGER_CORRECTION"
+E_LEDGER_CORRECTION_UNKNOWN = "E_LEDGER_CORRECTION_UNKNOWN"
+
 
 def unknown_covered_outputs(spans: dict, outputs) -> list[str]:
     """Draft ids a `covered` span names that the row does not list in `outputs`.
@@ -147,6 +158,41 @@ def check_dropped(dropped) -> dict:
     return out
 
 
+def check_corrects(corrects) -> dict:
+    """Validate a writer's optional `corrects` block and return it normalised
+    (`run_id`, `segment`, `output` — all non-empty strings — plus `dropped`,
+    itself checked with `check_dropped`). Same discipline as `check_spans`
+    and `check_dropped`: a malformed shape is refused rather than reaching
+    the ledger, because a `corrects` block computed from garbage would
+    silently fail to name anything and read as a no-op explanation — worse
+    than the still-open warning it was meant to clear.
+
+    This only checks SHAPE. Whether `run_id`/`segment`/`output` name a row
+    that actually exists on the ledger is `add_row`'s job
+    (`E_LEDGER_CORRECTION_UNKNOWN`), because that check needs the bundle's
+    other rows, which this function does not have access to."""
+    if not isinstance(corrects, dict):
+        raise ValueError(f"{E_LEDGER_CORRECTION}: corrects must be an object "
+                         "with run_id, segment, output and dropped, got "
+                         f"{type(corrects).__name__}")
+    out: dict = {}
+    for key in ("run_id", "segment", "output"):
+        v = corrects.get(key)
+        if not isinstance(v, str) or not v.strip():
+            raise ValueError(f"{E_LEDGER_CORRECTION}: corrects.{key} must be "
+                             "a non-empty string naming the row/output this "
+                             "correction accounts for")
+        out[key] = v
+    dropped = check_dropped(corrects.get("dropped"))
+    if not dropped:
+        raise ValueError(f"{E_LEDGER_CORRECTION}: corrects.dropped must "
+                         "record at least one reason/count — a correction "
+                         "with no explanation is the same defect the "
+                         "warning exists to catch")
+    out["dropped"] = dropped
+    return out
+
+
 def ledger_path(bundle: Bundle) -> Path:
     return bundle.root / "meta" / "ledger.jsonl"
 
@@ -184,25 +230,34 @@ def _head(bundle: Bundle) -> str:
     return r.stdout.strip() if r.returncode == 0 else "unknown"
 
 
-def _check(row: dict) -> None:
+def _check(row: dict, require_nonempty_lists: bool = True) -> None:
     for k in _REQUIRED_STR:
         v = row[k]
         if not isinstance(v, str) or not v.strip():
             raise ValueError(f"ledger row: {k} must be a non-empty string")
     for k in _REQUIRED_LIST:
         v = row[k]
-        if not isinstance(v, list) or not v:
+        if not isinstance(v, list):
+            raise ValueError(f"ledger row: {k} must be a list")
+        if require_nonempty_lists and not v:
             raise ValueError(f"ledger row: {k} must be a non-empty list")
 
 
 def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: str,
             outputs, validation: str, merge_map: dict | None = None,
             job_digest: str | None = None, spans: dict | None = None,
-            dropped: dict | None = None) -> dict:
+            dropped: dict | None = None, corrects: dict | None = None) -> dict:
     """Append one transition row to meta/ledger.jsonl and commit the ledger
     --no-verify. input_hashes come from the corpus manifest ('unknown' when the
     path is absent); commit captures the current bundle HEAD (the artifact commit
-    this row records)."""
+    this row records).
+
+    `corrects` (v0.25 audit F09) makes this row a CORRECTION instead of an
+    ordinary transition: it names an earlier row and one of its declared
+    outputs, with its own `dropped` explanation — see `check_corrects`. A
+    pure correction has nothing to report about a pass, so it is the one
+    case `inputs`/`outputs` may be empty lists rather than non-empty ones;
+    every other row keeps the original non-empty requirement unchanged."""
     row = {
         "run_id": run_id,
         "segment": segment,
@@ -211,7 +266,7 @@ def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: s
         "outputs": list(outputs) if isinstance(outputs, (list, tuple)) else outputs,
         "validation": validation,
     }
-    _check(row)
+    _check(row, require_nonempty_lists=corrects is None)
     manifest = _manifest(bundle)
     # inputs/input_hashes kept adjacent; commit last per the documented shape.
     row = {
@@ -251,6 +306,31 @@ def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: s
         # pre-v0.25 wrote, or every already-accepted bundle's ledger moves
         # under it. Refuses before anything is written — see check_dropped.
         row["dropped"] = check_dropped(dropped)
+    if corrects is not None:
+        # Appended last, same reasoning as spans/dropped/merge_map/job_digest.
+        # Refuses before anything is written — shape first (check_corrects),
+        # then existence: a correction naming a run_id/segment this ledger
+        # has never seen, or an output the named row never declared, is a
+        # silent no-op if let through — the same defect class as an
+        # unchecked state that looks like success, so it is refused instead.
+        normalized = check_corrects(corrects)
+        existing = read_rows(bundle)
+        matched = [er for er in existing
+                  if er.get("run_id") == normalized["run_id"]
+                  and er.get("segment") == normalized["segment"]]
+        if not matched:
+            raise ValueError(
+                f"{E_LEDGER_CORRECTION_UNKNOWN}: no ledger row exists with "
+                f"run_id={normalized['run_id']!r} segment={normalized['segment']!r} "
+                "— a correction must reference a row already on the ledger")
+        if not any(normalized["output"] in (er.get("outputs") or [])
+                  for er in matched if isinstance(er.get("outputs"), list)):
+            raise ValueError(
+                f"{E_LEDGER_CORRECTION_UNKNOWN}: run_id={normalized['run_id']!r} "
+                f"segment={normalized['segment']!r} never declared output "
+                f"{normalized['output']!r} in its outputs — a correction "
+                "must name an output the target row actually declared")
+        row["corrects"] = normalized
 
     path = ledger_path(bundle)
     path.parent.mkdir(parents=True, exist_ok=True)

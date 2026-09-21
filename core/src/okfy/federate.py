@@ -7,6 +7,7 @@ from okfy.bm25 import tokenize
 from okfy.bundle import Bundle
 from okfy.crosswalk import load_rows, parse_ref
 from okfy.index import load_index
+from okfy.validate import applies_to_shape_malformed
 from okfy.workspace import Member, Workspace
 
 RRF_K = 60
@@ -132,12 +133,16 @@ def _merge_same_as(ranked: dict[str, dict], rows: list) -> list[dict]:
 
 def _in_scope(applies_to, project_key: str | None) -> bool:
     """Fail closed (ADR-0015): missing, empty or malformed `applies_to` is
-    OUT of scope, never in. Only a list of strings can be in scope, and only
-    via an exact project_key match or the `*` wildcard."""
-    if not isinstance(applies_to, list) or not applies_to:
+    OUT of scope, never in. Malformation is `validate.applies_to_shape_malformed`
+    — the SAME predicate `validate._check_applies_to` uses to raise
+    E_APPLIES_TO on this concept, so the two readers cannot drift apart
+    again (finding F10: dropping bad entries and matching on what survived
+    used to make `['*', 123]` a search hit here while `validate` called it
+    malformed). Only a well-formed list of strings can be in scope, and
+    only via an exact project_key match or the `*` wildcard."""
+    if applies_to_shape_malformed(applies_to):
         return False
-    return any(k == "*" or k == project_key
-              for k in applies_to if isinstance(k, str))
+    return any(k == "*" or k == project_key for k in applies_to)
 
 
 def _personal_scope_filter(m: Member, pool: list[dict], project_key: str | None

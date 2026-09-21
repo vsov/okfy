@@ -22,7 +22,7 @@ from okfy.sourcemap import cited_span
 from okfy.transcript_lint import _SEGMENT
 from okfy.validate import (LINK_RE, Report, _check_archetype, _index_mode, _norm,
                            _shard_files, _source_checker, archetype_applies,
-                           resolve_link, review_due_date)
+                           ledger_prefix_check, resolve_link, review_due_date)
 
 ACTIONS = {"create", "update", "delete", "supersede", "flag", "gap"}
 # v0.24 (a): a flag's --type — closed, like ACTIONS itself: an unrecognised
@@ -59,6 +59,12 @@ E_PATCH_SHAPE = "E_PATCH_SHAPE"
 E_PATCH_COUNT = "E_PATCH_COUNT"
 E_PROPOSAL_SOURCE = "E_PROPOSAL_SOURCE"
 GAP_CAP = 10
+
+# v0.25 (R2): an `action` outside the closed vocabulary used to raise a bare
+# `ValueError` (no `E_` prefix) — the MCP adapter's `_CODED` match never
+# fired, so this reached an agent as a raw ToolError instead of the
+# adapter's promised {error, message, way_out}. See h_propose (handlers.py).
+E_PROPOSAL_ACTION = "E_PROPOSAL_ACTION"
 
 # v0.24 (a): `okfy propose --batch` — validate-all-first, write nothing on
 # any refusal unless --partial. One code for anything wrong with an entry's
@@ -171,6 +177,21 @@ def review_lock(bundle: Bundle):
 
 def content_sha256(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def _ledger_rewritten_refusal(check, context: str) -> str:
+    """Shared refusal text for `propose`'s rejected-content gate and
+    `accept`'s pre-commit check (v0.25 F05) — both catch the exact condition
+    `okfy validate` names E_LEDGER_REWRITTEN (`okfy.validate.
+    ledger_prefix_check`), worded in the same voice and pointing at the same
+    repair. `context` names WHY this caller refuses; the code, the divergence
+    location and the repair steps are the one shared part."""
+    return (
+        f"E_LEDGER_REWRITTEN: {check.relpath} diverges from its committed "
+        f"HEAD version at byte offset {check.offset} (row {check.row}) — "
+        f"{context}. Repair: restore the file from git (`git show "
+        f"HEAD:{check.relpath}`), then re-append the corrected decision as a "
+        "NEW row — the ledger never edits a row in place — then try again")
 
 
 def _flag_reject_hashes(flag_type: str | None, target: str | None,
@@ -495,13 +516,20 @@ def propose(bundle: Bundle, meta: dict, body: str, target: str | None = None,
     by the adapter PROCESS, never by the author. It may ONLY arrive through
     this keyword (`E_PROPOSAL_OBSERVED_FORGED` if the CONTENT tries to carry
     it) and is stored verbatim at `meta["proposal"]["observed"]`. The CLI
-    never passes it, so a CLI-filed proposal has no `observed` key at all."""
-    prepared = _prepare_proposal(
-        bundle, meta, body, target, action, note, actor=actor, evidence=evidence,
-        extends=extends, reopen=reopen, distinct_from=distinct_from, new_id=new_id,
-        supersedes=supersedes, reverts=reverts, flag_type=flag_type, query=query,
-        patch=patch, observed=observed)
-    return _materialize_proposal(bundle, prepared)
+    never passes it, so a CLI-filed proposal has no `observed` key at all.
+
+    v0.25 F05: prepare-then-materialize runs under `review_lock`, the same
+    mutation lock `accept`/`reject` already hold — the ledger-rewrite check
+    `_gate` runs inside `_prepare_proposal` must be atomic with the write
+    `_materialize_proposal` does right after it, or a concurrent writer could
+    rewrite meta/memory.jsonl in the window between the two."""
+    with review_lock(bundle):
+        prepared = _prepare_proposal(
+            bundle, meta, body, target, action, note, actor=actor, evidence=evidence,
+            extends=extends, reopen=reopen, distinct_from=distinct_from, new_id=new_id,
+            supersedes=supersedes, reverts=reverts, flag_type=flag_type, query=query,
+            patch=patch, observed=observed)
+        return _materialize_proposal(bundle, prepared)
 
 
 def _prepare_proposal(bundle: Bundle, meta: dict, body: str, target: str | None = None,
@@ -538,7 +566,8 @@ def _prepare_proposal(bundle: Bundle, meta: dict, body: str, target: str | None 
             raise ValueError(f"--extends target does not exist: {extends}")
         target, action = extends, "update"
     if action not in ACTIONS:
-        raise ValueError(f"bad action {action!r} (use: {sorted(ACTIONS)})")
+        raise ValueError(f"{E_PROPOSAL_ACTION}: bad action {action!r} — "
+                         f"use one of {sorted(ACTIONS)}")
     if action in {"update", "delete", "supersede"} and not target:
         raise ValueError(f"action {action!r} requires a target concept id")
     if action == "flag" and not (target or (query and str(query).strip())):
@@ -854,7 +883,18 @@ def propose_batch(bundle: Bundle, lines: list[str], *, actor: str,
     (folded into `_gate`'s GAP_CAP count via `sibling_gap_open_count`) — so a
     batch of duplicate gaps, duplicate flags, or two entries superseding the
     same proposal is refused entry-by-entry instead of writing all of them
-    (or crashing partway through materializing them)."""
+    (or crashing partway through materializing them).
+
+    v0.25 F05: the whole validate-all-then-write-all body runs under
+    `review_lock`, same as `propose()` — this is the SAME write path, just N
+    entries at once, and its wider validate/write window is the more exposed
+    of the two to a concurrent ledger rewrite landing in between."""
+    with review_lock(bundle):
+        return _propose_batch(bundle, lines, actor=actor, dry_run=dry_run, partial=partial)
+
+
+def _propose_batch(bundle: Bundle, lines: list[str], *, actor: str,
+                   dry_run: bool = False, partial: bool = False) -> dict:
     # `--as` is one value for the whole batch — checked once, the same way a
     # single propose() call checks it, rather than failing identically on
     # every entry.
@@ -1269,13 +1309,51 @@ def _gate(bundle: Bundle, meta: dict, body: str, target, action: str, reopen,
             f"{memory.MEMORY_FILE} while it has unreadable lines — `okfy validate` "
             "lists each one; the owner repairs the ledger, then propose again")
 
+    # v0.25 F05: parsing cleanly is not the same as being trustworthy — a
+    # ledger with a rejection surgically deleted still parses. The SAME
+    # byte-prefix predicate `okfy validate` uses (`ledger_prefix_check`),
+    # right beside the parseability check above. `rewritten`: the WORKING
+    # TREE can no longer answer "was this rejected?" either way — a `None`
+    # below could be a genuine negative or a scrubbed one — so every
+    # rejected-hash lookup in this function falls back to the COMMITTED HEAD
+    # version (`events_at_head`) instead: the exact trust boundary
+    # `ledger_prefix_check` itself already draws (its HONESTY LABEL: proves
+    # nothing about a rewrite that was itself already committed, only ever
+    # compares the working tree against HEAD). A hit found ONLY that way
+    # means the working copy is hiding a standing decision — refused as
+    # E_LEDGER_REWRITTEN, not E_PROPOSAL_REJECTED, naming the real problem.
+    # `unverifiable` (no git repo, or this file never committed yet) changes
+    # nothing here — every non-git bundle, and every bundle proposing for the
+    # first time, keeps using the working tree exactly as before.
+    ledger_check = ledger_prefix_check(bundle, memory.MEMORY_FILE)
+    reject_lookup_events = events
+    if ledger_check.outcome == "rewritten":
+        head_events, head_problems = memory.events_at_head(bundle)
+        if head_problems:
+            # Nothing trustworthy left to fall back to either.
+            raise ValueError(_ledger_rewritten_refusal(
+                ledger_check,
+                "the rejected-content gate cannot trust "
+                f"{memory.MEMORY_FILE}: its committed HEAD version is itself "
+                "unreadable, so even the fallback this gate uses for a "
+                "rewritten working copy has nothing to stand on"))
+        reject_lookup_events = head_events
+
     reopened = bool(reopen and str(reopen).strip())
     if action == "gap":
         # v0.24 (b): keyed on the NORMALIZED QUERY, not the note's bytes — two
         # different notes about the same unanswered question are the same gap.
         qh = query_hash(query)
-        prior = memory.rejected_hashes(bundle).get(qh)
+        prior = memory.rejected_hashes(bundle, from_events=reject_lookup_events).get(qh)
         if prior is not None and not reopened:
+            if ledger_check.outcome == "rewritten":
+                raise ValueError(_ledger_rewritten_refusal(
+                    ledger_check,
+                    "the working copy no longer shows the rejection by "
+                    f"{prior['actor']} on {str(prior['at'])[:10]} that HEAD "
+                    f"still has ({prior.get('reason') or 'no reason given'}) "
+                    "— re-proposing this query unreopened over a scrubbed "
+                    "rejection repeats a closed decision instead of reopening it"))
             raise ValueError(
                 f"{E_REJECTED}: this query was rejected by {prior['actor']} on "
                 f"{str(prior['at'])[:10]} ({prior.get('reason') or 'no reason given'}) "
@@ -1290,16 +1368,33 @@ def _gate(bundle: Bundle, meta: dict, body: str, target, action: str, reopen,
             chash, mhash = _flag_reject_hashes(flag_type, target, query, body)
         else:
             chash, mhash = content_sha256(body), match_sha256(body)
-        prior = memory.rejected_hashes(bundle).get(chash)
+        prior = memory.rejected_hashes(bundle, from_events=reject_lookup_events).get(chash)
         if prior is not None and not reopened:
+            if ledger_check.outcome == "rewritten":
+                raise ValueError(_ledger_rewritten_refusal(
+                    ledger_check,
+                    "the working copy no longer shows the rejection by "
+                    f"{prior['actor']} on {str(prior['at'])[:10]} that HEAD "
+                    f"still has ({prior.get('reason') or 'no reason given'}) "
+                    "— re-proposing this exact text unreopened over a scrubbed "
+                    "rejection repeats a closed decision instead of reopening it"))
             raise ValueError(
                 f"{E_REJECTED}: this exact text was rejected by {prior['actor']} on "
                 f"{str(prior['at'])[:10]} ({prior.get('reason') or 'no reason given'}) "
                 "— re-proposing it unchanged repeats a closed decision. If something "
                 'changed, say what: `okfy propose ... --reopen "<new evidence>"`')
-        tomb = memory.rejected_match_hashes(bundle).get(mhash)
+        tomb = memory.rejected_match_hashes(bundle, from_events=reject_lookup_events).get(mhash)
         if tomb is not None and not reopened:
             when = str(tomb["at"])[:10]
+            if ledger_check.outcome == "rewritten":
+                verb = "delete" if tomb["event"] == "accept" else "rejection"
+                raise ValueError(_ledger_rewritten_refusal(
+                    ledger_check,
+                    f"the working copy no longer shows the {verb} by "
+                    f"{tomb['actor']} on {when} that HEAD still has — "
+                    "re-proposing this text (reworded or not) unreopened over "
+                    "a scrubbed decision repeats a closed decision instead of "
+                    "reopening it"))
             if tomb["event"] == "accept":            # accepted delete: a tombstone
                 raise ValueError(
                     f"{E_REJECTED}: this text (reworded or not) was deleted by "
@@ -1599,6 +1694,35 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
     owner = check_owner_actor(
         bundle, as_actor, verb="review accept",
         retry=f"okfy review accept {bundle.root} {proposal_id}")
+
+    # v0.25 F05: every `_commit` call below deliberately commits with
+    # --no-verify — accept writes the FINAL concept file, which the bundle's
+    # own `write_policy: proposals` pre-commit hook must refuse from an agent
+    # and must allow from the owner's sanctioned command here. But bypassing
+    # the hook also bypasses the ledger check the hook would have run:
+    # without this, an accept that has nothing to do with an already-
+    # REWRITTEN meta/memory.jsonl would still fold its diverged working-tree
+    # bytes into HEAD the instant this call's commit touches the file —
+    # permanently erasing the evidence `okfy validate` was reporting, the
+    # exact laundering this release closes. The fix is narrower than
+    # refusing the whole accept: `_commit_paths` below drops
+    # `memory.MEMORY_FILE` from every commit THIS call makes while it is
+    # REWRITTEN — the concept write, proposal removal and log still commit
+    # normally, and the event THIS accept itself appends still lands in the
+    # working-tree file (via `memory.record`, independent of git), just not
+    # folded into HEAD — so the SAME divergence `ledger_prefix_check` found
+    # stays exactly where `okfy validate` can still see it, until the owner
+    # restores the file and commits it. `unverifiable` (no git repo, or this
+    # file never committed yet) changes nothing — every non-git bundle, and
+    # every bundle whose ledger is not yet committed, commits exactly as
+    # before this check existed.
+    ledger_check = ledger_prefix_check(bundle, memory.MEMORY_FILE)
+
+    def _commit_paths(paths: list[str]) -> list[str]:
+        if ledger_check.outcome != "rewritten":
+            return paths
+        return [p for p in paths if p != memory.MEMORY_FILE]
+
     # A flag/gap filed on `--query` alone has no real target concept — the
     # proposal-id-derived fallback (kebab of its own title) would otherwise
     # look like one.
@@ -1635,7 +1759,7 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
                       origin=origin, channel=channel)
         append_log(bundle, f"review: accept flag {target or env.get('query', '')} "
                            f"({env.get('note', '')}){unbased}")
-        _commit(bundle, [f"{proposal_id}.md", "log.md", memory.MEMORY_FILE],
+        _commit(bundle, _commit_paths([f"{proposal_id}.md", "log.md", memory.MEMORY_FILE]),
                 f"review: accept flag {proposal_id}")
         return target or ""
 
@@ -1688,8 +1812,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
                       target=None, action=action, content_sha256=content_sha256(c.body),
                       origin=origin, channel=channel)
         append_log(bundle, f"review: accept gap {term!r} ({env.get('note', '')}){unbased}")
-        _commit(bundle, ["meta/lexicon.md", f"{proposal_id}.md", "log.md",
-                        memory.MEMORY_FILE],
+        _commit(bundle, _commit_paths(["meta/lexicon.md", f"{proposal_id}.md", "log.md",
+                                       memory.MEMORY_FILE]),
                 f"review: accept gap {term!r}")
         return "meta/lexicon"
 
@@ -1716,7 +1840,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
                       match_sha256=deleted_match, origin=origin, channel=channel)
         append_log(bundle, f"review: accept delete {target} ({env.get('note', '')})"
                            f"{unbased}")
-        _commit(bundle, [f"{target}.md", f"{proposal_id}.md", "log.md", memory.MEMORY_FILE],
+        _commit(bundle, _commit_paths(
+                    [f"{target}.md", f"{proposal_id}.md", "log.md", memory.MEMORY_FILE]),
                 f"review: accept delete {target}")
         return target
 
@@ -1779,8 +1904,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
         # ONE commit: old concept, new concept, the consumed proposal, log,
         # ledger. index.md is untouched — same as every other accept; it is
         # regenerated by `okfy package`, never written by review accept.
-        _commit(bundle, [f"{target}.md", f"{new_id}.md", f"{proposal_id}.md",
-                        "log.md", memory.MEMORY_FILE],
+        _commit(bundle, _commit_paths([f"{target}.md", f"{new_id}.md", f"{proposal_id}.md",
+                                       "log.md", memory.MEMORY_FILE]),
                 f"review: accept supersede {target} -> {new_id}")
         return new_id
 
@@ -1833,7 +1958,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
                   origin=origin, channel=channel)
     append_log(bundle, f"review: accept {action} {target} ({env.get('note', '')})"
                        f"{unbased}")
-    _commit(bundle, [f"{target}.md", f"{proposal_id}.md", "log.md", memory.MEMORY_FILE],
+    _commit(bundle, _commit_paths(
+                [f"{target}.md", f"{proposal_id}.md", "log.md", memory.MEMORY_FILE]),
             f"review: accept {action} {target}")
     return target
 

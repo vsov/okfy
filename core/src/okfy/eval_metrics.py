@@ -289,7 +289,25 @@ def eval_metrics(bundle, run_id: str = "latest", suite: str = "adversarial",
     `n_pool_override`, when given, is `(n, reason)` from `workspace_pool_size`
     — the caller's way of saying "this bundle is a workspace root; do not
     call `pool_size` on it". Omitted (the default), the pool is
-    `pool_size(bundle)` as before, for an ordinary bundle."""
+    `pool_size(bundle)` as before, for an ordinary bundle.
+
+    v0.25 audit F15's SECOND boundary: `_parse_ks` in commands/quality.py
+    refuses a non-positive or non-integer `--k` at the CLI, but that check
+    sits in front of the CLI only — a library caller reaches `ks` straight
+    through to `_ranking_metrics` -> `_random_recall(k, n_pool, ...)`, which
+    computes `min(k, n) / n`: negative for k<0, a meaningless recall@0 for
+    k==0. Refused here too, in the same voice, so `eval_metrics(b,
+    ks=(-5,))` is refused rather than served a nonsense number. `bool` is a
+    subclass of `int` in Python; a `ks=(True,)` element is rejected here
+    even though `True == 1` would otherwise clear the positivity check — a
+    caller passing a boolean did not intend a rank cutoff, and letting it
+    through as `k=1` would be one more nonsense value slipping in on an
+    accident of Python's type hierarchy."""
+    for k in ks:
+        if isinstance(k, bool) or not isinstance(k, int) or k <= 0:
+            raise ValueError(
+                f"ks must be a sequence of positive integers, got {k!r} in "
+                f"ks={ks!r}")
     from okfy.evaluation import _find_run, load_evals, run_suite
     run = _find_run(load_evals(bundle), run_id, suite)
     rows = eval_rows(bundle, run)
@@ -331,6 +349,25 @@ def _resolve_run(data: dict, run_id: str, suite: str | None):
 
 
 def _query_diff(base_r: dict, head_r: dict, adversarial: bool) -> dict | None:
+    """v0.25 audit F08: this used to pick ONE run's declared concept —
+    `base_r.get("concept") or head_r.get("concept")` — and use it to rank
+    BOTH runs, so a target that changed from `a` to `b` between runs, with
+    identical hits in both, produced identical ranks and reported no
+    difference at all: a comparison the tool never actually made, reported
+    as agreement.
+
+    The release replay (`evaluation.replay_run_bounded`) already has the
+    discipline this needed: compare each named field EXPLICITLY and report
+    `recorded`/`replayed` (there) — `base`/`head` (here) — side by side,
+    never collapse two runs' values into one with `or`. Reused below:
+    `base_concept`/`head_concept` and `base_expect`/`head_expect` are each
+    run's OWN declared criterion, `base_rank`/`head_rank` is each one's OWN
+    target's rank in that run's OWN hits — never one target's rank looked
+    up in the other run's hits. When the criterion itself changed
+    (`concept` or `expect` differs), `criteria_changed` is set and the block
+    says explicitly that base_rank/head_rank are not a like-for-like ranking
+    comparison — they answer two different questions, not one question
+    twice."""
     base_ids = [h["id"] for h in (base_r.get("top_hits") or []) if isinstance(h, dict)]
     head_ids = [h["id"] for h in (head_r.get("top_hits") or []) if isinstance(h, dict)]
     entered = [i for i in head_ids if i not in base_ids]
@@ -346,15 +383,32 @@ def _query_diff(base_r: dict, head_r: dict, adversarial: bool) -> dict | None:
     notes_lost = sorted(base_notes - head_notes)
     concept_block = None
     if adversarial:
-        concept = base_r.get("concept") or head_r.get("concept")
-        if concept:
-            b_rank = base_ids.index(concept) + 1 if concept in base_ids else None
-            h_rank = head_ids.index(concept) + 1 if concept in head_ids else None
+        base_concept, head_concept = base_r.get("concept"), head_r.get("concept")
+        base_expect, head_expect = base_r.get("expect"), head_r.get("expect")
+        if base_concept or head_concept:
+            b_rank = (base_ids.index(base_concept) + 1
+                     if base_concept and base_concept in base_ids else None)
+            h_rank = (head_ids.index(head_concept) + 1
+                     if head_concept and head_concept in head_ids else None)
             b_out, h_out = base_r.get("outcome"), head_r.get("outcome")
-            if b_rank != h_rank or b_out != h_out:
-                concept_block = {"concept": concept, "base_rank": b_rank,
-                                 "head_rank": h_rank, "base_outcome": b_out,
-                                 "head_outcome": h_out}
+            criteria_changed = (base_concept != head_concept
+                               or base_expect != head_expect)
+            if criteria_changed or b_rank != h_rank or b_out != h_out:
+                concept_block = {
+                    "base_concept": base_concept, "head_concept": head_concept,
+                    "base_expect": base_expect, "head_expect": head_expect,
+                    "base_rank": b_rank, "head_rank": h_rank,
+                    "base_outcome": b_out, "head_outcome": h_out,
+                    "criteria_changed": criteria_changed,
+                }
+                if criteria_changed:
+                    concept_block["note"] = (
+                        "the declared target changed between runs "
+                        f"(base: expect={base_expect!r} concept={base_concept!r}; "
+                        f"head: expect={head_expect!r} concept={head_concept!r}) "
+                        "— base_rank/head_rank are each run's OWN target's own "
+                        "rank, not one target's rank in both runs; this is not "
+                        "a like-for-like ranking comparison")
     if not (entered or left or rank_moves or notes_gained or notes_lost or concept_block):
         return None
     out = {"query": base_r.get("query"), "entered": entered, "left": left,
@@ -413,16 +467,39 @@ def eval_qrels(bundle, unit: str = "span") -> dict:
     """Span-level ground truth for the raw-corpus arm: every source a
     covered-with-concept adversarial row's declared concept cites, resolved
     to (file, start, end) via the SAME anchor grammar `okfy sourcemap`
-    validates against. Unresolvable anchors are listed under `unresolved`,
-    never silently dropped — an anchor that cannot be resolved is not
-    evidence the corpus lacks the span, only that this reader could not
-    place it."""
+    validates against.
+
+    v0.25 audit F11: PARSED is not VERIFIED, and this reader used to report
+    only two states. `cited_span`'s line-anchor branch now checks existence
+    and bounds whenever corpus bytes are available (see its docstring), so
+    with a readable corpus a bad citation — a missing file, `L0`, a reversed
+    range, a beyond-EOF range — correctly comes back unresolved rather than
+    resolved-on-grammar-alone. But a citation this reader never even HAD
+    corpus bytes to check is a third thing, not either of the first two: it
+    PARSED (the shape is a legal line range) and is simply UNVERIFIABLE, and
+    conflating it with either `spans` (claiming it was checked and passed)
+    or `unresolved` (claiming it names something wrong) would both overstate
+    what this reader established. Three lists, not two:
+
+    - `spans`: VERIFIED — corpus was readable and the span checked out.
+    - `unresolved`: this reader could not place the citation at all, or the
+      corpus was readable and the citation was checked and found bad.
+    - `unverifiable`: the citation parsed to a well-formed candidate span,
+      but the bundle's corpus was not locally readable, so nothing about it
+      was actually checked. Never silently promoted to `spans` — an
+      unreachable corpus is not evidence the span is right, only that this
+      reader could not tell."""
     if unit not in UNITS:
         raise ValueError(f"unsupported --unit {unit!r} (use: {list(UNITS)})")
     from okfy.evaluation import suite_queries
     from okfy.sourcemap import _corpus, cited_span
     corpus = _corpus(bundle)
     rows = []
+    # Per-run cache, local to this one call — same shape and reasoning as
+    # `validate._check_quotes`'s: several adversarial rows routinely cite the
+    # same corpus file, and `cited_span`'s own F11 bounds check must not
+    # re-read a file an earlier row in this loop already read.
+    lines_cache: dict[str, list[str] | None] = {}
     for spec in suite_queries(bundle, "adversarial"):
         if not isinstance(spec, dict) or spec.get("expect") != "covered":
             continue
@@ -430,14 +507,19 @@ def eval_qrels(bundle, unit: str = "span") -> dict:
         if not concept_id:
             continue
         c = bundle.get(concept_id)
-        spans, unresolved = [], []
+        spans, unresolved, unverifiable = [], [], []
         for s in (c.meta.get("sources") or []) if c else []:
-            path, start, end = cited_span(str(s), corpus)
+            s = str(s)
+            path, start, end = cited_span(s, corpus, lines_cache=lines_cache)
             if start is None:
-                unresolved.append(str(s))
+                unresolved.append(s)
+            elif corpus is None:
+                # PARSED, never checked against a byte — see the docstring.
+                unverifiable.append(s)
             else:
                 spans.append({"file": path, "start": start, "end": end})
         rows.append({"query": spec.get("query"), "concept": concept_id,
                      "concept_found": c is not None,
-                     "spans": spans, "unresolved": unresolved})
+                     "spans": spans, "unresolved": unresolved,
+                     "unverifiable": unverifiable})
     return {"unit": unit, "rows": rows}

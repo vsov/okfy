@@ -2,11 +2,16 @@ from pathlib import Path
 
 from okfy.bundle import Bundle
 from okfy.cluster import cluster_drafts
+from okfy.init import _corpus_git_sha
 from okfy.repair import repair_links
 from okfy.segment import (append_segments_to_plan, make_glean_segments,
                           make_segments, set_segment_status, survey,
                           write_segments_to_plan)
-from okfy.update import anchored_source_share, refresh_snapshot, update_plan
+from okfy.proposals import list_proposals
+from okfy.update import (E_BUNDLE_DIRTY, E_CORPUS_DIRTY,
+                         E_UPDATE_PROPOSALS_PENDING, _corpus_dirty_paths,
+                         anchored_source_share, refresh_snapshot,
+                         repair_anchors, update_plan)
 from okfy.validate import validate_integrity
 
 from .common import _print
@@ -127,14 +132,135 @@ def cmd_diff(a) -> int:
     return 0
 
 
+_DIRTY_PATHS_SHOWN = 10  # a readable number; the rest are counted, not named
+
+
 def cmd_snapshot(a) -> int:
+    """`okfy snapshot` pins the corpus's committed tree (v0.25 audit F03) —
+    never the working tree — so a DIRTY corpus (uncommitted changes ahead of
+    HEAD) is refused here, before `refresh_snapshot` is even called: silently
+    pinning HEAD while the owner is mid-edit would look successful and still
+    swallow whatever committed change HEAD represents. `--force` overrides
+    and says so in the printed result; `refresh_snapshot(b, force=True)` is
+    what makes that real rather than cosmetic (its own default, force=False,
+    independently no-ops on a dirty corpus — this check is the user-facing
+    half of that same decision, not a duplicate of it).
+
+    v0.25 audit F04 adds two more refusals, both checked before
+    `refresh_snapshot` runs, both overridden by the same `--force`:
+
+    - A DIRTY BUNDLE (uncommitted changes in the bundle's own git working
+      tree) — symmetric with the dirty-corpus check above: a snapshot pins a
+      relationship between two COMMITTED states, and the bundle side can be
+      uncommitted exactly the way the corpus side can. This is what actually
+      closes the F04 witness: snapshotting between an uncommitted concept
+      edit and the commit meant to land it must not silently advance the
+      baseline past a change that might still fail to commit.
+    - Proposals filed for THIS update still PENDING owner review — a
+      snapshot declares the corpus baseline current, and an update whose
+      proposals have not been accepted or rejected yet is not complete
+      (phase-5.md). `okfy review list` names what is open."""
     b = Bundle(a.bundle)
-    refresh_snapshot(b)
-    _print({"snapshot": "refreshed"})
-    return 0
+
+    pending = list_proposals(b)
+    if pending and not a.force:
+        shown = ", ".join(p["id"] for p in pending[:_DIRTY_PATHS_SHOWN])
+        more = (f" (+{len(pending) - _DIRTY_PATHS_SHOWN} more)"
+               if len(pending) > _DIRTY_PATHS_SHOWN else "")
+        raise ValueError(
+            f"{E_UPDATE_PROPOSALS_PENDING}: {len(pending)} proposal(s) are "
+            f"still pending owner review: {shown}{more}. Pending owner "
+            "proposals are not a completed update — snapshotting now would "
+            "declare the corpus baseline current while what to do about "
+            "these concepts has not actually been decided, and the next "
+            "okfy diff would report nothing pending even though they still "
+            "are. Run `okfy review accept` / `okfy review reject` on each "
+            "one (see `okfy review list`) and run okfy snapshot again, or "
+            "pass --force to snapshot anyway and treat them as out of "
+            "scope for this baseline")
+
+    # Scoped to bundles that installed the write-policy hook (`okfy package`)
+    # — that hook is the only mechanism that can refuse the commit and
+    # strand an advanced snapshot; see refresh_snapshot's own docstring for
+    # why an un-hooked bundle's uncommitted concepts are not this risk.
+    bundle_dirty: list[str] = []
+    if (b.root / ".git" / "hooks" / "pre-commit").is_file() \
+            and _corpus_git_sha(b.root) is not None:
+        bundle_dirty = _corpus_dirty_paths(b.root)
+
+    if bundle_dirty and not a.force:
+        shown = ", ".join(bundle_dirty[:_DIRTY_PATHS_SHOWN])
+        more = (f" (+{len(bundle_dirty) - _DIRTY_PATHS_SHOWN} more)"
+               if len(bundle_dirty) > _DIRTY_PATHS_SHOWN else "")
+        raise ValueError(
+            f"{E_BUNDLE_DIRTY}: the bundle itself has {len(bundle_dirty)} "
+            f"uncommitted change(s): {shown}{more}. A snapshot pins a "
+            "relationship between two COMMITTED states — the corpus's, and "
+            "the bundle's own — so snapshotting now would record a "
+            "baseline that a refused or abandoned commit could leave the "
+            "bundle's own history never actually reaching (v0.25 audit "
+            "F04). Commit or discard the bundle's local changes and run "
+            "okfy snapshot again, or pass --force to snapshot anyway and "
+            "pin the corpus baseline against this uncommitted bundle state")
+
+    cm = b.get("meta/corpus")
+    corpus_raw = Path(str(cm.meta.get("corpus") or "")) if cm else None
+    corpus = corpus_raw if corpus_raw and corpus_raw.is_dir() else None
+
+    dirty: list[str] = []
+    if corpus is not None and _corpus_git_sha(corpus) is not None:
+        dirty = _corpus_dirty_paths(corpus)
+
+    if dirty and not a.force:
+        shown = ", ".join(dirty[:_DIRTY_PATHS_SHOWN])
+        more = (f" (+{len(dirty) - _DIRTY_PATHS_SHOWN} more)"
+               if len(dirty) > _DIRTY_PATHS_SHOWN else "")
+        raise ValueError(
+            f"{E_CORPUS_DIRTY}: the corpus at {corpus} has {len(dirty)} "
+            f"uncommitted change(s) — git mode pins the corpus's last "
+            f"COMMIT, so snapshotting now would record a baseline that "
+            f"disagrees with what is actually on disk: {shown}{more}. "
+            "Commit or discard the changes and run okfy snapshot again, "
+            "or pass --force to snapshot the last commit anyway and ignore "
+            "the uncommitted changes")
+
+    outcome = refresh_snapshot(b, force=a.force)
+    result = {"snapshot": "refreshed" if outcome["refreshed"] else "skipped",
+             **outcome}
+    if (dirty or bundle_dirty or pending) and a.force:
+        result["forced"] = True
+        notes = []
+        if pending:
+            notes.append(f"{len(pending)} proposal(s) pending")
+        if bundle_dirty:
+            notes.append(f"bundle had {len(bundle_dirty)} uncommitted change(s)")
+        if dirty:
+            notes.append(f"corpus had {len(dirty)} uncommitted change(s)")
+        result["note"] = ("snapshotted anyway, per --force: " + "; ".join(notes))
+    _print(result)
+    return 0 if outcome["refreshed"] else 1
 
 
 def cmd_repair_links(a) -> int:
     b = Bundle(a.bundle)
     _print(repair_links(b, apply=not a.dry_run))
+    return 0
+
+
+def cmd_reanchor(a) -> int:
+    """`okfy reanchor` (v0.25 audit F02): the ONLY thing that clears a pin
+    `refresh_snapshot` flagged `anchor_stale` — see `repair_anchors`'s
+    docstring for why rewriting the concept's own citation text is what
+    makes the debt actually go away, rather than a snapshot-side reset.
+    `--only` restricts repair to one `concept:source` pair (repeatable);
+    omitted, every current `reanchor` entry is repaired. `--dry-run` reports
+    what would be repaired without writing anything."""
+    b = Bundle(a.bundle)
+    only = None
+    if a.only:
+        only = set()
+        for item in a.only:
+            concept, _, source = item.partition(":")
+            only.add((concept, source))
+    _print(repair_anchors(b, only=only, apply=not a.dry_run))
     return 0

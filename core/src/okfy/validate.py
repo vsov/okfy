@@ -25,6 +25,87 @@ class Finding:
 
 
 @dataclass
+class LedgerPrefixCheck:
+    """Result of `ledger_prefix_check` — the ONE append-only predicate shared
+    by the reader (`okfy validate`, via `_check_one_ledger_append_only`) and
+    both ledger writers (`okfy propose`'s rejected-content gate, `okfy review
+    accept`'s pre-commit check). Three outcomes, kept distinct on purpose
+    (v0.25 F05): collapsing `unverifiable` into either of the other two either
+    refuses every bundle with no git repository (folded into `rewritten`) or
+    silently stops guarding the moment one exists (folded into `intact`).
+
+    - `outcome == "intact"`: no committed baseline to contradict — either the
+      working tree really is a byte-superset of HEAD's version, or there is
+      no committed version AND no working-tree file at all (nothing to claim
+      append-only about; see `_check_one_ledger_append_only`).
+    - `outcome == "rewritten"`: a committed baseline exists and the working
+      tree is NOT a byte-prefix-superset of it — `offset`/`row` name where
+      the first divergence starts (0-based byte offset, 1-based line).
+    - `outcome == "unverifiable"`: a working-tree file exists but there is no
+      committed baseline to compare it against — `reason` says why:
+      `"no_repo"` (bundle.root is not a git repository) or `"not_committed"`
+      (a repository exists but HEAD has no version of this file yet). This is
+      NOT the same as `intact` — a caller that must not proceed on faith
+      checks `reason` itself rather than treating "not rewritten" as "safe"."""
+    outcome: str  # "intact" | "rewritten" | "unverifiable"
+    relpath: str
+    offset: int | None = None   # rewritten only
+    row: int | None = None      # rewritten only
+    reason: str | None = None   # unverifiable only: "no_repo" | "not_committed"
+
+
+def ledger_prefix_check(bundle: Bundle, relpath: str) -> LedgerPrefixCheck:
+    """The append-only byte-prefix predicate itself (see `LedgerPrefixCheck`
+    for the three outcomes). Reads exactly one committed blob per call
+    (`git show HEAD:<path>`), never a walk of history — same limit the
+    original check documented: this proves nothing about a rewrite that was
+    itself already committed, only catches an uncommitted one."""
+    from okfy.gitenv import run_git
+    wt_path = bundle.root / relpath
+    has_repo = (bundle.root / ".git").exists()
+    committed = None  # bytes of the committed HEAD blob, or None if there isn't one
+    if has_repo:
+        shown = run_git(bundle.root, "show", f"HEAD:{relpath}", capture_output=True)
+        if shown.returncode == 0:
+            committed = shown.stdout  # capture_output without text=True: bytes
+    has_working = wt_path.is_file()
+
+    if committed is None and not has_working:
+        # Nothing to verify and nothing to be silent about: no committed
+        # version AND no working-tree file — there is no append-only claim
+        # to make about a file that is not there at all.
+        return LedgerPrefixCheck("intact", relpath)
+
+    if committed is None:
+        # A working-tree file exists but there is nothing committed yet to
+        # compare it against.
+        reason = "no_repo" if not has_repo else "not_committed"
+        return LedgerPrefixCheck("unverifiable", relpath, reason=reason)
+
+    # A committed baseline exists. `has_working` may be False here — the
+    # whole file was deleted from the working tree — which the byte-prefix
+    # comparison below catches on its own (an empty working copy can never
+    # be a superset of a non-empty committed prefix).
+    working = wt_path.read_bytes() if has_working else b""
+    # Line endings are normalized on BOTH sides before the prefix comparison
+    # (CRLF, and lone CR, folded to LF) — see the long note this carried in
+    # `_check_one_ledger_append_only` before extraction: a smudge filter
+    # re-materializing a committed LF file with CRLF endings must not read as
+    # a rewrite, and an edit INSIDE a line still changes bytes normalization
+    # never touches, so this keeps the check's teeth.
+    working_n = working.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    committed_n = committed.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if working_n.startswith(committed_n):
+        return LedgerPrefixCheck("intact", relpath)
+    n = min(len(committed_n), len(working_n))
+    offset = 0
+    while offset < n and committed_n[offset] == working_n[offset]:
+        offset += 1
+    row = committed_n[:offset].count(b"\n") + 1
+    return LedgerPrefixCheck("rewritten", relpath, offset=offset, row=row)
+
+
+@dataclass
 class Report:
     findings: list[Finding] = field(default_factory=list)
     sources: dict | None = None  # coverage summary, set when source checks ran
@@ -713,19 +794,38 @@ def _check_supersede_cycles(concepts, r: Report):
             color[n] = BLACK
 
 
+def applies_to_shape_malformed(v) -> bool:
+    """The ONE predicate for "is this `applies_to` value structurally
+    malformed": not a list, an empty list, or containing any entry that is
+    not a non-blank string. Shared by `_check_applies_to` below (which turns
+    a malformed value into the `E_APPLIES_TO` finding) and
+    `federate._in_scope` (which turns the identical value into "out of
+    scope" for a `personal` member's query). Before v0.25 F10 each reader
+    re-implemented this test; `federate._in_scope` filtered bad entries out
+    and matched on the remainder instead of checking the whole value, so
+    `applies_to: ['*', 123]` was a search hit while `validate` called the
+    same concept malformed. Only the QUESTION ("is this shape malformed")
+    is shared — each caller keeps its own answer to what a malformed value
+    means for it."""
+    return not isinstance(v, list) or not v or \
+        any(not isinstance(x, str) or not x.strip() for x in v)
+
+
 def _check_applies_to(concepts, r: Report):
     """`applies_to` (v0.24, personal memory, ADR-0015) is an optional list of
     project keys — or `*` — naming which workspace(s) may see this concept
     when it is read through a `personal`-role workspace member. Validated in
     EVERY bundle (a personal bundle is an ordinary bundle when queried
     directly) but only READ at query time for `personal` members
-    (federate.py). ERROR, not warning: a malformed value is neither
-    provably in scope nor provably out of it, and a fail-closed filter must
-    never guess — `federate.py` drops it either way, but a silent drop reads
-    as "no memory exists" instead of "this frontmatter is broken".
+    (federate.py). Structural malformation is `applies_to_shape_malformed`
+    above. ERROR, not warning: a malformed value is neither provably in
+    scope nor provably out of it, and a fail-closed filter must never guess
+    — `federate._in_scope` drops it either way (same predicate, see above),
+    but a silent drop reads as "no memory exists" instead of "this
+    frontmatter is broken".
 
     v0.24 review fix (finding 45): a value that is well-formed but shaped
-    like nothing `federate._in_scope` ever compares equal (whitespace-padded,
+    like nothing `_in_scope` ever compares equal (whitespace-padded,
     uppercase, an embedded space) can never match any legal
     `workspace.PROJECT_KEY_RE` project_key either — it is just as
     unmatchable as a malformed one, so it gets the same error rather than
@@ -734,8 +834,7 @@ def _check_applies_to(concepts, r: Report):
         if "applies_to" not in c.meta:
             continue
         v = c.meta["applies_to"]
-        if not isinstance(v, list) or not v or \
-                any(not isinstance(x, str) or not x.strip() for x in v):
+        if applies_to_shape_malformed(v):
             r.add("error", "E_APPLIES_TO", c.id,
                   f"applies_to must be a non-empty list of project-key "
                   f"strings (or `*`): {v!r}")
@@ -836,28 +935,18 @@ def _check_ledger_append_only(bundle: Bundle, r: Report):
 
 
 def _check_one_ledger_append_only(bundle: Bundle, relpath: str, r: Report):
-    from okfy.gitenv import run_git
-    wt_path = bundle.root / relpath
-    has_repo = (bundle.root / ".git").exists()
-    committed = None  # bytes of the committed HEAD blob, or None if there isn't one
-    if has_repo:
-        shown = run_git(bundle.root, "show", f"HEAD:{relpath}", capture_output=True)
-        if shown.returncode == 0:
-            committed = shown.stdout  # capture_output without text=True: bytes
-    has_working = wt_path.is_file()
-
-    if committed is None and not has_working:
-        # Nothing to verify and nothing to be silent about: no committed
-        # version AND no working-tree file — there is no append-only claim
-        # to make about a file that is not there at all. Whether the file
-        # OUGHT to exist is a different check's business.
+    """Reports all three `ledger_prefix_check` outcomes as findings, unchanged
+    from before the predicate was extracted (v0.25 F05) — `intact` reports
+    nothing, `unverifiable` and `rewritten` register at the same level a real
+    finding always would (a warning, an error), never silently passed."""
+    check = ledger_prefix_check(bundle, relpath)
+    if check.outcome == "intact":
         return
-
-    if committed is None:
-        # A working-tree file exists but there is nothing committed yet to
-        # compare it against — reported at the same level a real finding
-        # would be (a registered warning), never silently passed.
-        if not has_repo:
+    if check.outcome == "unverifiable":
+        # Reported at the same level a real finding would be — never
+        # silently passed. Whether the file OUGHT to exist is a different
+        # check's business.
+        if check.reason == "no_repo":
             r.add("warning", "W_LEDGER_UNVERIFIABLE", relpath,
                   f"{relpath}: append-only cannot be verified — {bundle.root} "
                   "is not a git repository, so there is no committed baseline "
@@ -873,36 +962,11 @@ def _check_one_ledger_append_only(bundle: Bundle, relpath: str, r: Report):
                   "be checked against a real HEAD version — until then it is "
                   "observed, not verified")
         return
-
-    # A committed baseline exists. `has_working` may be False here — the
-    # whole file was deleted from the working tree — which the byte-prefix
-    # comparison below catches on its own (an empty working copy can never
-    # be a superset of a non-empty committed prefix): the limit case of
-    # "a row was deleted", not a third skip path.
-    working = wt_path.read_bytes() if has_working else b""
-    # Line endings are normalized on BOTH sides before the prefix comparison
-    # (CRLF, and lone CR, folded to LF). Under `core.autocrlf=true` (git's
-    # own Windows-installer default) or a `.gitattributes` text-
-    # normalization rule, git's smudge filter re-materializes a committed LF
-    # file with CRLF line endings in the working tree — an untouched,
-    # freshly checked-out file would otherwise diverge from the committed
-    # blob at row 1 and be reported as rewritten. Both ledgers are JSONL, so
-    # a line terminator carries no information of its own; an edit to a row
-    # still changes bytes INSIDE the line, which normalization never
-    # touches, so this keeps the check's teeth.
-    working_n = working.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    committed_n = committed.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    if working_n.startswith(committed_n):
-        return
-    n = min(len(committed_n), len(working_n))
-    offset = 0
-    while offset < n and committed_n[offset] == working_n[offset]:
-        offset += 1
-    row = committed_n[:offset].count(b"\n") + 1
+    # outcome == "rewritten"
     r.add("error", "E_LEDGER_REWRITTEN", relpath,
           f"{relpath} was rewritten, not appended: the working tree diverges "
-          f"from the committed HEAD version at byte offset {offset} (row "
-          f"{row}) — {relpath} is append-only, so committed content must "
+          f"from the committed HEAD version at byte offset {check.offset} (row "
+          f"{check.row}) — {relpath} is append-only, so committed content must "
           "stay a byte-prefix of the working copy, and an already-committed "
           "row was edited or removed. Repair: restore the file from git "
           f"(the committed HEAD:{relpath} blob), then re-append the "
@@ -1323,10 +1387,24 @@ def _check_drops_unexplained(bundle: Bundle, r: Report):
     but the reader does not re-verify it) is reported as malformed rather
     than iterated character by character into bogus one-letter draft ids.
 
+    CORRECTIONS (v0.25 audit F09): the ledger is append-only, so editing a
+    committed row's own `dropped` block to explain an old loss is exactly
+    what `E_LEDGER_REWRITTEN` forbids — the warning's original way-out was a
+    dead end. The legal repair is a LATER row whose `corrects` block names
+    the earlier row (`run_id`/`segment`) and the one `output` it accounts
+    for, plus its own `dropped` explanation (see `ledger.check_corrects`,
+    `ledger.add_row`). `corrects` is read ledger-wide, like `merge_map`, but
+    matched by the exact (run_id, segment, output) triple it names — never a
+    bundle-wide pool: a correction for one row's output can only ever credit
+    that same row's same output, never another row's gap, so the mixed-
+    hygiene case above (one segment's bookkeeping masking another's real
+    loss) cannot recur through this door either.
+
     Never blocks, at any strictness — see the phase spec's acceptance
     criterion 6. This is a warning about missing bookkeeping, not a defect in
-    the concepts themselves; the way out is to record `dropped`, or to name
-    the absorbing final in `merge_map`, not to change the concepts."""
+    the concepts themselves; the way out is to append a correction row (or
+    name the absorbing final in `merge_map`), never to edit the row in
+    place."""
     from okfy.ledger import read_rows
     try:
         purpose = bundle.purpose()
@@ -1339,10 +1417,25 @@ def _check_drops_unexplained(bundle: Bundle, r: Report):
         return
 
     merge_map: dict[str, str] = {}
+    corrected: set[tuple[str, str, str]] = set()
     for row in rows:
         mm = row.get("merge_map")
         if isinstance(mm, dict):
             merge_map.update({str(k): str(v) for k, v in mm.items()})
+        c = row.get("corrects")
+        if isinstance(c, dict):
+            rid, seg, out, cd = (c.get("run_id"), c.get("segment"),
+                                 c.get("output"), c.get("dropped"))
+            # Same tolerance as the malformed-outputs/boolean-dropped cases
+            # below: a hand-edited or garbage `corrects` block is simply not
+            # matched, never crashes the reader. An explanation is required
+            # (a non-empty `dropped`) — a correction with nothing recorded is
+            # the same defect this warning exists to catch.
+            if (isinstance(rid, str) and rid.strip()
+                    and isinstance(seg, str) and seg.strip()
+                    and isinstance(out, str) and out.strip()
+                    and isinstance(cd, dict) and cd):
+                corrected.add((rid, seg, out))
 
     total_gap = 0
     examples: list[str] = []
@@ -1358,9 +1451,11 @@ def _check_drops_unexplained(bundle: Bundle, r: Report):
                   "treated as reporting nothing rather than reasoned about "
                   "character by character; fix the row so outputs is a list")
             continue
+        row_id, row_segment = row.get("run_id"), row.get("segment")
         row_declared = sorted({str(o) for o in outputs})
         row_unaccounted = [o for o in row_declared
-                           if o not in merge_map and not _output_exists(bundle, o)]
+                           if o not in merge_map and not _output_exists(bundle, o)
+                           and (row_id, row_segment, o) not in corrected]
         dropped = row.get("dropped")
         row_dropped_total = 0
         if isinstance(dropped, dict):
@@ -1382,9 +1477,11 @@ def _check_drops_unexplained(bundle: Bundle, r: Report):
         examples_str = ", ".join(examples)
         r.add("warning", "W_DROPS_UNEXPLAINED", "meta/ledger.jsonl",
               f"{total_gap} declared draft(s) vanished with no recorded reason "
-              f"(e.g. {examples_str}) — record them in the SAME row's "
-              "`dropped` block, or name the final that absorbed them in "
-              "`merge_map`")
+              f"(e.g. {examples_str}) — the ledger is append-only, so the "
+              "original row cannot be edited to explain them; append a new "
+              "row whose `corrects` block names the original run_id/segment "
+              "and this output (with its own `dropped` explanation), or "
+              "name the final that absorbed them in `merge_map`")
 
 
 ANCHOR_LINE_RE = re.compile(r"^L(\d+)(?:-L(\d+))?$")
@@ -1619,7 +1716,13 @@ def _check_quotes(bundle: Bundle, concepts, r: Report):
             ref = str(ref)
             if ref not in srcs or not isinstance(quote, str) or not quote.strip():
                 continue  # a stray/malformed entry — not this check's finding
-            path, start, end = cited_span(ref, root)
+            # `lines_cache` threaded straight into `cited_span`: for a
+            # line/ledger-anchored ref it does its own F11 bounds check by
+            # reading through this same dict (see `sourcemap._cited_lines`),
+            # so the read below is a cache hit, not a second read of the
+            # file — the whole point of the cache this function already
+            # built.
+            path, start, end = cited_span(ref, root, lines_cache=lines_cache)
             if start is None:
                 continue  # unresolved span: an anchor/source finding, not this one
             f = (root / path).resolve()
@@ -1634,6 +1737,14 @@ def _check_quotes(bundle: Bundle, concepts, r: Report):
             lines = lines_cache[key]
             if lines is None:
                 continue
+            # Not dead code: `cited_span`'s own bounds check covers the
+            # bare-path and line/ledger-anchor branches (see its docstring),
+            # but its char-anchor branch clamps rather than validates
+            # ordering — a reversed anchor like `file.md#C100-C5` can still
+            # come back with `end < start`. This check is the one place that
+            # catches that case, so it stays; it is cheap, and removing it
+            # would mean teaching `cited_span` to validate char-anchor
+            # ordering too, which is a different fix than this one.
             if start < 1 or end < start or end > len(lines):
                 continue  # invalid line range: W_BAD_ANCHOR's finding, not this one
             span = "".join(lines[start - 1:end])

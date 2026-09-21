@@ -43,6 +43,7 @@ MUTATES: dict[str, bool] = {
     "changes": False,         # v0.25: read-only window query over meta/memory.jsonl
     "snapshot": True,         # writes meta/corpus-manifest.json, meta/source-pins.json, meta/corpus.md
     "repair-links": True,     # default apply=True; --dry-run does not write, but the leaf's intent is a write
+    "reanchor": True,         # v0.25 F02: default apply=True; --dry-run does not write, but the leaf's intent is a write (rewrites a concept's own sources: citation)
     "package": True,
     "log": True,
     "propose": True,          # a refused proposal (or --dry-run/all-refused --batch) writes nothing, but the verb's intent is a write

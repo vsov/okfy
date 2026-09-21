@@ -34,6 +34,32 @@ case "$POLICY" in
     BLOCKED=$(git diff --cached --name-only --diff-filter=ACMRD -- '*.md' \\
       | grep -vE '^(proposals|drafts|index|protocols)/' \\
       | grep -vE '^(index|log|README|AGENTS|CLAUDE)\\.md$')
+    # v0.25 audit F04: meta/corpus.md is NOT in bundle.RESERVED_DIRS — unlike
+    # index/ and protocols/ above, `iter_md_files` enumerates it as a concept
+    # like any other, so the justification above does not cover it. What IS
+    # true: `refresh_snapshot` (okfy.update) is the only normal writer of
+    # this file, and it only ever changes two lines — `git_sha:` and
+    # `extracted_at:`; body and every other key (including `corpus:`) are
+    # carried over untouched (`new_meta = dict(c.meta)`, then only those two
+    # keys are overwritten). So the carve-out checks exactly that shape, not
+    # merely "the file is meta/corpus.md": a staged meta/corpus.md whose
+    # added/removed diff lines are ALL `git_sha:`/`extracted_at:` is a
+    # snapshot refresh, never a rewrite an owner would need to review, and
+    # passes. Anything else in that diff — body text, a new key, a changed
+    # title, REPOINTING `corpus:` — is exactly the unreviewed content
+    # becoming committed this gate exists to refuse, and stays blocked
+    # below. meta/purpose.md is never carved out this way: it carries
+    # write_policy itself, and an agent that could rewrite it could turn
+    # this whole gate off.
+    if echo "$BLOCKED" | grep -qx 'meta/corpus.md'; then
+      CORPUS_DIFF=$(git diff --cached -U0 -- meta/corpus.md \\
+        | grep -E '^[+-]' \\
+        | grep -vE '^(\\+\\+\\+|---)' \\
+        | grep -vE '^[+-](git_sha|extracted_at):')
+      if [ -z "$CORPUS_DIFF" ]; then
+        BLOCKED=$(echo "$BLOCKED" | grep -vx 'meta/corpus.md')
+      fi
+    fi
     if [ -n "$BLOCKED" ]; then
       echo "write_policy=proposals: direct concept edits are refused:" >&2
       echo "$BLOCKED" >&2

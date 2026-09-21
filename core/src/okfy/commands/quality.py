@@ -49,6 +49,33 @@ def _fmt_metric(m: dict) -> str:
     return f"{m['value']:.3f}"
 
 
+def _parse_ks(raw: str) -> tuple[int, ...]:
+    """CLI boundary for `--k` (F15, v0.25 audit): every cutoff must be a
+    positive integer. `eval_metrics`'s random-recall control arm is
+    `min(k, n) / n` — negative for k<0, a meaningless recall@0 for k==0 — so
+    a non-positive or non-numeric cutoff must be refused here, naming
+    `--k`, rather than silently producing a control arm nobody can act on."""
+    out = []
+    for piece in (p.strip() for p in raw.split(",")):
+        if not piece:
+            continue
+        try:
+            k = int(piece)
+        except ValueError:
+            raise ValueError(
+                f"--k must be a comma-separated list of positive integers, "
+                f"got {piece!r} in --k={raw!r}") from None
+        if k <= 0:
+            raise ValueError(
+                f"--k must be a comma-separated list of positive integers, "
+                f"got {k} in --k={raw!r}")
+        out.append(k)
+    if not out:
+        raise ValueError(
+            f"--k must name at least one positive integer, got --k={raw!r}")
+    return tuple(out)
+
+
 def _cmd_eval_metrics(a) -> int:
     from okfy.eval_metrics import (eval_compare, eval_metrics, eval_qrels,
                                    workspace_pool_size)
@@ -71,8 +98,15 @@ def _cmd_eval_metrics(a) -> int:
             return 0
         print(f"eval qrels ({out['unit']}): {len(out['rows'])} covered row(s)")
         for r in out["rows"]:
-            print(f"  {r['query']!r} -> {r['concept']} "
-                  f"[{len(r['spans'])} span(s), {len(r['unresolved'])} unresolved]")
+            # Read the state lists straight off the row rather than naming
+            # `spans`/`unresolved` by hand (F11 v0.25: hand-naming two states
+            # is exactly how the third, `unverifiable`, went missing from
+            # this line before). Every list-valued field on a qrels row IS a
+            # state count — `query`/`concept`/`concept_found` are not lists —
+            # so this also picks up any future state with no printer change.
+            counts = ", ".join(f"{len(v)} {k}" for k, v in r.items()
+                               if isinstance(v, list))
+            print(f"  {r['query']!r} -> {r['concept']} [{counts}]")
         return 0
     if a.ecmd == "compare":
         out = eval_compare(b, a.base, a.head, suite=a.suite)
@@ -98,12 +132,22 @@ def _cmd_eval_metrics(a) -> int:
                 bits.append(f"-{len(q['notes_lost'])} note(s)")
             if q.get("concept"):
                 c = q["concept"]
-                bits.append(f"{c['concept']} {c['base_rank']}->{c['head_rank']} "
+                # Read the explicit per-run fields (F08 v0.25) rather than a
+                # synthesized single-concept key — that key existed only to
+                # avoid the KeyError this line used to raise, and is gone.
+                target = (c["base_concept"] if c["base_concept"] == c["head_concept"]
+                         else f"{c['base_concept']} -> {c['head_concept']}")
+                bits.append(f"{target} {c['base_rank']}->{c['head_rank']} "
                            f"{c['base_outcome']}->{c['head_outcome']}")
+                if c["criteria_changed"]:
+                    # F08's acceptance criterion: a changed target must be
+                    # reported AND the comparison labelled not like-for-like
+                    # — in text, not only in --json's `note`.
+                    bits.append("NOT LIKE-FOR-LIKE (target changed)")
             print(f"  {q['query']!r}: {', '.join(bits)}")
         return 0
     # metrics
-    ks = tuple(int(x) for x in a.k.split(",") if x.strip())
+    ks = _parse_ks(a.k)
     out = eval_metrics(b, run_id=a.run, suite=a.suite, ks=ks,
                        n_pool_override=n_pool_override)
     if a.json:
@@ -297,14 +341,20 @@ def cmd_transcript_lint(a) -> int:
         print(f"PARTIAL: {out['skipped_lines']} line(s) could not be parsed, "
               f"{out['skipped_blocks']} block(s) skipped (unexpected shape)")
     tc = out["tool_calls"]
-    print("tool calls: " + " · ".join(f"{k} {tc[k]}" for k in
-                                      ("SEARCH", "SHOW", "PROPOSE", "MUTATION")))
+    # Iterate the dict's own keys rather than a hardcoded tuple: UNKNOWN (and
+    # any state added after it) must show up here without a printer change,
+    # the same way it already does in --json.
+    print("tool calls: " + " · ".join(f"{k} {tc[k]}" for k in tc))
 
     fs, fm = out["first_search"], out["first_mutation"]
     fs_label = fs["index"] if fs else "none"
     fm_label = f"{fm['index']} ({fm['tool']})" if fm else "none"
     print(f"first search: {fs_label}   first mutation: {fm_label}")
-    print(f"searched before first mutation: {out['searched_before_first_mutation']}")
+    unknown = tc.get("UNKNOWN", 0)
+    qualifier = (f"  (unverified: {unknown} call(s) unreadable)" if unknown
+                 else "")
+    print(f"searched before first mutation: "
+          f"{out['searched_before_first_mutation']}{qualifier}")
 
     if out["proposes"]:
         print("\nproposes:")

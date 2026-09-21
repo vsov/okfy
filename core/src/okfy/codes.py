@@ -751,8 +751,18 @@ CODES: dict[str, dict] = {
     },
     "W_DROPS_UNEXPLAINED": {
         "kind": "warning",
-        "summary": "a declared draft output resolves to nothing on disk (no concept file, and no directory holding at least one concept), is not named in any ledger row's merge_map (checked ledger-wide, since a later consolidation row legitimately absorbs a draft an earlier row declared), and is not accounted for by its OWN row's dropped entries (checked per row, never by another row's budget) — it vanished with no recorded reason; also raised when a row's own `outputs` field is not a list, naming the row as malformed",
-        "way_out": "record it in the SAME row's `dropped` block, or name the final that absorbed it in `merge_map`; if the row itself is reported malformed, fix its `outputs` field to be a list of draft ids",
+        "summary": "a declared draft output resolves to nothing on disk (no concept file, and no directory holding at least one concept), is not named in any ledger row's merge_map (checked ledger-wide, since a later consolidation row legitimately absorbs a draft an earlier row declared), is not accounted for by its OWN row's dropped entries (checked per row, never by another row's budget), and is not named by any later row's `corrects` block (matched by the exact run_id/segment/output triple it names, never a bundle-wide pool) — it vanished with no recorded reason; also raised when a row's own `outputs` field is not a list, naming the row as malformed",
+        "way_out": "the ledger is append-only, so the original row cannot be edited to explain it; append a new row whose `corrects` block names the original run_id/segment and this output (with its own `dropped` explanation), or name the final that absorbed it in `merge_map`; if the row itself is reported malformed, fix its `outputs` field to be a list of draft ids",
+    },
+    "E_LEDGER_CORRECTION": {
+        "kind": "error",
+        "summary": "a ledger row's optional `corrects` object is not well-formed — `run_id`/`segment`/`output` must all be non-empty strings, and `dropped` must be a non-empty, well-formed {reason: count} mapping (see E_LEDGER_DROPPED)",
+        "way_out": "fix corrects so run_id/segment/output are non-empty strings naming the row/output being corrected, and dropped records at least one reason/count",
+    },
+    "E_LEDGER_CORRECTION_UNKNOWN": {
+        "kind": "error",
+        "summary": "a ledger row's `corrects` object names a run_id/segment with no matching row anywhere on the ledger, or a row that never declared the named output — a correction that names nothing real would otherwise be a silent no-op",
+        "way_out": "point corrects.run_id/corrects.segment at a row already on the ledger, and corrects.output at one of that row's own declared outputs",
     },
     "E_CHANGES_WINDOW": {
         "kind": "error",
@@ -767,6 +777,21 @@ CODES: dict[str, dict] = {
         "kind": "error",
         "summary": "manifest-mode `okfy diff`/`okfy snapshot` could not fully list the corpus (an unreadable path, or an empty new listing against a non-empty old one)",
         "way_out": "fix the permissions on the reported path, or point meta/corpus.md at the right directory, then run okfy diff again — a partial listing would report every unlisted file as removed",
+    },
+    "E_CORPUS_DIRTY": {
+        "kind": "error",
+        "summary": "`okfy snapshot` refused a git-mode corpus with uncommitted changes ahead of HEAD — git mode pins the corpus's last commit, so snapshotting a dirty corpus would record a baseline that disagrees with what is actually on disk",
+        "way_out": "commit or discard the corpus's local changes and run okfy snapshot again, or pass --force to snapshot the last commit anyway and ignore the uncommitted changes",
+    },
+    "E_BUNDLE_DIRTY": {
+        "kind": "error",
+        "summary": "(v0.25 audit F04) `okfy snapshot` refused because the bundle's own git working tree has uncommitted changes — a snapshot pins a relationship between two COMMITTED states (the corpus's and the bundle's own), so snapshotting now could advance the baseline past a bundle edit that a later commit might still fail to land",
+        "way_out": "commit or discard the bundle's local changes and run okfy snapshot again, or pass --force to snapshot anyway and pin the corpus baseline against the uncommitted bundle state",
+    },
+    "E_UPDATE_PROPOSALS_PENDING": {
+        "kind": "error",
+        "summary": "(v0.25 audit F04) `okfy snapshot` refused because proposals filed for this update are still pending owner review — pending owner proposals are not a completed update, and declaring the corpus baseline current now would drop the affected concepts out of the next `okfy diff` before anything was actually decided",
+        "way_out": "review each pending proposal with `okfy review accept` / `okfy review reject` (see `okfy review list`) and run okfy snapshot again, or pass --force to snapshot anyway and treat them as out of scope for this baseline",
     },
     "E_SOURCEMAP_JSON": {
         "kind": "error",
@@ -1119,5 +1144,45 @@ CODES: dict[str, dict] = {
         "way_out": "pick two runs of the same suite (`okfy eval metrics --run` "
                    "lists each run's suite), or pass --suite when a record "
                    "holds both",
+    },
+    "E_PROPOSAL_ACTION": {
+        "kind": "error",
+        "summary": "`okfy propose`/MCP okfy_propose `action` is not one of the closed action vocabulary (create|update|delete|supersede|flag|gap)",
+        "way_out": "use one of create|update|delete|supersede|flag|gap as action",
+    },
+    "E_PROPOSAL_CONTENT_REQUIRED": {
+        "kind": "error",
+        "summary": "MCP okfy_propose was called with no `content` for an action that requires it (not delete|flag|gap, and no `patch` given)",
+        "way_out": "pass content (frontmatter + body), or use action=delete|flag|gap, or pass patch instead of content",
+    },
+    "E_SHOW_ID_REQUIRED": {
+        "kind": "error",
+        "summary": "MCP okfy_show was called with neither `concept_id` nor `concept_ids`",
+        "way_out": "pass concept_id (one id) or concept_ids (a list, max 10)",
+    },
+    "E_LINKS_WORKSPACE": {
+        "kind": "error",
+        "summary": "MCP okfy_links was called against a workspace target — links works on a single bundle",
+        "way_out": "point the server at the member bundle's own path, not the workspace",
+    },
+    "E_OVERVIEW_TYPE_WORKSPACE": {
+        "kind": "error",
+        "summary": "MCP okfy_overview's `type` filter was used against a workspace target — a type listing is a single-bundle view",
+        "way_out": "point the server at the member bundle's own path, not the workspace, or call okfy_overview with no type for the workspace's member list",
+    },
+    "E_PROPOSE_WORKSPACE": {
+        "kind": "error",
+        "summary": "MCP okfy_propose was called against a workspace target — propose targets a single member bundle",
+        "way_out": "point the server at the target member bundle's own path, not the workspace",
+    },
+    "E_PROPOSAL_PATCH_CONTENT": {
+        "kind": "error",
+        "summary": "MCP okfy_propose was called with both `patch` and `content` — the two are mutually exclusive ways to describe the new body",
+        "way_out": "pass either patch (hunks against the current body) or content (the whole new body), not both",
+    },
+    "E_FRESH_WORKSPACE": {
+        "kind": "error",
+        "summary": "MCP okfy_fresh was called against a workspace target — fresh targets a single bundle",
+        "way_out": "point the server at the member bundle's own path, not the workspace",
     },
 }
