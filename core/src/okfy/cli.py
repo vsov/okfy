@@ -185,8 +185,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--event", action="append", choices=list(EVENTS),
                    default=None,
                    help="repeatable; filters on the ledger EVENT kind — "
-                        "propose/accept/reject/superseded (NOT the same as "
-                        "--action below)")
+                        "propose/accept/reject/superseded/dismiss (NOT the "
+                        "same as --action below)")
     p.add_argument("--action", action="append", choices=sorted(ACTIONS),
                    default=None,
                    help="repeatable; filters on the underlying proposal's "
@@ -321,6 +321,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("concept_id")
     p.add_argument("--from", dest="from_file", type=Path, required=True)
     p.add_argument("-m", "--message", default="")
+
+    p = sub.add_parser(
+        "dismiss",
+        help="v0.26 audit A3: owner disposition that clears an UNRESOLVED "
+             "rejected change — a still-affected concept whose most recent "
+             "meta/memory.jsonl event is `okfy review reject`. Records that "
+             "the SOURCE CHANGE itself needs no action, distinct from "
+             "rejecting the proposed text; the only other thing that clears "
+             "E_UPDATE_REJECTION_UNRESOLVED is a fresh proposal on the same "
+             "target actually being accepted.")
+    p.add_argument("bundle", type=Path)
+    p.add_argument("concept_id")
+    p.add_argument("--reason", required=True,
+                   help="why the source change needs no action — a "
+                        "reviewed decision, same spirit as okfy stale")
 
     p = sub.add_parser("stale");    p.add_argument("bundle", type=Path)
     p.add_argument("concept_id", nargs="?")

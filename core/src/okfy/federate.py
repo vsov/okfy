@@ -7,7 +7,7 @@ from okfy.bm25 import tokenize
 from okfy.bundle import Bundle
 from okfy.crosswalk import load_rows, parse_ref
 from okfy.index import load_index
-from okfy.validate import applies_to_shape_malformed
+from okfy.validate import applies_to_malformed
 from okfy.workspace import Member, Workspace
 
 RRF_K = 60
@@ -132,15 +132,22 @@ def _merge_same_as(ranked: dict[str, dict], rows: list) -> list[dict]:
 
 
 def _in_scope(applies_to, project_key: str | None) -> bool:
-    """Fail closed (ADR-0015): missing, empty or malformed `applies_to` is
-    OUT of scope, never in. Malformation is `validate.applies_to_shape_malformed`
-    — the SAME predicate `validate._check_applies_to` uses to raise
-    E_APPLIES_TO on this concept, so the two readers cannot drift apart
-    again (finding F10: dropping bad entries and matching on what survived
-    used to make `['*', 123]` a search hit here while `validate` called it
-    malformed). Only a well-formed list of strings can be in scope, and
-    only via an exact project_key match or the `*` wildcard."""
-    if applies_to_shape_malformed(applies_to):
+    """Fail closed (ADR-0015): missing, empty, or invalid `applies_to` —
+    shape OR grammar — is OUT of scope, never in. Invalidity is
+    `validate.applies_to_malformed`, the COMPLETE predicate
+    `validate._check_applies_to` uses to raise E_APPLIES_TO on this same
+    concept: not a list / empty / a non-string-or-blank entry (shape), or
+    an entry that is neither `*` nor a legal `workspace.PROJECT_KEY_RE`
+    project key (grammar). Calling the one shared function for BOTH halves
+    is what keeps every reader of `applies_to` from drifting apart again —
+    finding F10 (v0.25): dropping bad entries and matching on what survived
+    made `['*', 123]` a search hit here while `validate` called it
+    malformed; finding A7 (v0.26): even after F10 unified the shape half,
+    this function still skipped the grammar half, so `['*', 'BAD KEY']`
+    matched via `'*'` here while `validate` called `'BAD KEY'`'s grammar
+    malformed. Only a value `applies_to_malformed` calls valid can be in
+    scope, and only via an exact project_key match or the `*` wildcard."""
+    if applies_to_malformed(applies_to):
         return False
     return any(k == "*" or k == project_key for k in applies_to)
 

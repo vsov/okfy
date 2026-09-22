@@ -1,7 +1,8 @@
 """Owner-mutator verbs (ADR-0007 refinement loop, ADR-0013 reviewed staleness):
-agents propose, the owner reviews/refines/flags staleness. accept/refine/reject
-and set_stale/clear_stale are the sanctioned mutators — they commit with
---no-verify because they ARE the authority the pre-commit hook defers to."""
+agents propose, the owner reviews/refines/flags staleness. accept/refine/reject,
+dismiss (v0.26 audit A3) and set_stale/clear_stale are the sanctioned mutators —
+they commit with --no-verify because they ARE the authority the pre-commit
+hook defers to."""
 import contextlib
 import datetime
 import fcntl
@@ -192,6 +193,34 @@ def _ledger_rewritten_refusal(check, context: str) -> str:
         f"{context}. Repair: restore the file from git (`git show "
         f"HEAD:{check.relpath}`), then re-append the corrected decision as a "
         "NEW row — the ledger never edits a row in place — then try again")
+
+
+def _refuse_if_ledger_rewritten(bundle: Bundle, *relpaths: str) -> None:
+    """The ONE ledger-integrity guard every sanctioned mutator that touches
+    an append-only ledger file (`meta/memory.jsonl`, `meta/ledger.jsonl`)
+    calls, at TWO points of its own flow — deliberately, not redundantly:
+
+    1. At ENTRY, before the mutator writes anything at all. A refusal here
+       leaves the bundle exactly as it was found — no partial mutation, no
+       ledger row recording an event that did not happen, no dirtied
+       `git status`.
+    2. Inside `_commit`, right before it stages anything — the backstop for
+       whatever ran between a caller's entry check and its own `_commit`
+       call, and the single choke point every caller reaches regardless of
+       which entry path it came through.
+
+    Fail-fast and a can't-bypass backstop answer two different questions
+    ("avoid the wasted work" vs. "can anything possibly slip past"); each
+    call site here reopens the gap the other does not cover, so collapsing
+    either one away is not a simplification."""
+    for relpath in relpaths:
+        check = ledger_prefix_check(bundle, relpath)
+        if check.outcome == "rewritten":
+            raise ValueError(_ledger_rewritten_refusal(
+                check,
+                f"{relpath}'s append-only contract is already broken — in "
+                "the index, the working tree, or both — refused before "
+                "anything is written or committed"))
 
 
 def _flag_reject_hashes(flag_type: str | None, target: str | None,
@@ -428,9 +457,24 @@ def _commit(bundle: Bundle, paths: list[str], message: str) -> None:
     skipped when the bundle has no own git repo (embed bundles ride the corpus
     PR flow instead). Paths are staged one by one with check=False: a deleted
     never-tracked file (e.g. an uncommitted proposal being consumed) is a fatal
-    pathspec for `git add` and must not abort staging of the other paths."""
+    pathspec for `git add` and must not abort staging of the other paths.
+
+    THE mutation/commit boundary every sanctioned writer converges on —
+    `accept`, `reject`, `dismiss`, `refine` and `ledger.add_row` call this
+    function and only this function to reach git. Before any of its OWN git
+    calls, it re-checks (`_refuse_if_ledger_rewritten` — a deliberate
+    BACKSTOP, not a redundant re-check; see its docstring) every append-only
+    ledger file this call is about to touch, and refuses outright if any is
+    `rewritten`. Refusing here, before any `git add`, means no partial
+    commit ever happens: `git commit` with no pathspec commits the WHOLE
+    index, so this must run before staging, not merely before committing —
+    a rewrite staged by something else ahead of this call would otherwise
+    ride into HEAD even though this call never re-added it itself."""
     if not (bundle.root / ".git").exists():
         return
+    from okfy.ledger import LEDGER
+    _refuse_if_ledger_rewritten(
+        bundle, *(relpath for relpath in (memory.MEMORY_FILE, LEDGER) if relpath in paths))
     for p in paths:
         run_git(bundle.root, "add", "-A", "--", p,
                check=False, capture_output=True)
@@ -1318,8 +1362,9 @@ def _gate(bundle: Bundle, meta: dict, body: str, target, action: str, reopen,
     # rejected-hash lookup in this function falls back to the COMMITTED HEAD
     # version (`events_at_head`) instead: the exact trust boundary
     # `ledger_prefix_check` itself already draws (its HONESTY LABEL: proves
-    # nothing about a rewrite that was itself already committed, only ever
-    # compares the working tree against HEAD). A hit found ONLY that way
+    # nothing about a rewrite that was itself already committed — it compares
+    # the index and the working tree against HEAD, never HEAD against an
+    # earlier HEAD). A hit found ONLY that way
     # means the working copy is hiding a standing decision — refused as
     # E_LEDGER_REWRITTEN, not E_PROPOSAL_REJECTED, naming the real problem.
     # `unverifiable` (no git repo, or this file never committed yet) changes
@@ -1695,33 +1740,16 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
         bundle, as_actor, verb="review accept",
         retry=f"okfy review accept {bundle.root} {proposal_id}")
 
-    # v0.25 F05: every `_commit` call below deliberately commits with
-    # --no-verify — accept writes the FINAL concept file, which the bundle's
-    # own `write_policy: proposals` pre-commit hook must refuse from an agent
+    # Every `_commit` call below deliberately commits with --no-verify —
+    # accept writes the FINAL concept file, which the bundle's own
+    # `write_policy: proposals` pre-commit hook must refuse from an agent
     # and must allow from the owner's sanctioned command here. But bypassing
-    # the hook also bypasses the ledger check the hook would have run:
-    # without this, an accept that has nothing to do with an already-
-    # REWRITTEN meta/memory.jsonl would still fold its diverged working-tree
-    # bytes into HEAD the instant this call's commit touches the file —
-    # permanently erasing the evidence `okfy validate` was reporting, the
-    # exact laundering this release closes. The fix is narrower than
-    # refusing the whole accept: `_commit_paths` below drops
-    # `memory.MEMORY_FILE` from every commit THIS call makes while it is
-    # REWRITTEN — the concept write, proposal removal and log still commit
-    # normally, and the event THIS accept itself appends still lands in the
-    # working-tree file (via `memory.record`, independent of git), just not
-    # folded into HEAD — so the SAME divergence `ledger_prefix_check` found
-    # stays exactly where `okfy validate` can still see it, until the owner
-    # restores the file and commits it. `unverifiable` (no git repo, or this
-    # file never committed yet) changes nothing — every non-git bundle, and
-    # every bundle whose ledger is not yet committed, commits exactly as
-    # before this check existed.
-    ledger_check = ledger_prefix_check(bundle, memory.MEMORY_FILE)
-
-    def _commit_paths(paths: list[str]) -> list[str]:
-        if ledger_check.outcome != "rewritten":
-            return paths
-        return [p for p in paths if p != memory.MEMORY_FILE]
+    # the hook also bypasses the ledger check the hook would have run.
+    # Checked HERE, at entry, before anything below writes so much as a byte
+    # — a refusal leaves the bundle exactly as it was found. `_commit`
+    # re-checks the same predicate again as a backstop; see
+    # `_refuse_if_ledger_rewritten`'s docstring for why that is deliberate.
+    _refuse_if_ledger_rewritten(bundle, memory.MEMORY_FILE)
 
     # A flag/gap filed on `--query` alone has no real target concept — the
     # proposal-id-derived fallback (kebab of its own title) would otherwise
@@ -1759,7 +1787,7 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
                       origin=origin, channel=channel)
         append_log(bundle, f"review: accept flag {target or env.get('query', '')} "
                            f"({env.get('note', '')}){unbased}")
-        _commit(bundle, _commit_paths([f"{proposal_id}.md", "log.md", memory.MEMORY_FILE]),
+        _commit(bundle, [f"{proposal_id}.md", "log.md", memory.MEMORY_FILE],
                 f"review: accept flag {proposal_id}")
         return target or ""
 
@@ -1812,8 +1840,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
                       target=None, action=action, content_sha256=content_sha256(c.body),
                       origin=origin, channel=channel)
         append_log(bundle, f"review: accept gap {term!r} ({env.get('note', '')}){unbased}")
-        _commit(bundle, _commit_paths(["meta/lexicon.md", f"{proposal_id}.md", "log.md",
-                                       memory.MEMORY_FILE]),
+        _commit(bundle, ["meta/lexicon.md", f"{proposal_id}.md", "log.md",
+                        memory.MEMORY_FILE],
                 f"review: accept gap {term!r}")
         return "meta/lexicon"
 
@@ -1840,8 +1868,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
                       match_sha256=deleted_match, origin=origin, channel=channel)
         append_log(bundle, f"review: accept delete {target} ({env.get('note', '')})"
                            f"{unbased}")
-        _commit(bundle, _commit_paths(
-                    [f"{target}.md", f"{proposal_id}.md", "log.md", memory.MEMORY_FILE]),
+        _commit(bundle,
+                [f"{target}.md", f"{proposal_id}.md", "log.md", memory.MEMORY_FILE],
                 f"review: accept delete {target}")
         return target
 
@@ -1904,8 +1932,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
         # ONE commit: old concept, new concept, the consumed proposal, log,
         # ledger. index.md is untouched — same as every other accept; it is
         # regenerated by `okfy package`, never written by review accept.
-        _commit(bundle, _commit_paths([f"{target}.md", f"{new_id}.md", f"{proposal_id}.md",
-                                       "log.md", memory.MEMORY_FILE]),
+        _commit(bundle, [f"{target}.md", f"{new_id}.md", f"{proposal_id}.md",
+                        "log.md", memory.MEMORY_FILE],
                 f"review: accept supersede {target} -> {new_id}")
         return new_id
 
@@ -1958,8 +1986,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
                   origin=origin, channel=channel)
     append_log(bundle, f"review: accept {action} {target} ({env.get('note', '')})"
                        f"{unbased}")
-    _commit(bundle, _commit_paths(
-                [f"{target}.md", f"{proposal_id}.md", "log.md", memory.MEMORY_FILE]),
+    _commit(bundle,
+            [f"{target}.md", f"{proposal_id}.md", "log.md", memory.MEMORY_FILE],
             f"review: accept {action} {target}")
     return target
 
@@ -1979,6 +2007,12 @@ def _reject(bundle: Bundle, proposal_id: str, reason: str = "", *,
     owner = check_owner_actor(
         bundle, as_actor, verb="review reject",
         retry=f"okfy review reject {bundle.root} {proposal_id}")
+    # v0.26 audit A5: checked at entry, before the proposal file is unlinked
+    # or `memory.record` appends a `reject` row to the ledger under
+    # question — see `_accept`'s matching comment and
+    # `_refuse_if_ledger_rewritten`'s docstring. `_commit` below still
+    # re-checks as the backstop.
+    _refuse_if_ledger_rewritten(bundle, memory.MEMORY_FILE)
     c.path.unlink()
     reject_action = env.get("action", "create")
     # A gap's tombstone is keyed on the NORMALIZED QUERY (see propose()'s
@@ -2002,6 +2036,54 @@ def _reject(bundle: Bundle, proposal_id: str, reason: str = "", *,
             f"review: reject {proposal_id}")
 
 
+def dismiss(bundle: Bundle, concept_id: str, reason: str) -> None:
+    """Owner disposition (v0.26 audit A3): "I reviewed the rejected proposal
+    against this concept, and I have decided the SOURCE CHANGE itself needs
+    no action" — a different decision from the reject it follows, which only
+    said the proposed TEXT was wrong. This is the verb (alongside a fresh
+    proposal being ACCEPTED) that clears `okfy.update.unresolved_rejections`
+    and lets `okfy snapshot` advance past it again.
+
+    Requires an actual standing rejection: dismissing a target nothing ever
+    rejected, or one already accepted/dismissed since, is refused — this
+    verb records a decision, not a wish, and a decision needs something to
+    decide about.
+
+    No proposal file exists to touch (reject already removed it) — this is a
+    bare ledger row plus a log line, the same shape `refine`'s own `accept`
+    row takes for an edit with no proposal behind it (`proposal=None`).
+    `content_sha256`/`action` are carried over from the standing reject row
+    rather than invented fresh, so the dismiss visibly answers the SAME
+    rejected text the reject itself named."""
+    c = bundle.get(concept_id)
+    if c is None:
+        raise KeyError(f"concept not found: {concept_id}")
+    if not reason.strip():
+        raise ValueError("dismiss requires a reason — it is a reviewed decision")
+    latest = None
+    for row in memory.events(bundle)[0]:
+        if row.get("target") == concept_id:
+            latest = row
+    if latest is None or latest["event"] != "reject":
+        seen = "no memory.jsonl event" if latest is None else f"a {latest['event']!r} event"
+        raise ValueError(
+            f"nothing to dismiss for {concept_id}: its most recent "
+            f"meta/memory.jsonl row is {seen}, not a standing reject — "
+            "dismiss only clears an UNRESOLVED rejection "
+            "(okfy.update.unresolved_rejections)")
+    # v0.26 audit A5: checked at entry, before `memory.record` appends the
+    # `dismiss` row — see `_accept`'s matching comment and
+    # `_refuse_if_ledger_rewritten`'s docstring. `_commit` below still
+    # re-checks as the backstop.
+    _refuse_if_ledger_rewritten(bundle, memory.MEMORY_FILE)
+    owner = owner_actor(bundle)
+    memory.record(bundle, "dismiss", actor=owner, proposal=None,
+                  target=concept_id, action=latest["action"],
+                  content_sha256=latest["content_sha256"], reason=reason)
+    append_log(bundle, f"dismiss: {concept_id} — {reason}")
+    _commit(bundle, ["log.md", memory.MEMORY_FILE], f"dismiss: {concept_id}")
+
+
 def refine(bundle: Bundle, concept_id: str, text: str, message: str = "") -> None:
     """Owner-directed direct edit (ADR-0007 channel 1). Validates and commits
     past the policy hook — this verb IS the sanctioned direct door.
@@ -2016,6 +2098,11 @@ def refine(bundle: Bundle, concept_id: str, text: str, message: str = "") -> Non
     meta, body = frontmatter.parse(text)            # raises FrontmatterError
     if not str(meta.get("type", "")).strip():
         raise ValueError("refined concept has no type")
+    # v0.26 audit A5: checked at entry, before the concept file is written
+    # or `memory.record` appends the `accept`/owner-refine row — see
+    # `_accept`'s matching comment and `_refuse_if_ledger_rewritten`'s
+    # docstring. `_commit` below still re-checks as the backstop.
+    _refuse_if_ledger_rewritten(bundle, memory.MEMORY_FILE)
     existing.path.write_text(text, encoding="utf-8")
     memory.record(bundle, "accept", actor=owner_actor(bundle), proposal=None,
                   target=concept_id, action="update", content_sha256=content_sha256(body),

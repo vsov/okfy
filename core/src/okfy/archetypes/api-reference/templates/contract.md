@@ -13,7 +13,9 @@ sources: [(corpus-relative paths)]
 ## Scope
 
 (Concretely which operations/types this binds — link them. "Everything"
-is acceptable only if literally true.)
+is acceptable only if literally true. Name the traced caller path or the
+minimal executed example that verified the Rule above — file:line, not
+just the source that stated it.)
 
 ## On violation
 

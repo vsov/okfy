@@ -82,19 +82,43 @@ MUTATION (or any other class). `searched_before`/`target_shown` (below)
 are computed from that full, in-order sequence, so a search or a show
 earlier in the SAME Bash call counts.
 
-`_split_bash_command` tokenizes with `shlex`; when `command` has
-unbalanced quotes shlex cannot parse it at all, and this module falls back
-to a naive, NOT quote-aware, regex split. Token POSITION from that
-fallback is not trustworthy (the words may not correspond to real shell
-arguments at all), so no conclusion — okfy invocation or otherwise — is
-drawn from it: the whole Bash call is classified UNKNOWN instead, a third
-state distinct from both "searched" and "no search". A caller that reads
-UNKNOWN as "searched" learns nothing from it; this module instead reads it
-as neither confirming nor denying a search happened, so an UNKNOWN segment
-never sets `search_seen`, `first_search`, or `first_mutation` — it also
-never counts as a MUTATION it can't actually see. The cost is that a real
-search or mutation inside an unparseable command goes uncounted rather
-than guessed at.
+`_split_bash_command` tokenizes with `shlex`, TWICE — once in POSIX mode
+(quotes stripped, the tokens every other function in this module reads)
+and once in non-POSIX mode (quotes left in place on the token text) — and
+compares the two token-by-token. `shlex(..., posix=True)` strips quoting
+*before* a token is checked against the separator set, so a quoted `;`
+argument (`printf '%s\n' ';' ...`) arrives indistinguishable, by the time
+it is a bare string `";"`, from a real `;` chaining two commands: the POSIX
+pass alone cannot tell them apart. The non-POSIX pass can, because it never
+strips the quote characters — a quoted `';'` stays the three-character
+token `"';'"`, which can never equal the bare separator. A token counts as
+a real separator only when BOTH passes agree it is one (the POSIX token
+equals the non-POSIX token exactly, meaning nothing was quoted around it);
+the dequoted POSIX token is still what every other function in this module
+reads, so ordinary quoted arguments behave exactly as before. When the two
+passes tokenize `command` into a different NUMBER of tokens (a rarer
+ambiguity than the quoted-separator case above, e.g. a backslash-escaped
+separator outside quotes, which the two shlex modes disagree on how to
+split), position can no longer be matched between them at all, and this is
+treated the same as an unparseable command: classified UNKNOWN rather than
+guessed at. This is two stdlib `shlex` passes and a positional diff, not a
+shell interpreter — it recovers quote PROVENANCE, not shell semantics
+(pipelines, subshells, variable expansion, and the rest of a real shell
+grammar are still entirely out of scope, as before).
+
+When `command` has unbalanced quotes, shlex cannot parse it at all (in
+either mode), and this module falls back to a naive, NOT quote-aware,
+regex split. Token POSITION from that fallback is not trustworthy (the
+words may not correspond to real shell arguments at all), so no
+conclusion — okfy invocation or otherwise — is drawn from it: the whole
+Bash call is classified UNKNOWN instead, a third state distinct from both
+"searched" and "no search". A caller that reads UNKNOWN as "searched"
+learns nothing from it; this module instead reads it as neither confirming
+nor denying a search happened, so an UNKNOWN segment never sets
+`search_seen`, `first_search`, or `first_mutation` — it also never counts
+as a MUTATION it can't actually see. The cost is that a real search or
+mutation inside an unparseable (or ambiguously escaped) command goes
+uncounted rather than guessed at.
 
 ## Cited-id extraction
 
@@ -241,35 +265,70 @@ def _is_bash_mutation(command: str) -> bool:
     return any(marker in command for marker in BASH_MUTATION_MARKERS)
 
 
+def _lex(command: str, *, posix: bool) -> list[str]:
+    """One `shlex` pass over `command`, split on whitespace plus the chain
+    separators (`_BASH_SEPARATORS`). `posix=True` is the dequoted token
+    stream every other function in this module reads; `posix=False` keeps
+    quote characters ON the token text, which is what lets
+    `_split_bash_command` tell a quoted separator-shaped argument apart
+    from a real one (see its docstring). Raises `ValueError` exactly when
+    shlex cannot tokenize `command` at all (e.g. unbalanced quotes)."""
+    lex = shlex.shlex(command, posix=posix, punctuation_chars=";|&\n")
+    lex.whitespace = " \t\r"
+    lex.whitespace_split = True
+    return list(lex)
+
+
+def _naive_split(command: str) -> list[list[str]]:
+    """The NOT quote-aware fallback split, used only when shlex cannot
+    tokenize `command` at all in the relevant mode(s) — see
+    `_split_bash_command`."""
+    return [seg.split() for seg in re.split(r"&&|\|\||[;|\n]", command)
+           if seg.strip()]
+
+
 def _split_bash_command(command: str) -> tuple[list[list[str]], bool]:
     """Split a Bash `command` string into one TOKEN LIST per simple command,
     on `&&`, `||`, `;`, `|` and newline — the separators a host's Bash tool
-    call can chain multiple `okfy` invocations with. shlex-aware: a
-    separator INSIDE a quoted argument (`echo "a && b"`) is not a split
-    point, and a quoted multi-word argument stays one token (so a later
-    re-parse of just that command's own tokens, e.g. `_bash_target`, never
-    needs to re-tokenize free text).
+    call can chain multiple `okfy` invocations with.
 
-    Returns `(segments, reliable)`. `reliable` is False exactly when shlex
-    could not parse `command` at all (unbalanced quotes) and a plain, NOT
-    quote-aware, regex split was used instead — those tokens do not
-    reliably correspond to real shell words, so their POSITION (tokens[0],
-    tokens[1], ...) cannot be trusted for anything, including recognizing
-    an `okfy` invocation. Callers must treat an unreliable split as
-    UNKNOWN, never as "no `okfy` call found here"."""
+    Quote-PROVENANCE-aware, not just quote-aware: a separator-shaped token
+    is only treated as a real split point when a SECOND, non-POSIX shlex
+    pass over the same command agrees it was not sitting inside quotes (see
+    the module docstring's "The Bash mutation heuristic" section for why
+    the POSIX pass alone cannot tell `echo "a && b"`'s `&&` apart from a
+    quoted, standalone `';'` argument to `printf`). A quoted multi-word
+    argument still stays one (dequoted) token in the returned segments, so
+    a later re-parse of just that command's own tokens, e.g.
+    `_bash_target`, never needs to re-tokenize free text.
+
+    Returns `(segments, reliable)`. `reliable` is False when shlex could
+    not tokenize `command` at all in POSIX mode (unbalanced quotes), OR
+    when the POSIX and non-POSIX passes disagree on how many tokens
+    `command` splits into at all (an ambiguity the module docstring names,
+    e.g. a backslash-escaped separator outside quotes) — in either case no
+    conclusion drawn from token POSITION is trustworthy, including
+    recognizing an `okfy` invocation. Callers must treat an unreliable
+    split as UNKNOWN, never as "no `okfy` call found here"."""
     try:
-        lex = shlex.shlex(command, posix=True, punctuation_chars=";|&\n")
-        lex.whitespace = " \t\r"
-        lex.whitespace_split = True
-        tokens = list(lex)
+        tokens = _lex(command, posix=True)
+        raw_tokens = _lex(command, posix=False)
     except ValueError:
-        segments = [seg.split() for seg in re.split(r"&&|\|\||[;|\n]", command)
-                   if seg.strip()]
-        return segments, False
+        return _naive_split(command), False
+    if len(tokens) != len(raw_tokens):
+        # The two passes could not even be lined up position-for-position —
+        # no quote-provenance conclusion is possible; fall back exactly as
+        # for an unparseable command (see docstring).
+        return _naive_split(command), False
+
     segments: list[list[str]] = []
     current: list[str] = []
-    for tok in tokens:
-        if tok in _BASH_SEPARATORS:
+    for tok, raw in zip(tokens, raw_tokens):
+        # A separator-shaped token is a REAL separator only when it arrived
+        # bare in the non-POSIX pass too (raw == tok): a quoted `';'`
+        # survives non-POSIX tokenization WITH its quote characters
+        # (`"';'"`), which can never equal the bare operator string.
+        if tok in _BASH_SEPARATORS and raw == tok:
             if current:
                 segments.append(current)
             current = []

@@ -313,7 +313,7 @@ wheels = [
 
 [[package]]
 name = "okfy"
-version = "0.26.0"
+version = "0.27.0"
 source = { editable = "../../core" }
 dependencies = [
     { name = "pyyaml" },
@@ -330,7 +330,7 @@ dev = [
 
 [[package]]
 name = "okfy-mcp"
-version = "0.26.0"
+version = "0.27.0"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },

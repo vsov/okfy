@@ -52,6 +52,7 @@ MUTATES: dict[str, bool] = {
     "review accept": True,
     "review reject": True,
     "refine": True,
+    "dismiss": True,          # v0.26 audit A3: owner disposition — writes a ledger row + log line
     "stale": True,            # default sets/clears the stale flag; `--due` alone is a read-only listing, but the leaf covers both
     "eval run": True,
     "eval verdict": True,

@@ -53,12 +53,23 @@ Rules:
    resolves them. You never read other segments' output to decide.
 4. Glossary terms: only if central to your files AND absent from the Seed
    Glossary.
-5. When done, output BOTH lists, and never omit the second:
+5. A claim phrased as **must / must not / always / never / maximum / minimum
+   / only / required** is a claim about what the code enforces, not about
+   what a sentence in the corpus says — finding the constant or the sentence
+   is not verifying the claim about the path that reaches it. Before writing
+   one, get either a **traced caller path** (file:line, from the public entry
+   point a user actually calls down to the code that enforces the claim) or a
+   **minimal executed example** that demonstrates it, and record which one you
+   used as evidence in the draft. If the documentation and the code disagree
+   and you cannot resolve it, do not write the unqualified claim: record both
+   sides under a `## Doc-vs-code conflict` heading in the draft instead, and
+   leave the absolute wording out until the owner rules on it.
+6. When done, output BOTH lists, and never omit the second:
    - one line per draft written: `<path> | <type> | <title>`
    - one line per file you deliberately left empty: `<path> | EMPTY | <reason>`
    The empty list is evidence, not an apology. It is what tells the owner that
    a file's silence was judged rather than skipped twice.
-6. Then output the SPAN OUTCOME BLOCK — a fenced ```json block, and nothing
+7. Then output the SPAN OUTCOME BLOCK — a fenced ```json block, and nothing
    after it. It is the same block the first-pass worker produces, and the two
    lists above are where it comes from: the drafts you wrote become `covered`,
    and **your EMPTY list becomes `reviewed_empty`, reason and all**. That list

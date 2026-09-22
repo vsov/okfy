@@ -14,7 +14,7 @@ from .economics import cmd_budget, cmd_cost
 from .quality import (cmd_dissent, cmd_eval, cmd_job, cmd_ledger, cmd_merge_audit,
                       cmd_stale, cmd_transcript_lint)
 from .retrieval import cmd_fresh, cmd_links, cmd_query, cmd_sample, cmd_show
-from .review import cmd_propose, cmd_refine, cmd_review
+from .review import cmd_dismiss, cmd_propose, cmd_refine, cmd_review
 from .workspace import cmd_link_candidates, cmd_workspace
 
 HANDLERS = {
@@ -47,6 +47,7 @@ HANDLERS = {
     "propose": cmd_propose,
     "review": cmd_review,
     "refine": cmd_refine,
+    "dismiss": cmd_dismiss,
     "stale": cmd_stale,
     "transcript-lint": cmd_transcript_lint,
     "eval": cmd_eval,

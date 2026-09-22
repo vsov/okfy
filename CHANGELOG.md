@@ -3,6 +3,162 @@
 This changelog starts at v0.26.0. Earlier releases are not back-filled here —
 their history is not something this file can verify.
 
+## v0.27.0 — 2026-09-22
+
+An external audit of v0.26 reproduced ten defects (A1–A10). Each one is a case
+where a v0.26.0 fix closed the exact counterexample the earlier audit had
+presented but left a neighbouring case open — an ordering it didn't check, a
+grammar half it didn't share, a second read path it didn't wrap. This release
+closes all ten, together with a repair to the agent memory pilot's evidence
+and a new extraction rule for claims phrased as absolute.
+
+### Stricter behaviour — read this before upgrading
+
+Several commands now refuse input they previously accepted silently. Any of
+these can break an existing script or workflow that relied on the old,
+looser behaviour.
+
+- **`okfy snapshot` refuses while a rejected update is unresolved (A3).**
+  Following the documented update procedure — reject a proposed
+  interpretation of a corpus change, then run ordinary `okfy snapshot` —
+  used to advance the baseline and erase the diff signal, even though
+  rejecting the *proposed text* is not a decision that the underlying
+  *source change* needs no action. Snapshot now refuses with
+  `E_UPDATE_REJECTION_UNRESOLVED` whenever a still-affected concept's latest
+  memory event is a bare `reject`. Resolve it with a fresh proposal that
+  gets accepted, or with the new `okfy dismiss <bundle> <concept-id>
+  --reason "..."` verb, which records that the source change itself needs
+  no action (and writes its own `dismiss` memory event) without reopening
+  the rejected text.
+- **A staged-but-uncommitted ledger rewrite can no longer ride into a
+  sanctioned commit (A5).** The review mutators (`accept`, `reject`,
+  `dismiss`, `refine`, `ledger add`) already refused an uncommitted rewrite
+  of the append-only ledger, but `git commit` with no pathspec commits the
+  *whole* index — a rewrite something else had already staged before the
+  mutator ran still shipped inside that mutator's own commit and then read
+  as intact afterwards. The rewrite check (`E_LEDGER_REWRITTEN`) now also
+  looks at the git index, not just the committed and working copies, and is
+  re-run immediately before the commit itself, not only at the mutator's
+  entry.
+- **More MCP refusals return the documented error envelope, this time by
+  construction (A9).** `okfy_show` called with more than 10 `concept_ids`
+  now refuses with `E_SHOW_TOO_MANY_IDS` in the normal `{error, message,
+  way_out}` shape. More generally, any refusal a tool handler raises as a
+  plain `ValueError` or `KeyError` — not only the ones a previous audit
+  round happened to name — is now caught at the adapter's one dispatch
+  boundary and wrapped as `E_MCP_REFUSAL`, with the original message
+  preserved, instead of escaping uncoded.
+- **A malformed `applies_to` entry is excluded from scope for its grammar,
+  not only its shape (A7).** `okfy validate` already rejected an
+  `applies_to` entry that wasn't a legal project key (wrong case, an
+  embedded space, and so on), but federated search and export only checked
+  that entries were non-blank strings, so a concept `validate` called
+  malformed could still be a live search hit and still ship in an export.
+  Both now run the same complete shape-and-grammar predicate.
+- **`ledger add` refuses a correction that can't be bound to one specific
+  loss (A8).** A `corrects` block used to be credited to any ledger row
+  matching its bare `run_id`/`segment`, even one that never declared the
+  named output, or more than one row that did — crediting the wrong loss,
+  or an ambiguous one. A correction is now accepted only when it binds to a
+  unique earlier row that actually declared the named output; zero or more
+  than one candidate is refused rather than guessed at. `okfy validate`
+  applies the same binding when it reads the ledger, and also re-runs the
+  writer's shape check and requires a positive dropped count, so a
+  hand-appended `{irrelevant: 0}` no longer clears `W_DROPS_UNEXPLAINED`.
+
+### Fixed
+
+- **A stale anchor's flag could still disappear before repair, in two more
+  cases (A1).** A pin already flagged `anchor_stale` lost that flag if its
+  destination drifted again before the flag was acted on, or if the cited
+  source file was deleted outright — the carry-forward logic only revisited
+  pins the current corpus scan could still find. Carry-forward is now a
+  first pass over the OLD pins and the CURRENT live citations, decided
+  before anything about a fresh corpus scan runs, so a stale pin survives
+  until `okfy reanchor` actually repairs it; a location whose text changed
+  again in the meantime now also carries `needs_reextract`, so a caller
+  knows re-extraction, not just re-pinning, is needed.
+- **A snapshot's several reads of the corpus could span more than one
+  commit (A2).** Reading "the corpus's current revision" was resolved
+  independently, several git calls apart, across one snapshot operation. A
+  commit landing in the middle could stamp pins read from the OLD content
+  with the NEW commit's SHA, and the next diff would then compare
+  new-against-new and report nothing pending — the intervening commit
+  became invisible. A snapshot now resolves the revision exactly once and
+  threads it through every git-facing call in the operation.
+- **`okfy reanchor` could repair a citation to the wrong text (A1, in
+  repair rather than in snapshot).** A move recorded by an earlier diff
+  was trusted indefinitely: repair rewrote the citation to the recorded
+  destination as long as the *old* text still matched, with no check that
+  the destination's *own* text hadn't changed since. Before rewriting,
+  repair now re-hashes the originally pinned digest against the destination
+  at a captured revision, and skips with a reason instead of certifying a
+  location whose text has moved on.
+- **`transcript-lint` no longer invents a search from a quoted shell
+  separator (A4).** A command like `printf '%s\n' ';' okfy query <bundle>
+  alpha` only prints its arguments, but a naive dequoting pass could mistake
+  the printed `';'` for a real separator and read the printed words as a
+  second, real command. The command reader now runs a second, non-POSIX
+  pass in parallel and only treats a separator-shaped token as a real split
+  point when both passes agree it arrived bare; a command whose split is
+  ambiguous is now reported as unknown rather than guessed at.
+- **MCP multi-show works again on a valid CRLF concept file (A6).** The
+  read-once-for-both-digest-and-body fix from the previous release dropped
+  the newline translation the old two-read path got for free, so a CRLF
+  file's frontmatter no longer parsed. The digest is still computed over
+  the untouched raw bytes; only the returned text is now normalized for
+  parsing.
+- **A memory line with an unusable timestamp is reported, not silently
+  dropped (A10).** A `meta/memory.jsonl` row with an empty or unusable `at`
+  field parsed as valid JSON and reached the time-window comparison, where
+  it matched no window and vanished from both the result list and the
+  problem list. Such a row is now reported as an `E_MEMORY_LINE` problem,
+  the same as a row with a missing key or an unknown event, instead of
+  disappearing.
+
+### Extraction
+
+`extract-worker` and `glean-worker` are now `@3`. A claim phrased as
+must / must not / always / never / maximum / minimum / only / required is a
+claim about what the code enforces, not about what a sentence in the corpus
+says — a worker must now back one with either a traced caller path
+(file:line, from the entry point a user actually calls down to the
+enforcing code) or a minimal executed example, and record which one it
+used as evidence. When the documentation and the code disagree and the
+worker can't resolve it, the draft records both sides under a `## Doc-vs-code
+conflict` heading instead of stating either side as settled fact. The
+consolidation stage is instructed to file each such heading through the
+existing review lane as a `contradicts-source` flag, so an owner rules on
+it rather than a concept quietly shipping one side as a contract. These are
+instructions to the extracting agent, not a check the core enforces: nothing
+in `okfy validate` verifies that a traced path was actually followed.
+
+### Agent memory pilot: comparative conclusion withdrawn
+
+The v0.26.0 agent pilot's comparative conclusion — that the compiled bundle
+finished behind both a plain source read and a hand-written guidance file —
+is withdrawn. The 72-run experiment did not execute under its own
+registered conditions: every run inherited this project's live instructions
+and an accumulating memory file that changed mid-experiment rather than the
+promised memory-free fresh context, the registered per-run token ceiling
+was never stated to any of the 72 runs, and each arm's instructions were
+read from a file rather than installed as the system prompt. The published
+usage comparison also double-counted streamed usage blocks sharing one
+message id; corrected, the compiled bundle's median cost is *lower* than
+the source-only arm's, not 1.04× it. Two of the original task adjudications
+do not survive an independent re-read against the pinned source. None of
+this reinstates the bundle's original favorable framing either — no
+comparative advantage, in either direction, is established by this run.
+
+**What survives:** on one task, the compiled bundle served an incorrect
+rule with a named citation and no hedge, on a question the pinned source
+already settled the opposite way at the bundle's own extraction revision —
+this bundle can hand an agent a confident wrong answer, with a citation.
+The rule was not outdated by a later code change: the documentation said
+one thing and the code did another, and extraction recorded the
+documentation's side as fact. A properly isolated, budget-enforced rerun is needed before any
+comparative claim about the bundle's value can be made.
+
 ## v0.26.0 — 2026-09-21
 
 An external audit of v0.25 reproduced sixteen defects (F01–F15, with F12
@@ -189,6 +345,14 @@ compiled-but-outdated bundle would be cited with unwarranted confidence, it
 was. Nothing in this release changed as a result of this pilot; it is
 reported here as a negative result, not acted on.
 
+**2026-09-22 note:** the comparative framing above ("finished last", the
+count of refuted/confirmed claims) does not hold as originally stated — the
+experiment ran nonconforming to its own registered conditions and two of
+its task adjudications do not survive independent re-reading. See the
+v0.27.0 section above. The harmful answer on the one task built to test
+it stands, but not as described below: the bundle's rule was not made stale
+by later drift — it was already wrong when the bundle was extracted.
+
 ### Also measured this release
 
 Running `okfy release-check` end-to-end against a real bundle (on a scratch
@@ -199,3 +363,19 @@ predicate does not move a bundle closer to release, because
 set, which invalidates any owner verdicts recorded before that work existed.
 A bundle cannot reach release without a human acting after the last machine
 change.
+
+**2026-09-22 note:** a follow-up audit found several statements above did not
+hold as broadly as stated. Each has since been corrected in source; this note
+records which v0.26.0 claim was wrong and does not rewrite the text above.
+
+- "A repaired anchor's flag no longer disappears on its own (F02)" — false in
+  two more cases: a stale pin whose destination changed again before repair,
+  and a stale pin whose cited source file was deleted (finding A1).
+- "Ledger integrity is now checked on write, not just on read (F05)" — a
+  ledger rewrite already staged by something else before a sanctioned mutator
+  ran could still ship in that mutator's own commit (finding A5).
+- "Both readers now agree: malformed means out of scope, everywhere (F10)" —
+  true for shape only; the grammar half of `applies_to` validity was not
+  shared between the validator and the federation reader (finding A7).
+- "All eight now return a coded refusal (R2)" — four more uncoded refusals
+  reachable through registered MCP tools were found afterward (finding A9).

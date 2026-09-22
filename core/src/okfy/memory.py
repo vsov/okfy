@@ -37,7 +37,14 @@ MEMORY_FILE = "meta/memory.jsonl"
 # --supersedes <old-proposal-id>) — the old proposal file is gone the same way
 # a reject removes it, but the row names what replaced it (`by_proposal`)
 # instead of a reason, so the two are distinguishable in the ledger.
-EVENTS = ("propose", "accept", "reject", "superseded")
+# v0.26 audit A3: `dismiss` (okfy.proposals.dismiss) is the owner's explicit
+# disposition of an unresolved REJECT — "I reviewed the rejection, and the
+# SOURCE CHANGE itself needs no action", a different decision from the
+# reject it follows (which only says the proposed TEXT was wrong). It
+# carries no proposal (proposal=None, like an owner-refine `accept` row) and
+# is the only event besides a fresh accepted proposal that
+# `okfy.update.unresolved_rejections` treats as clearing a standing reject.
+EVENTS = ("propose", "accept", "reject", "superseded", "dismiss")
 E_MEMORY_LINE = "E_MEMORY_LINE"
 # v0.25: `okfy changes` refuses a malformed --since/--until, or --until
 # earlier than --since, with this code (see parse_window_bound and
@@ -48,6 +55,11 @@ _REQUIRED = ("event", "at", "actor", "proposal", "target", "action", "content_sh
 # midnight UTC) or a full RFC3339 UTC timestamp — the exact shape `utc_now`
 # writes. Order matters: a bare date must not partially match the long format.
 _WINDOW_FORMATS = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ")
+# The ONE shape a ledger row's own `at` is ever legitimately written in
+# (`okfy.actor.utc_now`) — unlike `_WINDOW_FORMATS` above, `_usable_at`
+# below offers no bare-date tolerance: a row is machine-written, never
+# user-typed, so anything else is unusable, not merely unconventional.
+_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def record(bundle, event: str, *, actor: str, proposal: str | None, target: str | None,
@@ -77,11 +89,39 @@ def record(bundle, event: str, *, actor: str, proposal: str | None, target: str 
     return row
 
 
+def _usable_at(value) -> bool:
+    """True when `value` parses as `_AT_FORMAT` — the only shape any ledger
+    row's `at` is ever written in. A row failing this (an empty string, free
+    text, a bare date missing the time-of-day `utc_now` always writes) is
+    not a timestamp this module can place in a window at all: `_in_window`
+    would otherwise compare it lexicographically against `since`/`until`
+    like any other string, and an unparseable `at` sorts before every real
+    timestamp — matching no window and silently vanishing from both the
+    matched-events list and the problems list. See `_parse_lines`, which
+    reports it as a problem instead, and A10 in CHANGELOG.md's v0.27.0
+    entry."""
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.datetime.strptime(value, _AT_FORMAT)
+    except ValueError:
+        return False
+    return True
+
+
 def _parse_lines(raw_text: str) -> tuple[list[dict], list[str]]:
     """The JSONL row parser shared by `events` (working tree) and
     `events_at_head` (v0.25 F05: the committed HEAD blob) — identical
     per-line validation and problem-naming regardless of which source the
-    text came from."""
+    text came from.
+
+    A row whose `at` cannot be placed in a window at all (v0.26 audit A10:
+    `_usable_at` fails) is reported as a problem here, the same way a
+    missing key or an unknown event is — never silently returned as a
+    "readable" row that then fails every `_in_window` comparison and
+    vanishes from both `out` and `problems` at once. This is the reader's
+    honest "I cannot tell what time this happened", not a refusal: every
+    OTHER readable row on the same ledger is still returned."""
     out, problems = [], []
     for n, raw in enumerate(raw_text.splitlines(), start=1):
         if not raw.strip():
@@ -101,6 +141,11 @@ def _parse_lines(raw_text: str) -> tuple[list[dict], list[str]]:
             continue
         if row["event"] not in EVENTS:
             problems.append(f"{where}: unknown event {row['event']!r}")
+            continue
+        if not _usable_at(row["at"]):
+            problems.append(
+                f"{where}: at {row['at']!r} is not a usable timestamp — "
+                "expected RFC3339 UTC, e.g. 2026-01-31T00:00:00Z")
             continue
         out.append(row)
     return out, problems
@@ -125,7 +170,8 @@ def events_at_head(bundle) -> tuple[list[dict], list[str]]:
     result could be a genuine "never rejected" or a scrubbed one — but HEAD
     can: it is the exact trust boundary `ledger_prefix_check` itself already
     draws (its HONESTY LABEL: proves nothing about a rewrite that was itself
-    already committed, only ever compares the working tree against HEAD)."""
+    already committed — it compares the index and the working tree against
+    HEAD, never HEAD against an earlier HEAD)."""
     from okfy.gitenv import run_git
     shown = run_git(bundle.root, "show", f"HEAD:{MEMORY_FILE}", capture_output=True)
     if shown.returncode != 0:

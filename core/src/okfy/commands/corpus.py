@@ -9,9 +9,10 @@ from okfy.segment import (append_segments_to_plan, make_glean_segments,
                           write_segments_to_plan)
 from okfy.proposals import list_proposals
 from okfy.update import (E_BUNDLE_DIRTY, E_CORPUS_DIRTY,
-                         E_UPDATE_PROPOSALS_PENDING, _corpus_dirty_paths,
+                         E_UPDATE_PROPOSALS_PENDING,
+                         E_UPDATE_REJECTION_UNRESOLVED, _corpus_dirty_paths,
                          anchored_source_share, refresh_snapshot,
-                         repair_anchors, update_plan)
+                         repair_anchors, unresolved_rejections, update_plan)
 from okfy.validate import validate_integrity
 
 from .common import _print
@@ -114,9 +115,20 @@ def cmd_diff(a) -> int:
              + ", ".join(plan["reextract"]))
 
     if plan.get("reanchor"):
+        # v0.26 audit A1 (orchestrator follow-up): `needs_reextract` (see
+        # `_reanchor_list`) is the operator-facing signal that THIS entry is
+        # not a plain-repair candidate — `okfy reanchor` will refuse it
+        # (A1.3's digest check). Surfaced here rather than left for the
+        # operator to discover only after running reanchor and reading a
+        # `skipped` reason.
+        def _reanchor_note(r):
+            base = f"{r['concept']}:{r['source']}->{r['moved_to']}"
+            if r.get("needs_reextract"):
+                base += "  [needs re-extract — destination text has " \
+                       "changed since the move; a plain reanchor will refuse]"
+            return base
         print(f"\nreanchor ({len(plan['reanchor'])}): " + ", ".join(
-            f"{r['concept']}:{r['source']}->{r['moved_to']}"
-            for r in plan["reanchor"]))
+            _reanchor_note(r) for r in plan["reanchor"]))
 
     if plan["uncovered_new"]:
         print(f"\nuncovered_new ({len(plan['uncovered_new'])}): "
@@ -159,7 +171,17 @@ def cmd_snapshot(a) -> int:
     - Proposals filed for THIS update still PENDING owner review — a
       snapshot declares the corpus baseline current, and an update whose
       proposals have not been accepted or rejected yet is not complete
-      (phase-5.md). `okfy review list` names what is open."""
+      (phase-5.md). `okfy review list` names what is open.
+
+    v0.26 audit A3 adds a fourth, also checked before `refresh_snapshot` and
+    also overridden by `--force`: a still-AFFECTED concept whose most recent
+    `meta/memory.jsonl` event is a `reject`, with nothing since to dispose of
+    it (`unresolved_rejections`). Rejecting a proposed INTERPRETATION of a
+    corpus change ("this text is wrong") is not the same decision as
+    deciding the change itself needs no action — the documented workflow
+    used to treat any reject as license to snapshot, which silently dropped
+    the source change out of the NEXT `okfy diff` before anyone actually
+    decided it was fine. `okfy dismiss` records that explicit decision."""
     b = Bundle(a.bundle)
 
     pending = list_proposals(b)
@@ -178,6 +200,25 @@ def cmd_snapshot(a) -> int:
             "one (see `okfy review list`) and run okfy snapshot again, or "
             "pass --force to snapshot anyway and treat them as out of "
             "scope for this baseline")
+
+    plan = update_plan(b)
+    unresolved = unresolved_rejections(b, plan["affected"])
+    if unresolved and not a.force:
+        shown = ", ".join(sorted(unresolved))
+        raise ValueError(
+            f"{E_UPDATE_REJECTION_UNRESOLVED}: {len(unresolved)} concept(s) "
+            f"are still affected by a corpus change whose proposed update "
+            f"was REJECTED, with no disposition since: {shown}. Rejecting a "
+            "proposed interpretation of a corpus change is not the same "
+            "decision as deciding the source change itself needs nothing — "
+            "snapshotting now would drop these out of the next okfy diff's "
+            "affected list even though nobody actually decided the change "
+            "was fine. For each one: either file a fresh `okfy propose` and "
+            "get it accepted if the rejected text just needed rework, or "
+            "run `okfy dismiss <bundle> <concept-id> --reason \"...\"` to "
+            "record that the source change itself needs no action, then "
+            "run okfy snapshot again — or pass --force to snapshot anyway "
+            "and treat them as out of scope for this baseline")
 
     # Scoped to bundles that installed the write-policy hook (`okfy package`)
     # — that hook is the only mechanism that can refuse the commit and
@@ -227,11 +268,13 @@ def cmd_snapshot(a) -> int:
     outcome = refresh_snapshot(b, force=a.force)
     result = {"snapshot": "refreshed" if outcome["refreshed"] else "skipped",
              **outcome}
-    if (dirty or bundle_dirty or pending) and a.force:
+    if (dirty or bundle_dirty or pending or unresolved) and a.force:
         result["forced"] = True
         notes = []
         if pending:
             notes.append(f"{len(pending)} proposal(s) pending")
+        if unresolved:
+            notes.append(f"{len(unresolved)} rejected change(s) unresolved")
         if bundle_dirty:
             notes.append(f"bundle had {len(bundle_dirty)} uncommitted change(s)")
         if dirty:

@@ -41,9 +41,31 @@ E_BUNDLE_DIRTY = "E_BUNDLE_DIRTY"
 # before they are accepted or rejected would let the affected concepts drop
 # out of the NEXT `okfy diff` while nothing has actually been decided yet.
 E_UPDATE_PROPOSALS_PENDING = "E_UPDATE_PROPOSALS_PENDING"
+# v0.26 audit A3: `okfy snapshot` refuses while a still-affected concept's
+# most recent meta/memory.jsonl event is a `reject` with nothing since to
+# dispose of it — registered here, raised by
+# `okfy.commands.corpus.cmd_snapshot` (see `unresolved_rejections`).
+# Rejecting a proposed INTERPRETATION of a corpus change is not the same
+# decision as deciding the change itself needs nothing: the documented
+# workflow used to treat any reject as sufficient reason to advance the
+# baseline (plugin/commands/update.md), which silently erased the very
+# signal a `reject` test was named to preserve. `okfy dismiss` is the
+# explicit owner disposition that clears it.
+E_UPDATE_REJECTION_UNRESOLVED = "E_UPDATE_REJECTION_UNRESOLVED"
 
 SOURCE_PINS = "meta/source-pins.json"
 SOURCE_PINS_SCHEMA = "okfy-source-pins@1"
+
+# v0.26 audit A2: sentinel default for the optional `rev` parameter on
+# `corpus_diff`/`_classify_spans` below — distinct from `None`, which is
+# itself the meaningful "not a git repository" value `_corpus_git_sha`
+# returns and which callers must be able to pass through unchanged (a
+# non-git corpus's diff/classify behaviour must not change at all; see
+# their docstrings). `_UNSET` means "no revision was threaded in — resolve
+# it yourself, exactly as before"; every EXISTING caller of either function
+# (there are several, in tests and in `update_plan`/`sampling.py`) omits
+# the argument entirely and keeps that self-resolving behaviour unchanged.
+_UNSET = object()
 
 
 def _snapshot(bundle: Bundle) -> dict:
@@ -126,7 +148,23 @@ def _materialize_pinned_paths(corpus: Path, rev: str, relpaths: set[str],
             continue
 
 
-def corpus_diff(bundle: Bundle) -> dict:
+def corpus_diff(bundle: Bundle, *, rev: str | None = _UNSET) -> dict:
+    """{"mode", "old", "new", "changed", "added", "removed",
+    "skipped_dangling_symlinks"} — what changed in the corpus since the last
+    snapshot, in git mode by comparing two committed trees, in manifest mode
+    by comparing two file-hash listings.
+
+    `rev` (v0.26 audit A2): the corpus revision to diff TO, already resolved
+    by a caller running a larger multi-step operation (currently only
+    `refresh_snapshot`) that needs every git-facing read in that operation to
+    agree on one commit. Omitted (the default — every existing caller,
+    `update_plan`, `sampling.py`, and every test that calls this directly),
+    this resolves `_corpus_git_sha(corpus)` itself, exactly as before: an
+    ordinary `okfy diff` answers against whatever HEAD is right now, which is
+    correct for a standalone query. `None` is a legitimate explicit value (a
+    non-git corpus, or one with no commits) and is passed through unchanged,
+    never re-resolved — see `_UNSET`'s own comment for why a plain `None`
+    default could not tell the two cases apart."""
     snap = _snapshot(bundle)
     corpus = Path(snap["corpus"])
     prefix = _embedded_prefix(bundle, corpus)
@@ -135,7 +173,7 @@ def corpus_diff(bundle: Bundle) -> dict:
         return prefix is None or not p.startswith(prefix)
 
     old_sha = snap.get("git_sha")
-    new_sha = _corpus_git_sha(corpus)
+    new_sha = _corpus_git_sha(corpus) if rev is _UNSET else rev
     if old_sha and new_sha:
         # git mode: the listing comes from `git diff --name-status` against a
         # committed tree on both ends, so it is complete by construction — git
@@ -152,8 +190,21 @@ def corpus_diff(bundle: Bundle) -> dict:
         # the diff to `corpus` and reports paths corpus-relative, matching
         # what `sources:` entries and `keep()`/`affected_concepts` already
         # assume.
+        #
+        # v0.26 audit A2: the second endpoint is `new_sha` — a revision
+        # resolved once, above — never the symbolic literal `"HEAD"`. Passing
+        # `"HEAD"` here made this the WIDEST race window in the whole
+        # operation: it re-resolves inside git itself, at the moment this
+        # subprocess runs, after every Python-side read this function or its
+        # caller has already done — a commit landing between `new_sha`'s
+        # resolution above and this call would have made the listing
+        # disagree with `new_sha` even within a single `corpus_diff` call,
+        # never mind the rest of `refresh_snapshot`. `new_sha` is always a
+        # concrete resolved sha here (never `None`, guarded by `if old_sha
+        # and new_sha` above), so this substitution changes nothing about
+        # what gets diffed in the ordinary case — only what it is pinned to.
         out = run_git(
-            corpus, "diff", "--name-status", "--relative", "-M", old_sha, "HEAD",
+            corpus, "diff", "--name-status", "--relative", "-M", old_sha, new_sha,
             capture_output=True, text=True, check=True).stdout
         changed, added, removed = [], [], []
         for line in out.splitlines():
@@ -248,6 +299,39 @@ def _protected(bundle: Bundle, ids) -> dict[str, bool]:
     return out
 
 
+def unresolved_rejections(bundle: Bundle, affected) -> dict[str, dict]:
+    """{concept_id: reject_row} for every id in `affected` whose most recent
+    meta/memory.jsonl event is a `reject`, with nothing since to dispose of
+    it — v0.26 audit A3. Rejecting a proposed INTERPRETATION of a corpus
+    change ("this text is wrong") is a different decision from deciding the
+    change itself needs no action, and the two must not collapse into one:
+    `okfy.commands.corpus.cmd_snapshot` refuses to advance the baseline past
+    any id this returns (see `E_UPDATE_REJECTION_UNRESOLVED`), unless the
+    owner clears it — `okfy.proposals.dismiss` records that explicit
+    disposition, and a fresh proposal on the same target being ACCEPTED
+    clears it too, just by becoming the newer event.
+
+    Folds the WHOLE ledger, keeping only the last row seen per target (file
+    order is chronological order — the same assumption `_protected` above
+    makes) — so a later `dismiss`, `accept`, or even another `reject`
+    naturally supersedes whatever came before it for that target, without
+    this function needing to know which kind of event outranks which.
+
+    Reads `memory.events`, never `events_at_head`: an unreadable ledger line
+    answers "cannot tell", and per this project's own guard rule
+    (okfy-a-guard-needs-three-states) a WRITER may not refuse on "cannot
+    tell" — only a positively read `reject` row, as the latest thing on
+    record for that target, blocks anything here. A target absent from the
+    readable ledger entirely is not reported either — absence of evidence
+    is not evidence of an unresolved rejection."""
+    latest: dict[str, dict] = {}
+    for row in memory.events(bundle)[0]:
+        target = row.get("target")
+        if target in affected:
+            latest[target] = row
+    return {cid: row for cid, row in latest.items() if row["event"] == "reject"}
+
+
 # --------------------------------------------------------------------------
 # Span pins (v0.24, report-only). Built because the pooled anchored
 # share over real bundles measured >= 30% (31.6%). ONE parser for anchors:
@@ -293,58 +377,49 @@ def _anchor_kind(source: str) -> str:
     return "heading"
 
 
-def build_source_pins(bundle: Bundle, corpus: Path | None) -> dict:
+def build_source_pins(bundle: Bundle, corpus: Path | None, *,
+                      rev: str | None = _UNSET) -> dict:
     """{"schema", "pins": [...], "unpinned": [...]} for the CURRENT concept set
     against the CURRENT corpus — what `refresh_snapshot` writes to
-    meta/source-pins.json. Every source that `cited_span` resolves to a line
-    range (either line-anchor grammar, a char anchor, a bare path, or a
-    heading the corpus can resolve) becomes a pin, tagged with its `kind`
-    (see `_anchor_kind`) so `_classify_spans` knows how to reclassify it later;
+    meta/source-pins.json. Every source `cited_span` resolves to a line range
+    (line/char anchor, bare path, or a heading the corpus can resolve) becomes
+    a pin tagged with its `kind` (`_anchor_kind`, read by `_classify_spans`);
     everything else is reported under `unpinned`, never dropped.
 
-    A source whose resolved file lies outside the corpus (`../secret.txt#L1-L2`
-    — `cited_span`'s line-anchor branch resolves this without ever touching
-    the file) is routed to `unpinned` rather than read and hashed — a bundle
-    only pins what it actually corpus-scopes. Any read failure (missing file,
-    binary/non-UTF-8 file, or `corpus is None` while an anchor still resolved)
-    is caught and routed to `unpinned` too, instead of raising (finding 14):
-    `okfy snapshot` must not crash — and must not leave a half-refreshed
-    snapshot — just because one cited file went away.
+    A source resolving outside the corpus, or any read failure (missing file,
+    binary/non-UTF-8, `corpus is None` while an anchor still resolved), routes
+    to `unpinned` instead of raising — one cited file going away must not
+    crash `okfy snapshot` or leave a half-refreshed snapshot.
 
-    v0.25 audit F03: when `corpus` is a git repository with a resolvable HEAD,
-    every byte read below comes from HEAD's committed tree (`git show
-    <HEAD>:./<path>`, via `_materialize_pinned_paths` — a scratch directory
-    mirroring the corpus's layout, so `cited_span`/`span_text` need no change
-    at all), never the corpus's working tree. `refresh_snapshot` stamps this
-    same HEAD as `git_sha`, so the label and the bytes it labels can no longer
-    disagree even when the real corpus working tree is mid-edit. A corpus
-    that is not a git repository, or a git repository with no commits yet
-    (`_corpus_git_sha` returns `None` either way), has no other revision to
-    read — this falls back to the working tree exactly as before, the same
-    working-tree semantics manifest mode always had.
+    When `corpus` is a git repository with a resolvable HEAD, every byte read
+    below comes from `rev`'s committed tree (`_materialize_pinned_paths`, a
+    scratch mirror of the corpus layout), never the working tree — so the
+    `git_sha` `refresh_snapshot` stamps can no longer disagree with the bytes
+    it labels. No revision to capture (not a git repo, or no commits) falls
+    back to the working tree, manifest mode's original semantics.
 
-    Follow-up to v0.25 audit F11: `cited_span`'s bounds check and the
-    `span_text` call right after it are threaded through ONE `lines_cache`,
-    local to this call, keyed by resolved path under `read_corpus` — the
-    scratch mirror in git mode, the corpus itself otherwise, always whatever
-    was actually read above, never the other one. Several sources citing the
-    same file (many concepts drawn from one document, the normal case) now
-    cost one open+read of it, not one per citation and not two per citation
-    the way F11's bounds check alone would leave it."""
+    `rev`: resolved by a caller running a larger operation (only
+    `refresh_snapshot`) that needs every git-facing read in it to agree on
+    one commit. Omitted, this resolves `_corpus_git_sha(corpus)` itself;
+    `None` passes through unchanged (not a git repo, or no commits) — `_UNSET`.
+
+    `cited_span`'s bounds check and the `span_text` hash right after it share
+    one `lines_cache`, local to this call, so several citations into the same
+    file cost one read of it, not one (or two) per citation."""
     from okfy.sourcemap import cited_span, span_text
     pins, unpinned = [], []
 
     read_corpus = corpus
     tmp = None
     if corpus is not None:
-        rev = _corpus_git_sha(corpus)
-        if rev is not None:
+        resolved_rev = _corpus_git_sha(corpus) if rev is _UNSET else rev
+        if resolved_rev is not None:
             relpaths = {_source_path(str(s))
                        for c in bundle.concepts() if not c.id.startswith("meta/")
                        for s in (c.meta.get("sources") or [])}
             tmp = tempfile.TemporaryDirectory(prefix="okfy-pinned-")
             read_corpus = Path(tmp.name)
-            _materialize_pinned_paths(corpus, rev, relpaths, read_corpus)
+            _materialize_pinned_paths(corpus, resolved_rev, relpaths, read_corpus)
 
     # Per-call cache, local to this one invocation (never a module-level
     # global — that goes stale between runs in the same process, the same
@@ -454,52 +529,39 @@ def _load_source_pins(bundle: Bundle) -> dict:
 
 
 def _classify_spans(bundle: Bundle, corpus: Path | None, diff: dict,
-                    affected: dict[str, list[str]]) -> dict:
+                    affected: dict[str, list[str]], *,
+                    rev: str | None = _UNSET) -> dict:
     """{concept_id: {source: outcome}} for every affected concept's sources
-    that cite a file which actually CHANGED (a removed file's sources are
-    covered by `stale_candidates`/`reextract`, not by span classification —
-    there is no new file content to search).
+    whose file actually CHANGED (a removed file's sources go through
+    `stale_candidates`/`reextract` instead — no new content to search).
+    `outcome` is "span_intact" / "span_changed" / "unpinned", or a dict
+    wrapping one: `{"outcome": "span_moved", "moved_to": "L<a>-L<b>"}`, or
+    `{"outcome": "span_changed", "ambiguous": True}` (old text now matches
+    more than one place).
 
-    `outcome` is the bare string "span_intact" / "span_changed" / "unpinned",
-    or — when it carries extra data — a dict `{"outcome": ..., ...}`:
-    `{"outcome": "span_moved", "moved_to": "L<a>-L<b>"}`, or
-    `{"outcome": "span_changed", "ambiguous": True}` when the old text now
-    matches more than one place. This is a judgment call: the spec names four
-    bare-string outcomes plus a sibling `moved_to`/`ambiguous` fact, and a
-    string cannot carry a fact, so those two outcomes alone are wrapped.
+    Reclassification depends on the pin's `kind` (`_anchor_kind`, set by
+    `build_source_pins`):
 
-    How a pin is reclassified depends on its `kind` (finding 18 —
-    `_anchor_kind`, recorded on the pin by `build_source_pins`):
+    - "path" (whole file): re-hash the CURRENT file and compare to the pin.
+      Equal -> `span_intact`; otherwise `span_changed`. Never `span_moved` —
+      nowhere else for "the whole file" to move to.
+    - "heading": re-resolve the anchor by heading TEXT against the current
+      file and hash that span — a reordered section is absorbed here (match
+      is by heading text, not line number), not a separate "moved" case.
+    - "line" / "char" (a fixed window, or an old pin with no `kind`): hash the
+      OLD start/end window of the NEW file first; on a mismatch, search every
+      same-length window of the new file for the old hash. 0 matches ->
+      `span_changed`; >1 -> `span_changed` (`ambiguous`); exactly 1 ->
+      `span_moved`.
 
-    - "path" (bare path, claims the WHOLE file): re-hash the CURRENT whole
-      file and compare to the pin. Equal -> `span_intact`; anything else ->
-      `span_changed`. Never `span_moved` — there is nowhere else for "the
-      whole file" to move to.
-    - "heading" (claims everything under that heading): re-resolve the anchor
-      against the CURRENT file via `cited_span` and hash THAT span. Equal to
-      the pin -> `span_intact`; the heading no longer resolves, or resolves to
-      different text -> `span_changed`. This also naturally absorbs a heading
-      that moved position in the file (a reordered section), since resolution
-      is by heading text, not by line number — so no separate "moved" case.
-    - "line" / "char" (a FIXED window, or an old pin with no "kind" — every
-      such pin predates this fix and can only be line/char, since bare-path
-      and heading pins are new): unchanged from before — hash the OLD
-      start/end window of the NEW file first (no search needed, in manifest
-      mode none is available: edits happen in place, there is no history to
-      read); if that fails, search every same-length window of the new file
-      for the old hash. 0 matches -> `span_changed`; >1 -> `span_changed`
-      (`ambiguous`); exactly 1 -> `span_moved`.
-
-    v0.25 audit F03: "the NEW/CURRENT file" above means HEAD's committed tree
-    when `corpus` is a git repository with a resolvable HEAD — the same
-    `_materialize_pinned_paths` scratch-directory technique `build_source_pins`
-    uses, so the reader code below is untouched — never the corpus's working
-    tree. `diff` itself already compares two committed revisions (`old_sha`..
-    `HEAD`, see `corpus_diff`); this keeps "what changed" and "what the
-    changed text now says" answering about the SAME revision instead of
-    disagreeing when the corpus working tree is mid-edit. No other revision to
-    read (not a git repository, or one with no commits) falls back to the
-    working tree, exactly as before."""
+    "the NEW/CURRENT file" means `rev`'s committed tree in git mode
+    (`_materialize_pinned_paths`, same technique as `build_source_pins`),
+    never the working tree — matching what `diff` already compared, so
+    "what changed" and "what it now says" answer about the SAME revision.
+    `rev` threads the same way as `corpus_diff`'s: resolved by a caller
+    (only `refresh_snapshot`) needing this call to agree with the rest of
+    its operation; omitted, this resolves `_corpus_git_sha(corpus)` itself.
+    `None` passes through unchanged (not a git repository, or no commits)."""
     from okfy.sourcemap import cited_span, span_text
     old = _load_source_pins(bundle)
     pins_by_key = {(p["concept"], p["source"]): p for p in old.get("pins") or []}
@@ -509,11 +571,11 @@ def _classify_spans(bundle: Bundle, corpus: Path | None, diff: dict,
     read_corpus = corpus
     tmp = None
     if corpus is not None:
-        rev = _corpus_git_sha(corpus)
-        if rev is not None:
+        resolved_rev = _corpus_git_sha(corpus) if rev is _UNSET else rev
+        if resolved_rev is not None:
             tmp = tempfile.TemporaryDirectory(prefix="okfy-pinned-")
             read_corpus = Path(tmp.name)
-            _materialize_pinned_paths(corpus, rev, changed_files, read_corpus)
+            _materialize_pinned_paths(corpus, resolved_rev, changed_files, read_corpus)
 
     try:
         out: dict[str, dict] = {}
@@ -626,8 +688,23 @@ def _reextract_ids(affected: dict[str, list[str]], diff: dict, spans: dict) -> l
     return sorted(out)
 
 
+#  A stale pin's BASE shape (every pin has these — see `_valid_pin_row`)
+# plus the two names `_reanchor_list` already surfaces explicitly by name
+# below (`anchor_stale` itself, and `moved_to`). Anything else found on a
+# stale pin is a LATER fact some other pass chose to record about that
+# debt (currently only `stale_content_changed`, from `refresh_snapshot`'s
+# A1.1 fix) — carried through generically rather than by adding a matching
+# named field here every time one is invented. A hand-enumerated key tuple
+# is exactly the shape that has silently dropped a just-added state in
+# this codebase before (project memory: okfy-a-new-state-dies-in-the-
+# printer, three instances in one phase) — `reanchor` is the reader that
+# decides what the operator sees, so it cannot be the next instance.
+_PIN_BASE_FIELDS = {"concept", "source", "file", "start", "end", "sha256",
+                    "kind", "anchor_stale", "moved_to"}
+
+
 def _reanchor_list(spans: dict, stale_pins: list[dict] | None = None) -> list[dict]:
-    """[{"concept", "source", "moved_to"}] — a TODO list for fixing the
+    """[{"concept", "source", "moved_to", ...}] — a TODO list for fixing the
     anchor's TEXT (via `repair_anchors`/`okfy reanchor`), kept separate from
     `reextract` on purpose: a moved anchor means the cited text is unchanged
     and still needs no re-extraction, but its `#L..` anchor is now pointing
@@ -646,7 +723,24 @@ def _reanchor_list(spans: dict, stale_pins: list[dict] | None = None) -> list[di
     `anchor_stale` is reported, `moved_to` read straight off the pin (no new
     computation needed), deduplicated against any live `span_moved` entry
     for the same (concept, source) by preferring the live, freshly measured
-    one."""
+    one.
+
+    v0.26 audit A1 (orchestrator follow-up to A1.1): "not just the ONE flag
+    the report happened to demonstrate" applies to THIS reader too. Every
+    field a stale pin carries beyond its base shape (`_PIN_BASE_FIELDS`)
+    rides along into the matching entry here — so `stale_content_changed`
+    reaches `okfy diff`'s `reanchor` output, and so does whatever the NEXT
+    fact recorded on a stale pin turns out to be, without this function
+    needing to name it. On top of that pass-through, `needs_reextract` is
+    added HERE, on the entry, when `stale_content_changed` is set: that flag
+    on a raw pin states a FACT (this round's classification observed further
+    drift); `needs_reextract` states the CONSEQUENCE a caller can act on
+    without first knowing that `repair_anchors`'s own digest check (A1.3)
+    is what would refuse a plain reanchor of that entry — the citation needs
+    RE-EXTRACTION, not a mechanical anchor rewrite. Only entries built from
+    `stale_pins` can carry it (a fresh, live `span_moved` this same round has
+    no drift to report — see `refresh_snapshot`'s docstring for why a second
+    move is not chased here either)."""
     out: dict[tuple[str, str], dict] = {}
     for cid, hits in spans.items():
         for s, entry in hits.items():
@@ -656,8 +750,12 @@ def _reanchor_list(spans: dict, stale_pins: list[dict] | None = None) -> list[di
     for p in stale_pins or []:
         if p.get("anchor_stale"):
             key = (p["concept"], p["source"])
+            extra = {k: v for k, v in p.items() if k not in _PIN_BASE_FIELDS}
             out.setdefault(key, {"concept": p["concept"], "source": p["source"],
-                                 "moved_to": p.get("moved_to")})
+                                 "moved_to": p.get("moved_to"), **extra})
+    for entry in out.values():
+        if entry.get("stale_content_changed"):
+            entry["needs_reextract"] = True
     result = sorted(out.values(), key=lambda r: (r["concept"], r["source"]))
     return result
 
@@ -726,113 +824,64 @@ def update_plan(bundle: Bundle) -> dict:
 def refresh_snapshot(bundle: Bundle, *, force: bool = False) -> dict:
     """Rewrite meta/corpus-manifest.json, meta/source-pins.json and
     meta/corpus.md to the CURRENT corpus. Returns `{"refreshed": True}` on an
-    ordinary write, or `{"refreshed": False, "reason": "corpus dirty" | "bundle
-    dirty", "dirty": <n>, "dirty_paths": [...]}` on either dirty no-op below —
-    the return value is what makes the two distinguishable; see that note for
-    why this must be legible rather than a bare `None` either way.
+    ordinary write, or `{"refreshed": False, "reason": "corpus dirty" |
+    "bundle dirty", "dirty": <n>, "dirty_paths": [...]}` on either dirty
+    no-op below — a caller that ignores the return value is choosing to treat
+    "skipped" the same as "refreshed", not being denied the distinction.
 
-    Finding 14: the three files used to be written one at a time, manifest
-    first — so a source citing a file that went missing crashed
-    `build_source_pins` (unguarded `span_text`) AFTER the manifest was already
-    rewritten, leaving corpus-manifest.json pointing at the new corpus state
-    while source-pins.json/corpus.md still described the old one. The next
-    `okfy diff` then compared new-against-new and reported nothing pending —
-    the removed/edited files silently dropped out of the update plan. Fixed
-    two ways: `build_source_pins` no longer raises on a missing/unreadable/
-    outside-corpus source (routes it to `unpinned` instead), and everything
-    below is computed in memory FIRST — manifest, pins, and the corpus.md
-    text — with all three files written only after every computation above
-    has already succeeded.
+    Everything is computed in memory FIRST — manifest, pins, corpus.md text —
+    and all three files are written only after every computation has already
+    succeeded, so a source citing a file that goes missing mid-computation
+    can never leave the three files describing different corpus states
+    (`build_source_pins` routes that case to `unpinned` instead of raising).
 
-    Finding 19a: before overwriting, the OUTGOING pins are classified against
-    the CURRENT corpus using the same diff/classify machinery `okfy diff`
-    uses. A source whose classification comes back `span_moved` keeps its OLD
-    pin (flagged `anchor_stale`, with `moved_to`) instead of being silently
-    re-pinned to whatever text now happens to sit at the old line numbers —
-    that re-pin is exactly what let a LATER real edit of the cited text read
-    back as `span_intact`. A source that comes back `span_changed` DOES take
-    the new pin — but flagged `repinned_after_change`, because taking it is
-    the owner's own act of running `okfy snapshot`, not a verified match.
+    By default (`force=False`), a DIRTY corpus is a no-op (nothing read
+    beyond `git status`, nothing written): silently ADVANCING the pinned
+    baseline while the owner is mid-edit would swallow an already-committed
+    change one uncommitted revert away from becoming invisible to the next
+    `okfy diff`. A DIRTY BUNDLE whose write-policy hook is installed
+    (`.git/hooks/pre-commit`, from `okfy package`) is likewise a no-op
+    (`reason: "bundle dirty"`) — otherwise, advancing the baseline while an
+    update's own concept edit is still uncommitted would erase the diff
+    signal if the hook then refuses that commit. A bundle without the hook
+    has no such risk and is not checked. `okfy snapshot` (the CLI) REFUSES
+    either dirty case outright, with a registered code, before calling this
+    function; `--force` there maps to `force=True` here. A corpus or bundle
+    that is not a git repository, or has no commits yet, has no "dirty"
+    concept to check.
 
-    v0.25 audit F02: classifying the OUTGOING pins only tells this call about
-    sources whose file is in the CURRENT diff (`_classify_spans` skips
-    everything else, `outcome` comes back `None` for it). A file moved once,
-    snapshotted once, is no longer in the NEXT diff — the corpus baseline
-    already advanced past it — so a second, otherwise-uneventful snapshot
-    used to see `outcome is None` and fall to the `else` branch, silently
-    replacing the preserved `anchor_stale` pin with a fresh hash of whatever
-    unrelated text now sits at the OLD line numbers. The debt, and the only
-    record that the anchor was ever wrong, was gone. The carry-forward below
-    now also checks the OLD pin itself: one already flagged `anchor_stale`
-    survives verbatim regardless of what the current diff says, for as many
-    snapshots as it takes. Nothing in this function ever clears that flag —
-    the sole way out is `repair_anchors` (`okfy reanchor`), which rewrites
-    the concept's OWN citation text from the stale anchor to `moved_to`; that
-    changes the pin's (concept, source) key, so on the NEXT snapshot the old
-    stale pin no longer matches anything here and a fresh, correct pin is
-    taken in its place — repair by construction, not a special-cased reset.
+    One revision, `rev`, is resolved ONCE at entry and threaded into the
+    dirty check, `build_source_pins`, `corpus_diff`, `_classify_spans`, and
+    the `git_sha` this function writes, so every git-facing read in the
+    operation names the same commit — `corpus_diff` takes `rev` as an
+    explicit endpoint rather than the symbolic `"HEAD"`, which would
+    otherwise re-resolve inside git at the last possible moment.
 
-    v0.25 audit F03: `build_source_pins`/`_classify_spans` now read every git-
-    mode byte from HEAD's committed tree, never the corpus's working tree, so
-    the `git_sha` stamped below can no longer disagree with the content it
-    labels (see their docstrings). That alone leaves one risk unclosed: a
-    corpus with uncommitted changes ahead of HEAD. Reading correctly from HEAD
-    does not make it safe to silently ADVANCE the pinned baseline to HEAD
-    while the owner is mid-edit — that would swallow exactly the kind of
-    already-committed change this mechanism exists to surface, one
-    uncommitted revert away from making it invisible to the next `okfy diff`
-    (the audit's own reproduction). So by default (`force=False`), a DIRTY
-    corpus makes this call a no-op: nothing is read beyond `git status`,
-    nothing is written — but the return value SAYS which happened
-    (`refreshed: False`, with why and how many paths), rather than an
-    unreadable-ledger-reports-as-empty shape where success and "silently did
-    nothing" look identical to the caller. A caller that ignores the return
-    value (most existing ones do) is CHOOSING to treat "skipped" the same as
-    "refreshed", not being denied the distinction. `okfy snapshot` (the CLI)
-    is what actually REFUSES a dirty corpus outright, with a registered code,
-    before ever calling this function; `--force` there is what maps to
-    `force=True` here, the only thing that makes an override real (git_sha
-    advances to HEAD, ignoring the uncommitted bytes) rather than cosmetic. A
-    corpus that is not a git repository, or a git repository with no commits
-    (`_corpus_git_sha` returns `None` either way), has no "dirty" concept to
-    check — manifest mode's working-tree semantics were never a mixture, so
-    this gate does not apply to it.
+    RETAIN, not refuse: if the corpus advances DURING this call, the
+    captured `rev` — not whatever is current when this function returns — is
+    what gets written; the next diff simply sees the intervening commit as
+    an ordinary pending change. `{"refreshed": True}` means "written against
+    the revision current when this call started," not "against whatever is
+    current now."
 
-    v0.25 audit F04: the corpus side is only half of what a snapshot pins. A
-    snapshot records a relationship between two COMMITTED states — the
-    corpus's, and the BUNDLE's own (which concepts exist, what they cite).
-    The witness that exposed this: a worker edits a concept directly
-    (write_policy=proposals, an unprotected concept — the F04 scenario),
-    then runs `okfy snapshot` BEFORE the commit that was meant to land that
-    edit. The snapshot advances the pinned baseline to the corpus's current
-    HEAD — correctly, in isolation — but the bundle's own edit that
-    `okfy diff` was tracking is still sitting uncommitted. When the commit
-    is then refused (the hook catches the direct edit), the working tree
-    disagrees with bundle HEAD, and the freshly-advanced baseline has
-    already erased the diff signal that an update was still pending — the
-    procedure did not finish, AND the signal that it needed to run is gone.
+    Outgoing pins are classified against the current corpus before being
+    overwritten (`_classify_spans`). A pin already flagged `anchor_stale`
+    survives BYTE-FOR-BYTE for as long as the bundle still cites that exact
+    (concept, source) key, decided in its OWN pass over the OLD pins ahead
+    of and independent of this round's diff or freshly-built pins — so
+    neither "this file isn't in today's diff" nor "the stale destination
+    drifted again" can replace the debt with an unverified pin. It gains
+    `stale_content_changed` only when this round's classification of the
+    old window comes back `span_changed` — informational, never a reason to
+    alter `anchor_stale`/`moved_to`/`sha256`. Nothing here ever clears
+    `anchor_stale`; the only way out is `repair_anchors`, which changes the
+    citation string (and so the pin's key) by construction. A pin not
+    already stale that classifies as `span_moved` gains `anchor_stale`/
+    `moved_to` for the first time; one that classifies as `span_changed`
+    takes the fresh pin, flagged `repinned_after_change`.
 
-    So, symmetric with the corpus-dirty gate above: by default
-    (`force=False`), a DIRTY BUNDLE also makes this call a no-op — nothing is
-    read or written, `refreshed: False` with `reason: "bundle dirty"`. But
-    unlike the corpus side, "dirty" here is scoped to bundles that installed
-    the write-policy hook (`.git/hooks/pre-commit` — written by `okfy
-    package`, see `package.install_precommit`): that hook is the ONLY
-    mechanism that can refuse the commit and strand an advanced snapshot the
-    way F04 describes, so a bundle that never installed it has no such risk
-    to guard against — its uncommitted concept edits are ordinary in-
-    progress work, not a commit a gate is about to bounce. (Many tests build
-    a bundle with `okfy init`/`init_bundle` and write concepts straight into
-    it without ever running `okfy package`, exactly to exercise
-    `refresh_snapshot`'s own pin/diff math in isolation; scoping this check
-    to hook presence keeps that legitimate use unaffected while still
-    catching the real F04 shape.) `okfy snapshot` (the CLI) is what actually
-    REFUSES a dirty, hook-installed bundle outright, with a registered code
-    (E_BUNDLE_DIRTY), before ever calling this function — same shape as
-    E_CORPUS_DIRTY, and `--force` maps to `force=True` here for both. A
-    bundle that is not itself a git repository, or has no commits yet, has
-    no "dirty" concept to check either, for the same reason manifest-mode
-    corpora don't."""
+    History of the defects this shape closes (A1, A2) is in CHANGELOG.md's
+    v0.27.0 entry, not here."""
     c = bundle.get("meta/corpus")
     if c.meta.get("exported"):
         raise ValueError("exported fusion — diff/update/snapshot are not "
@@ -848,13 +897,24 @@ def refresh_snapshot(bundle: Bundle, *, force: bool = False) -> dict:
     corpus_raw = Path(c.meta["corpus"])
     corpus = corpus_raw if corpus_raw.is_dir() else None
 
+    # v0.26 audit A2: resolve the corpus's revision ONCE, here, for the rest
+    # of this call. `_corpus_git_sha` on a path that is not a directory (or
+    # not a git repository, or a git repository with no commits) returns
+    # `None` exactly as it always has — this capture changes nothing about
+    # what "no revision" means, only how many times it gets asked for.
+    rev = _corpus_git_sha(corpus_raw)
+
     if corpus is not None and not force:
-        rev = _corpus_git_sha(corpus)
         if rev is not None:
             dirty = _corpus_dirty_paths(corpus)
             if dirty:
                 return {"refreshed": False, "reason": "corpus dirty",
                         "dirty": len(dirty), "dirty_paths": dirty}
+
+    # Build the CURRENT pins right after the dirty check passes, from the
+    # SAME `rev` captured above (v0.26 audit A2) — no independent
+    # `_corpus_git_sha` call happens inside this call any more.
+    new_pins_doc = build_source_pins(bundle, corpus, rev=rev)
 
     # Classify the outgoing pins against the current corpus (finding 19a).
     # A genuine listing failure (E_DIFF_PARTIAL_LISTING, or the new-listing-
@@ -863,21 +923,58 @@ def refresh_snapshot(bundle: Bundle, *, force: bool = False) -> dict:
     # drift — it just means no anchor-stability information is available
     # this round, same as a bundle's very first snapshot.
     try:
-        diff = corpus_diff(bundle)
+        diff = corpus_diff(bundle, rev=rev)
         affected = affected_concepts(bundle, diff["changed"] + diff["removed"])
-        old_outcomes = _classify_spans(bundle, corpus, diff, affected)
+        old_outcomes = _classify_spans(bundle, corpus, diff, affected, rev=rev)
     except ValueError:
         old_outcomes = {}
 
     new_manifest = _manifest(corpus_raw)
-    new_pins_doc = build_source_pins(bundle, corpus)
     old_pins_by_key = {(p["concept"], p["source"]): p
                        for p in _load_source_pins(bundle).get("pins") or []}
 
-    final_pins = []
+    # v0.26 audit A1.1/A1.2: the CURRENT set of (concept, source) citations
+    # the bundle actually makes right now — `bundle.concepts()`'s own
+    # `sources:`, never `new_pins_doc`, which only names what
+    # `build_source_pins` could BUILD (a citation to a since-deleted file
+    # never gets a pin there at all; see A1.2 above). This is what decides
+    # whether a stale key is still owed a repair or has been resolved by a
+    # citation-string rewrite (`repair_anchors`).
+    live_keys: set[tuple[str, str]] = set()
+    for cn in bundle.concepts():
+        if cn.id.startswith("meta/"):
+            continue
+        for s in (cn.meta.get("sources") or []):
+            live_keys.add((cn.id, str(s)))
+
+    final_pins: list[dict] = []
+    handled_keys: set[tuple[str, str]] = set()
+
+    # Pass 1 — debt first, driven by the OLD pins, ahead of and independent
+    # of anything `new_pins_doc`/this round's diff says (A1.1/A1.2, see the
+    # docstring above). Every old pin still carrying `anchor_stale`, for a
+    # key the bundle still cites, survives byte-for-byte; nothing here can
+    # replace it with a repin, a `span_changed` outcome only adds the
+    # `stale_content_changed` note.
+    for key, old_pin in old_pins_by_key.items():
+        if not old_pin.get("anchor_stale") or key not in live_keys:
+            continue
+        kept = dict(old_pin)
+        entry = old_outcomes.get(key[0], {}).get(key[1])
+        outcome = _span_outcome(entry) if entry is not None else None
+        if outcome == "span_changed":
+            kept["stale_content_changed"] = True
+        final_pins.append(kept)
+        handled_keys.add(key)
+
+    # Pass 2 — ordinary repinning, for every key pass 1 did not already
+    # claim as outstanding debt: finding 19a's `span_moved`/`span_changed`
+    # classification of the OUTGOING pin, or a fresh pin with nothing to
+    # preserve.
     for pin in new_pins_doc["pins"]:
         key = (pin["concept"], pin["source"])
-        old_pin = old_pins_by_key.get(key)
+        if key in handled_keys:
+            continue
         entry = old_outcomes.get(pin["concept"], {}).get(pin["source"])
         outcome = _span_outcome(entry) if entry is not None else None
         if outcome == "span_moved" and key in old_pins_by_key:
@@ -889,22 +986,16 @@ def refresh_snapshot(bundle: Bundle, *, force: bool = False) -> dict:
             taken = dict(pin)
             taken["repinned_after_change"] = True
             final_pins.append(taken)
-        elif old_pin is not None and old_pin.get("anchor_stale"):
-            # F02: `outcome` is `None` whenever this source's file is not in
-            # the CURRENT diff — including because a PRIOR snapshot already
-            # advanced the baseline past the move that caused the staleness.
-            # That must not read as "nothing to preserve"; a pin already
-            # carrying `anchor_stale` is debt a past snapshot recorded and
-            # this one did not independently verify, so it carries forward
-            # byte-for-byte (not `pin`, the freshly built one for the OLD
-            # line numbers) until `repair_anchors` changes its key.
-            final_pins.append(dict(old_pin))
         else:
             final_pins.append(pin)
     new_pins_doc = {**new_pins_doc, "pins": final_pins}
 
     new_meta = dict(c.meta)
-    new_meta["git_sha"] = _corpus_git_sha(corpus_raw)
+    # v0.26 audit A2: the SAME `rev` captured at entry, never a fresh
+    # `_corpus_git_sha(corpus_raw)` call here — that second, independent
+    # call is exactly what let a commit landing mid-operation stamp
+    # OLD-content pins with a NEW commit's sha (see the docstring above).
+    new_meta["git_sha"] = rev
     new_meta["extracted_at"] = datetime.date.today().isoformat()
     manifest_text = json.dumps(new_manifest, indent=0, sort_keys=True)
     pins_text = json.dumps(new_pins_doc, indent=2, sort_keys=True,
@@ -922,64 +1013,123 @@ def refresh_snapshot(bundle: Bundle, *, force: bool = False) -> dict:
 
 def repair_anchors(bundle: Bundle, *, only: set[tuple[str, str]] | None = None,
                    apply: bool = True) -> dict:
-    """The explicit repair F02 requires: the ONLY thing that clears an
-    `anchor_stale` pin (`okfy reanchor` at the CLI). `refresh_snapshot`'s
-    carry-forward rule now preserves a stale pin verbatim, keyed on
-    (concept, source), for as long as that exact citation string exists —
-    on purpose; nothing about running `okfy snapshot` again, with any flag,
-    is allowed to silently re-pin it (that silent re-pin is the defect this
-    whole mechanism exists to close). Repairing means the owner (or the
-    /okfy:update flow, deterministically) fixes what is actually wrong: the
-    anchor's TEXT, `#L..`, still points at the OLD line numbers, while
-    `_classify_spans` already measured exactly where the unchanged cited
-    text now lives (`moved_to`, carried on the stale pin and echoed by
-    `update_plan(...)["reanchor"]`).
+    """The only thing that clears an `anchor_stale` pin (`okfy reanchor`).
+    For every `{"concept", "source", "moved_to"}` entry `update_plan(...)
+    ["reanchor"]` reports (optionally narrowed to `only`, a set of
+    (concept, source) pairs), rewrites that concept's own frontmatter
+    `sources:` entry from the stale citation to `<path>#<moved_to>` and
+    writes the concept file directly — a mechanical text correction, like
+    `repair_links`, not a content change, so it bypasses the proposal
+    workflow. The cited TEXT is unchanged by definition of `span_moved`;
+    only the anchor moves.
 
-    For every `{"concept", "source", "moved_to"}` entry `update_plan`
-    reports under `reanchor` (optionally narrowed to `only`, a set of
-    (concept, source) pairs), this rewrites that CONCEPT's own frontmatter
-    `sources:` entry from the stale citation to `<path>#<moved_to>` —
-    exactly the citation edit `_reanchor_list`'s docstring describes as
-    outstanding — and writes the concept file directly (mechanical text
-    correction, like `repair_links`; not a content change, so it does not
-    go through the proposal workflow). The cited TEXT is unchanged by
-    definition of `span_moved`, so this never touches concept content, only
-    the anchor.
+    Changing the citation string changes its (concept, source) key, so the
+    next `okfy snapshot` no longer matches the stale pin and takes a fresh
+    one for the new citation instead — repair is real because of that key
+    change, this function never edits meta/source-pins.json directly.
 
-    Once the citation string changes, its (concept, source) KEY changes
-    with it, so the NEXT `okfy snapshot` no longer matches the old stale
-    pin against anything in `old_pins_by_key` — `refresh_snapshot` falls
-    through to taking the freshly built pin for the new citation, with no
-    `anchor_stale` and no special case. Repair is real because of that key
-    change, not because this function pokes at meta/source-pins.json
-    directly (it never does).
+    Never partial: a missing concept, an old citation no longer verbatim in
+    `sources` (a concurrent edit), or no `moved_to` on record, is reported
+    under `skipped` with a `reason` and left untouched. `apply=False`
+    (`okfy reanchor --dry-run`) reports what WOULD be repaired without
+    writing, including this function's own refusals below.
 
-    Never partial: an entry whose concept has gone missing, whose old
-    citation string no longer appears verbatim in that concept's `sources`
-    (e.g. a concurrent edit), or that carries no `moved_to`, is reported
-    under `skipped` and left untouched — same shape as `repair_links`'s
-    `ambiguous`/`unresolved`. `apply=False` reports what WOULD be repaired
-    without writing anything (`okfy reanchor --dry-run`)."""
+    Before rewriting, the ORIGINAL pinned digest for (concept, source) is
+    re-hashed at `moved_to` in the corpus at a captured revision `rev` (git
+    mode: via `_materialize_pinned_paths`, never the mutable working tree,
+    so a commit landing mid-call cannot disagree with what this reports; no
+    revision to capture falls back to the working tree). A mismatch (the
+    destination was edited since the move), an unresolvable `moved_to`, an
+    unreadable destination or corpus, or no pinned digest on record, each skip with their
+    own `reason` — `moved_to` names a LOCATION, not a still-current
+    guarantee that the originally cited text is what lives there now."""
+    from okfy.sourcemap import cited_span, span_text
+
     plan_reanchor = update_plan(bundle)["reanchor"]
-    repaired, skipped = [], []
-    for entry in plan_reanchor:
-        key = (entry["concept"], entry["source"])
-        if only is not None and key not in only:
-            continue
-        moved_to = entry.get("moved_to")
-        c = bundle.get(entry["concept"])
-        old_source = entry["source"]
-        sources = list(c.meta.get("sources") or []) if c is not None else []
-        if c is None or not moved_to or old_source not in sources:
-            skipped.append(entry)
-            continue
-        path_prefix = old_source.split("#", 1)[0]
-        new_source = f"{path_prefix}#{moved_to}"
-        sources[sources.index(old_source)] = new_source
-        if apply:
-            new_meta = dict(c.meta)
-            new_meta["sources"] = sources
-            c.path.write_text(frontmatter.serialize(new_meta, c.body),
-                              encoding="utf-8")
-        repaired.append({**entry, "new_source": new_source})
-    return {"repaired": repaired, "skipped": skipped}
+    if only is not None:
+        plan_reanchor = [e for e in plan_reanchor
+                         if (e["concept"], e["source"]) in only]
+
+    pinned_by_key = {(p["concept"], p["source"]): p
+                     for p in _load_source_pins(bundle).get("pins") or []}
+
+    corpus_doc = bundle.get("meta/corpus")
+    corpus_raw = (Path(corpus_doc.meta["corpus"])
+                 if corpus_doc is not None and corpus_doc.meta.get("corpus")
+                 else None)
+    corpus = corpus_raw if corpus_raw is not None and corpus_raw.is_dir() else None
+    # v0.26 audit A1.3: captured ONCE, like `refresh_snapshot`'s own `rev` —
+    # see that function's A2 docstring for why a second, independent
+    # `_corpus_git_sha` call partway through an operation is exactly the
+    # race this pattern exists to close.
+    rev = _corpus_git_sha(corpus_raw) if corpus_raw is not None else None
+
+    read_corpus = corpus
+    tmp = None
+    if corpus is not None and rev is not None:
+        needed_paths = {e["source"].split("#", 1)[0] for e in plan_reanchor}
+        tmp = tempfile.TemporaryDirectory(prefix="okfy-pinned-")
+        read_corpus = Path(tmp.name)
+        _materialize_pinned_paths(corpus, rev, needed_paths, read_corpus)
+
+    try:
+        repaired, skipped = [], []
+        for entry in plan_reanchor:
+            moved_to = entry.get("moved_to")
+            c = bundle.get(entry["concept"])
+            old_source = entry["source"]
+            sources = list(c.meta.get("sources") or []) if c is not None else []
+            if c is None or not moved_to or old_source not in sources:
+                skipped.append({**entry, "reason":
+                    "concept missing, no moved_to on record, or the old "
+                    "citation no longer appears verbatim in sources (a "
+                    "concurrent edit)"})
+                continue
+
+            path_prefix = old_source.split("#", 1)[0]
+            new_source = f"{path_prefix}#{moved_to}"
+
+            key = (entry["concept"], old_source)
+            pin = pinned_by_key.get(key)
+            if pin is None or not isinstance(pin.get("sha256"), str):
+                skipped.append({**entry, "reason":
+                    "no pinned digest on record for this citation — cannot "
+                    "verify what text the move is supposed to preserve"})
+                continue
+            if read_corpus is None:
+                skipped.append({**entry, "reason":
+                    "corpus is not locally readable — cannot verify the "
+                    "destination text"})
+                continue
+            _, new_start, new_end = cited_span(new_source, read_corpus)
+            if new_start is None:
+                skipped.append({**entry, "reason":
+                    f"moved_to destination {moved_to!r} does not resolve "
+                    "against the corpus"})
+                continue
+            dest_file = read_corpus / path_prefix
+            try:
+                dest_text = span_text(dest_file, new_start, new_end)
+            except (OSError, UnicodeDecodeError, TypeError) as e:
+                skipped.append({**entry, "reason":
+                    f"destination text unreadable ({type(e).__name__})"})
+                continue
+            dest_sha = hashlib.sha256(dest_text.encode("utf-8")).hexdigest()
+            if dest_sha != pin["sha256"]:
+                skipped.append({**entry, "reason":
+                    "destination text no longer matches the originally "
+                    "pinned digest — it was edited after the move was "
+                    "recorded; re-extract instead of repairing"})
+                continue
+
+            sources[sources.index(old_source)] = new_source
+            if apply:
+                new_meta = dict(c.meta)
+                new_meta["sources"] = sources
+                c.path.write_text(frontmatter.serialize(new_meta, c.body),
+                                  encoding="utf-8")
+            repaired.append({**entry, "new_source": new_source})
+        return {"repaired": repaired, "skipped": skipped}
+    finally:
+        if tmp is not None:
+            tmp.cleanup()

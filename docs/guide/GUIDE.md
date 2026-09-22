@@ -220,6 +220,8 @@ Re-extraction can leave a concept pointing at a link that no longer resolves —
 
 The snapshot is refreshed **last**, and the ordering is deliberate. The snapshot is the map's record of "what the code looked like when I was last known-good." If you refreshed it *before* re-extracting, you would erase the very evidence of what changed — the diff would come back empty and the drift would be invisible. So the snapshot is only re-stamped after the concepts have actually been brought back into agreement with the code. Update the knowledge first; declare it current second.
 
+**Rejecting a proposal is not the same decision as accepting the drift (v0.26 audit A3).** `okfy review reject` says the proposed TEXT was wrong — it says nothing about whether the source change itself needs anything done about it. So `okfy snapshot` treats a still-`affected` concept whose most recent `meta/memory.jsonl` event is a `reject` as unresolved, and refuses (`E_UPDATE_REJECTION_UNRESOLVED`, naming the concepts and the way out) exactly the way it refuses on pending proposals. Nothing clears it silently: either a fresh `okfy propose` on the same target gets **accepted** (the rejected draft just needed rework), or the owner runs `okfy dismiss <bundle> <concept-id> --reason "..."` to record, explicitly, that the source change itself needs no action — a bare `meta/memory.jsonl` row (`dismiss`, `proposal: null`, carrying over the standing reject's own `content_sha256`/`action`) plus a `log.md` line, the same shape `okfy refine` uses for an edit with no proposal behind it. `--force` overrides this refusal like the others, and says so in the printed result. Without one of these two, the corpus change stays visible in `affected` forever — the point is that "nobody has decided this needs nothing" is not the same state as "the owner decided this needs nothing", and only the second one may ever look like the first to the next `okfy diff`.
+
 Underneath all of this sits one honesty rule, and it is the same one the consumption protocol states: **the code is the truth; the map only flags drift.** When a concept and the code it describes disagree, the code wins — no exceptions. The map's job is not to be authoritative over the code but to be honest about its own staleness: to say clearly "these concepts may be behind, here is the drift" rather than to present a stale answer with false confidence. A map that admits what it doesn't know is worth more to an agent than one that quietly lies.
 
 ## 9. Federating bundles
@@ -330,6 +332,10 @@ This is never an error, at any strictness. A file legitimately yields no concept
 
 One related finding runs the other way. A concept may cite a real corpus file that **no segment ever assigned** (`W_SOURCE_OUTSIDE_SCOPE`): either the scope drifted, or a worker read past the manifest that was supposed to bound it. Paths that are not in the corpus at all are deliberately *not* repeated here — `W_BAD_SOURCE` already reports those, and a check that restates another check's finding trains you to ignore both.
 
+### Absolute claims need a traced path, not just a citation
+
+A citation is not verification. A concept can name a real symbol and quote a real sentence and still be wrong about what the code actually does with it — the documentation said one thing, the code enforces something else, and extraction recorded the documentation's side as fact. `extract-worker.md`/`glean-worker.md` add one more discipline for exactly this shape of claim: a rule phrased as **must / must not / always / never / maximum / minimum / only / required** needs either a traced caller path — file:line from the entry point a caller actually uses down to the code that enforces the claim — or a minimal executed example, recorded as evidence in the draft. State the limit in the same plain terms the span-outcome block already uses: the core can check that a draft carries a trace, never that the trace is correct — it cannot check whether you actually read anything. When the documentation and the code disagree and a worker cannot resolve it, the rule refuses the shortcut of picking the documentation's side: the draft records both under a `## Doc-vs-code conflict` heading, the merged concept leaves the absolute wording out, and Stage 5 files it through the existing flag lane (`okfy propose --action flag --type contradicts-source`) so the owner rules on it instead of an agent citing it as settled.
+
 ### Looking again: `okfy glean`
 
 A coverage figure tells you what was missed; it does nothing about it. `okfy glean` queues the second pass. It appends pending `glean-NN` segments holding exactly the entries of the uncited files — the `lines`/`chars` spans copied verbatim, so the gleaner is handed the same window the first Worker saw rather than a whole file the segment budget exists to keep out.
@@ -399,7 +405,7 @@ $ okfy ledger list ./bundle --run 2026-07-08T12-00
 
 A row records what went in (paths *and* content hashes, resolved from the corpus manifest), what came out, which prompt version did the work, the digest of the worker's **job artifact** (before each worker starts, `okfy job` freezes its exact contract — inputs with `lines`/`chars` spans and hashes, corpus snapshot, archetype — into `meta/jobs/<segment>.json`, and copies the exact prompt text into the bundle as `meta/prompts/<sha256>.txt`: a SHA alone proves the text existed, the copy preserves what it said. The digest is computed by the core from the frozen artifact — `ledger add --job <segment>` never accepts a hand-passed digest — and `okfy validate --strict-provenance` cross-checks the whole chain: artifact digests recompute, prompt copies match their hashes, ledger rows match their artifacts and cite no inputs outside them), and the commit that landed it. Consolidation rows additionally carry a **merge map** — `draft → final` — so you can trace any final concept back through the merge to the worker drafts and from there to the exact source files and their hashes at extraction time. The ledger is deliberately *shallow*: one row per artifact transition, not per claim or per sentence. Segment-level provenance answers the questions that actually come up ("what fed this concept?", "which prompt version was this batch?"); claim-level provenance would cost an order of magnitude more machinery, and it can be added later *if real failures ever show segment-level is not enough* — not before.
 
-**Proving the ledgers were appended to, not rewritten.** `meta/memory.jsonl` and `meta/ledger.jsonl` are append-only *by contract* — nothing enforced that until now. `okfy validate` reads each file's committed content at HEAD (one `git show HEAD:<path>` per file, never a history walk) and checks it is a **byte-prefix** of the working-tree file: an append only ever extends the file, so the prefix always holds, and an edit to an already-committed row, or a deletion of a row or the whole file, breaks it. A break is reported as **`E_LEDGER_REWRITTEN`**, naming the file, the first byte offset that differs, the row that offset falls in, and the repair — restore the file from git, then re-append the corrected decision as a *new* row, because neither ledger ever edits a row in place. When the file cannot be checked against a committed baseline at all — the bundle has no git repository of its own, or the file exists in the working tree but has never been committed — that is reported too, as **`W_LEDGER_UNVERIFIABLE`**, naming which of the two it is and the same repair either way — commit the bundle (or just this file) so a later edit has a real HEAD version to be checked against; a file that exists nowhere makes no append-only claim and is reported as nothing at all. **What this does not prove:** it compares the working tree against HEAD only, so a rewrite that was itself committed leaves no trace here — it catches an *uncommitted* edit, which is the case that actually happens.
+**Proving the ledgers were appended to, not rewritten.** `meta/memory.jsonl` and `meta/ledger.jsonl` are append-only *by contract* — nothing enforced that until now. `okfy validate` reads each file's committed content at HEAD (one `git show HEAD:<path>` per file, never a history walk) and checks it is a **byte-prefix** of both the index (what the next commit would ship) and the working-tree file (what is on disk): an append only ever extends the file, so the prefix always holds, and an edit to an already-committed row, or a deletion of a row or the whole file, breaks it — in either source. A break is reported as **`E_LEDGER_REWRITTEN`**, naming the file, the first byte offset that differs, the row that offset falls in, and the repair — restore the file from git, re-stage it, then re-append the corrected decision as a *new* row, because neither ledger ever edits a row in place. `okfy review accept`/`reject`, `dismiss` and `refine` all check the same predicate at their one shared commit boundary before they stage or commit anything, so a rewrite that was `git add`ed ahead of time and then hidden by restoring the working tree is refused there too, not just reported by `validate`. When the file cannot be checked against a committed baseline at all — the bundle has no git repository of its own, or the file exists in the working tree but has never been committed — that is reported too, as **`W_LEDGER_UNVERIFIABLE`**, naming which of the two it is and the same repair either way — commit the bundle (or just this file) so a later edit has a real HEAD version to be checked against; a file that exists nowhere makes no append-only claim and is reported as nothing at all. **What this does not prove:** it compares the index and the working tree against HEAD only, so a rewrite that was itself committed leaves no trace here — it catches an *uncommitted* (or staged-but-uncommitted) edit, which is the case that actually happens.
 
 ### Segment status: a closed vocabulary
 
@@ -1143,7 +1149,7 @@ regardless. Every accept/reject also records `channel` on its
 accept/reject tool at all). Rows from before this existed simply carry no
 `channel` and stay valid.
 
-**The ledger.** Every propose, accept and reject is appended to
+**The ledger.** Every propose, accept, reject, superseded and dismiss is appended to
 `meta/memory.jsonl`: who, when, which proposal, which text (by sha256), and the
 reason for a rejection. That is how a rejected claim stays rejected after its
 proposal file is gone.
@@ -1204,16 +1210,17 @@ by accident.
 `okfy changes <bundle> [--since <date>] [--until <date>] [--target <id>]
 [--event <kind>] [--action <action>] [--actor <name>] [--text]` is a
 read-only window query over `meta/memory.jsonl` — every propose, accept,
-reject and `superseded` row the ledger holds, filtered by who, what, and
-when. JSON is the default output: `{"bundle", "since", "until", "count",
-"window_applies_to": "event time", "events": [...]}`, rows kept exactly as
-the ledger wrote them, in file order; `--text` prints one line per event.
-`--since`/`--until` accept a bare date (`2026-01-31`, read as `00:00:00Z`)
-or a full RFC3339 UTC timestamp (`2026-01-31T14:30:00Z`); the window is
-half-open, `[--since, --until)` — an event whose `at` equals `--until` is
-excluded, one whose `at` is a second earlier is included. `--target`,
-`--event` (repeatable — one of `propose`/`accept`/`reject`/`superseded`,
-the ledger's own event kind), `--action` (repeatable — one of
+reject, `superseded` and `dismiss` row the ledger holds, filtered by who,
+what, and when. JSON is the default output: `{"bundle", "since", "until",
+"count", "window_applies_to": "event time", "events": [...]}`, rows kept
+exactly as the ledger wrote them, in file order; `--text` prints one line
+per event. `--since`/`--until` accept a bare date (`2026-01-31`, read as
+`00:00:00Z`) or a full RFC3339 UTC timestamp (`2026-01-31T14:30:00Z`); the
+window is half-open, `[--since, --until)` — an event whose `at` equals
+`--until` is excluded, one whose `at` is a second earlier is included.
+`--target`, `--event` (repeatable — one of
+`propose`/`accept`/`reject`/`superseded`/`dismiss`, the ledger's own event
+kind), `--action` (repeatable — one of
 `create`/`update`/`delete`/`supersede`/`flag`/`gap`, the underlying
 proposal's action) and `--actor` all combine with the window, and with each
 other, as AND. **`--event` and `--action` filter two different fields on

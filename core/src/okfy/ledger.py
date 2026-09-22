@@ -9,7 +9,7 @@ from pathlib import Path
 
 from okfy.bundle import Bundle
 from okfy.gitenv import run_git
-from okfy.proposals import _commit
+from okfy.proposals import _commit, _refuse_if_ledger_rewritten
 
 LEDGER = "meta/ledger.jsonl"
 
@@ -323,15 +323,37 @@ def add_row(bundle: Bundle, run_id: str, segment: str, inputs, prompt_version: s
                 f"{E_LEDGER_CORRECTION_UNKNOWN}: no ledger row exists with "
                 f"run_id={normalized['run_id']!r} segment={normalized['segment']!r} "
                 "— a correction must reference a row already on the ledger")
-        if not any(normalized["output"] in (er.get("outputs") or [])
-                  for er in matched if isinstance(er.get("outputs"), list)):
+        # A correction binds to a UNIQUE earlier transition (v0.26 audit
+        # A8), not to whichever row happens to match: `declaring` narrows
+        # `matched` to rows that actually declared this output, and either
+        # zero or more than one is refused rather than guessed at — zero
+        # means the output was never lost by this run_id/segment, more than
+        # one means run_id/segment alone cannot tell which loss this
+        # correction is meant to explain.
+        declaring = [er for er in matched if isinstance(er.get("outputs"), list)
+                    and normalized["output"] in er["outputs"]]
+        if not declaring:
             raise ValueError(
                 f"{E_LEDGER_CORRECTION_UNKNOWN}: run_id={normalized['run_id']!r} "
                 f"segment={normalized['segment']!r} never declared output "
                 f"{normalized['output']!r} in its outputs — a correction "
                 "must name an output the target row actually declared")
+        if len(declaring) > 1:
+            raise ValueError(
+                f"{E_LEDGER_CORRECTION_UNKNOWN}: run_id={normalized['run_id']!r} "
+                f"segment={normalized['segment']!r} declared output "
+                f"{normalized['output']!r} in more than one ledger row — "
+                "ambiguous which loss this correction explains, so it is "
+                "refused rather than applied to whichever matches")
         row["corrects"] = normalized
 
+    # v0.26 audit A5: checked at entry, before the row is appended to disk
+    # — see `proposals._accept`'s matching comment and
+    # `_refuse_if_ledger_rewritten`'s docstring (the same guard `accept`,
+    # `reject`, `dismiss` and `refine` call, applied here to
+    # meta/ledger.jsonl instead of meta/memory.jsonl). `_commit` below
+    # still re-checks as the backstop.
+    _refuse_if_ledger_rewritten(bundle, LEDGER)
     path = ledger_path(bundle)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:

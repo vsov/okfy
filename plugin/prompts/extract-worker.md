@@ -28,14 +28,25 @@ Rules:
    you actually used).
 3. Content must be standalone (ADR-0005): copy the substance in; a reader
    without the corpus must be able to act on it. No "see chapter 5".
-4. Bodies in the bundle's canonical language; domain terms stay as the corpus
+4. A claim phrased as **must / must not / always / never / maximum / minimum
+   / only / required** is a claim about what the code enforces, not about
+   what a sentence in the corpus says — finding the constant or the sentence
+   is not verifying the claim about the path that reaches it. Before writing
+   one, get either a **traced caller path** (file:line, from the public entry
+   point a user actually calls down to the code that enforces the claim) or a
+   **minimal executed example** that demonstrates it, and record which one you
+   used as evidence in the draft. If the documentation and the code disagree
+   and you cannot resolve it, do not write the unqualified claim: record both
+   sides under a `## Doc-vs-code conflict` heading in the draft instead, and
+   leave the absolute wording out until the owner rules on it.
+5. Bodies in the bundle's canonical language; domain terms stay as the corpus
    writes them. Concept file names: ASCII kebab-case.
-5. Link liberally to concepts you believe should exist
+6. Link liberally to concepts you believe should exist
    (`[Gamma](/glossary/gamma.md)` — bundle-absolute); dangling is fine.
-6. Glossary terms: only if central to your files AND absent from the Seed
+7. Glossary terms: only if central to your files AND absent from the Seed
    Glossary, or if you can materially improve the seed definition.
-7. When done, output one line per draft written: `<path> | <type> | <title>`.
-8. Then output the SPAN OUTCOME BLOCK — a fenced ```json block, and nothing
+8. When done, output one line per draft written: `<path> | <type> | <title>`.
+9. Then output the SPAN OUTCOME BLOCK — a fenced ```json block, and nothing
    after it. Every entry of the job artifact's `inputs` gets exactly one
    outcome. Not most of them; every one. The span key is the artifact entry
    written as a string:

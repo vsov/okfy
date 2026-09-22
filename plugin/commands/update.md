@@ -174,13 +174,27 @@ list to the user and ask for confirmation ONCE for the whole batch.
      `okfy snapshot` refuses (`E_UPDATE_PROPOSALS_PENDING`) — pending owner
      proposals are not a completed update. Tell the user: "N proposal(s)
      filed for this update; run `/okfy:review`, then re-run `okfy snapshot
-     <bundle>` once every one of them is accepted or rejected." (If nothing
-     was actually proposed — no affected concepts, no new files, nothing to
-     retire — there is nothing pending and `okfy snapshot` proceeds
-     immediately, same as under `direct`.) `okfy snapshot` also refuses
-     (`E_BUNDLE_DIRTY`) if the bundle's own working tree is uncommitted at
-     the time it runs — always run it right after a successful commit, not
-     mid-edit.
+     <bundle>`." (If nothing was actually proposed — no affected concepts,
+     no new files, nothing to retire — there is nothing pending and `okfy
+     snapshot` proceeds immediately, same as under `direct`.) `okfy
+     snapshot` also refuses (`E_BUNDLE_DIRTY`) if the bundle's own working
+     tree is uncommitted at the time it runs — always run it right after a
+     successful commit, not mid-edit.
+   - **A REJECTED proposal is not the same disposition as an ACCEPTED one
+     (v0.26 audit A3).** Accepting lands the corpus edit; rejecting only
+     says the proposed TEXT was wrong — it decides nothing about the source
+     change itself. So once every proposal from THIS update is accepted or
+     rejected, `okfy snapshot` can still refuse a second way
+     (`E_UPDATE_REJECTION_UNRESOLVED`): any concept still `affected` whose
+     most recent review was a reject, with no disposition since. Do NOT
+     treat a reject as license to snapshot. For each concept the refusal
+     names, either re-file the change as a fresh `okfy propose` (get it
+     accepted, same as any other affected concept) if the rejected text
+     just needed rework, or — only on explicit owner instruction — run
+     `okfy dismiss <bundle> <concept-id> --reason "..."` to record that the
+     source change itself needs no action. Never run `okfy dismiss`
+     yourself as a way to get an update to "finish"; it is an owner
+     decision, not a step this workflow performs on the owner's behalf.
    - Once `okfy snapshot` actually refreshes the pin, commit again — it
      changed meta/corpus.md/-manifest.json/source-pins.json, which are not
      part of the commit in step 5 above. The hook's corpus.md carve-out
@@ -193,4 +207,9 @@ Tell the user: refreshed/new/retired counts, validation state, whether any
 `ambiguous`/`unresolved` links from repair-links/reanchor need a human eye,
 and — under `write_policy: proposals` — how many proposals were filed for
 this update and that `okfy snapshot` will refuse (`E_UPDATE_PROPOSALS_PENDING`)
-until `/okfy:review` clears every one of them.
+until `/okfy:review` clears every one of them. If any were REJECTED, also
+say so explicitly and name the still-affected concepts: `okfy snapshot` will
+refuse those a second way (`E_UPDATE_REJECTION_UNRESOLVED`) until the owner
+either gets a fresh proposal accepted or runs `okfy dismiss <bundle>
+<concept-id> --reason "..."` on each one — a decision for the owner to make,
+not this workflow.

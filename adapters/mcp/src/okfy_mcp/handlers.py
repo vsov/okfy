@@ -39,6 +39,106 @@ E_PROPOSE_WORKSPACE = "E_PROPOSE_WORKSPACE"
 E_PROPOSAL_PATCH_CONTENT = "E_PROPOSAL_PATCH_CONTENT"
 E_FRESH_WORKSPACE = "E_FRESH_WORKSPACE"
 
+# v0.27 (A9 follow-up): a refusal reaches a handler's caller ONE OF TWO WAYS
+# — it RAISES (a ValueError/KeyError propagating out of a handler function),
+# or it RETURNS a dict directly (a handler-level early-exit check, like the
+# workspace guards below, that never touches core at all). `safe_call`
+# structurally catches every raised one, no matter which core module raises
+# it — but a RETURNED dict never reaches `safe_call`'s `except`, so nothing
+# stops one from being malshaped. `_h_show_many`'s too-many-ids guard was
+# exactly that: {error: "too_many_concept_ids", limit, message} — no
+# `way_out`, and a code neither `E_`-prefixed nor registered. It routed
+# around the boundary entirely, silently, because returning is not raising.
+#
+# There is no single choke point for a RETURN the way `safe_call` is one for
+# a RAISE — a dict is just data, nothing forces it through one function. The
+# guarantee here is instead an exhaustive, checked enumeration: handlers.py
+# is the ONLY place in the adapter that constructs a refusal dict (this
+# module's own docstring: "Pure MCP tool handlers ... No MCP types here"),
+# so `grep -n '"error"' adapters/mcp/src/okfy_mcp/handlers.py` finds the
+# complete, closed set of them. Every one of those sites (v0.27) has been
+# checked to carry {error, message, way_out} with an `E_`-prefixed,
+# registered code — `too_many_concept_ids` was the one exception, now fixed
+# (E_SHOW_TOO_MANY_IDS). Unlike the raise side, this fact is NOT structural —
+# a future returned-dict refusal added to handlers.py without the same shape
+# would not be caught by anything short of re-running this grep. That
+# distinction — one guarantee is boundary-structural, the other is a
+# verified-but-re-checkable enumeration over a single, small, closed file —
+# is deliberately not blurred into one blanket claim.
+E_SHOW_TOO_MANY_IDS = "E_SHOW_TOO_MANY_IDS"
+
+# v0.27 (A9): a core refusal — a ValueError (most of core) or KeyError
+# (`okfy.query.show`/`links`, `okfy.federate.fed_show` — "concept not
+# found") — that carries no leading `E_<NAME>: `/`W_<NAME>: ` prefix of its
+# own. Rather than hand-coding every such guard one at a time (the v0.26 R2
+# fix's mistake: it swept "six neighbouring bare guards" and the changelog
+# then claimed the whole class was fixed — precisely the over-claim the
+# v0.26 audit called out, because "all of them" is not a fact you can
+# establish by finding some of them), `safe_call` below wraps EVERY
+# registered MCP tool's handler dispatch (see server.py), so an uncoded
+# refusal reaches the caller as this documented envelope no matter which
+# core module raised it, or how many more of them exist that nobody has
+# gone looking for. `message` always carries the refusal's own original
+# text verbatim, so nothing is lost — only the shape changes.
+#
+# Only ValueError/KeyError are caught by `safe_call` — every OTHER
+# exception type (TypeError, AttributeError, RuntimeError, ...) is a
+# genuine bug, not something the caller can fix and retry, and is left to
+# propagate as the raw ToolError it already is. Dressing an unexpected
+# defect up as a polite, actionable refusal would hide it behind the exact
+# same reassuring shape a caller is told to just act on — a worse defect
+# than the uncoded-refusal problem this fixes.
+#
+# `safe_call` is used only at the server.py tool-dispatch boundary. Handler
+# functions called directly (as many tests do) keep their own existing
+# raise/return contracts unchanged — see h_propose's own `_coded_envelope`
+# use below, and tests that call handlers.* directly and assert an uncoded
+# ValueError/KeyError still raises rather than returning data:
+# test_uncoded_errors_still_raise, test_supersede_without_new_id_raises,
+# test_show_missing_raises.
+E_MCP_REFUSAL = "E_MCP_REFUSAL"
+
+_CODED = re.compile(r"^([EW]_[A-Z_]+): ")
+
+
+def _coded_envelope(msg: str) -> dict | None:
+    """`msg`'s {error, message, way_out} envelope if it carries a leading
+    `E_<NAME>: `/`W_<NAME>: ` prefix (core's own convention for a coded
+    refusal) — `way_out` is the message's own ' — ' tail, the same way
+    core writes a coded ValueError. None if `msg` carries no such prefix —
+    the caller decides what to do with an uncoded one."""
+    m = _CODED.match(msg)
+    if m is None:
+        return None
+    return {"error": m.group(1), "message": msg,
+           "way_out": msg.rsplit(" — ", 1)[1] if " — " in msg else ""}
+
+
+def safe_call(fn, *args, **kwargs) -> dict:
+    """Boundary: call `fn` (a handler function) and turn an escaping
+    ValueError/KeyError into the documented refusal envelope — a coded one
+    keeps its own code (`_coded_envelope`), an uncoded one gets the generic
+    `E_MCP_REFUSAL` so the original message is preserved rather than lost.
+    Every registered MCP tool (server.py) routes its handler call through
+    this, structurally guaranteeing no RAISED refusal escapes as a raw
+    ToolError, regardless of which core module raises it.
+
+    This does NOT, by itself, cover a refusal a handler RETURNS as a dict
+    instead of raising (e.g. a workspace-target guard) — those never reach
+    this `except`. Every returned refusal in this adapter is separately
+    verified, by enumeration over the only file that constructs one
+    (handlers.py — see the E_SHOW_TOO_MANY_IDS comment above for how and
+    why that enumeration is closed, and why it is a weaker guarantee than
+    this function's)."""
+    try:
+        return fn(*args, **kwargs)
+    except (ValueError, KeyError) as e:
+        msg = e.args[0] if isinstance(e, KeyError) and e.args else str(e)
+        return _coded_envelope(msg) or {
+            "error": E_MCP_REFUSAL, "message": f"{E_MCP_REFUSAL}: {msg}",
+            "way_out": "read the message for the underlying refusal and "
+                      "what to change, then retry"}
+
 
 def _cap(text: str, max_chars: int) -> tuple[str, bool]:
     """Bound a text field. Longer than max_chars -> truncate + honest marker."""
@@ -171,19 +271,34 @@ def _neighbours(t: Target, c) -> tuple[list[dict], int]:
     return neighbours, len(out_links) - len(neighbours)
 
 
+def _read_concept(path) -> tuple[bytes, str, str]:
+    """Read a concept file's bytes exactly ONCE — v0.25 (F06): the digest
+    and the text handed back must be two derivations of that SAME capture,
+    never a hash of one read paired with the text of a separate, later
+    read (an edit landing in between would then hand back content under a
+    digest that names different bytes than what was actually returned; a
+    later okfy_fresh call would wrongly answer "unchanged" for content the
+    agent never received).
+
+    Returns `(raw_bytes, sha256_of_raw_bytes, normalized_text)`. The digest
+    is always over the RAW bytes on disk. The text is decoded and then
+    newline-normalized (CRLF and lone CR -> LF) — `bytes.decode()` alone
+    does not perform the universal-newline translation `Path.read_text()`
+    used to do before v0.25 moved every caller here to a raw-bytes read
+    (F06); `frontmatter.parse`'s exact `text.startswith("---\\n")` checks
+    need that normalization, since a CRLF-line-ended file is a perfectly
+    valid concept, just spelled with `\\r\\n`. Only the TEXT view is
+    normalized — the digest, and what's on disk, are untouched."""
+    raw = path.read_bytes()
+    sha256 = hashlib.sha256(raw).hexdigest()
+    text = raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    return raw, sha256, text
+
+
 def _h_show_one(t: Target, concept_id: str, max_chars: int,
                 section: str | None, session: Session | None) -> dict:
     c = _resolve_concept(t, concept_id)
-    # v0.25 (F06): ONE read of the file's bytes — the digest and the
-    # returned content must be two derivations of that SAME capture. Two
-    # independent reads (hash the file, then separately read its text) let
-    # an edit land between them and hand back content under a digest that
-    # names different bytes than what was actually returned; a later
-    # okfy_fresh call would then wrongly answer "unchanged" for content the
-    # agent never received.
-    raw = c.path.read_bytes()
-    file_sha256 = hashlib.sha256(raw).hexdigest()
-    content = raw.decode("utf-8")
+    _, file_sha256, content = _read_concept(c.path)
     if section is not None:
         content = _section(content, section)
     content, truncated = _cap(content, max_chars)
@@ -202,9 +317,10 @@ def _h_show_many(t: Target, concept_ids: list[str], max_tokens: int,
     share rounds to nothing is OMITTED entirely (not shown with an empty
     body) — see render.fair_share's docstring for that convention."""
     if len(concept_ids) > _MAX_SHOW_IDS:
-        return {"error": "too_many_concept_ids", "limit": _MAX_SHOW_IDS,
-                "message": f"at most {_MAX_SHOW_IDS} concept_ids per call, "
-                          f"got {len(concept_ids)}"}
+        return {"error": E_SHOW_TOO_MANY_IDS, "limit": _MAX_SHOW_IDS,
+                "message": f"{E_SHOW_TOO_MANY_IDS}: at most {_MAX_SHOW_IDS} "
+                          f"concept_ids per call, got {len(concept_ids)}",
+                "way_out": f"pass at most {_MAX_SHOW_IDS} concept_ids per call"}
     seen: list[str] = []
     for cid in concept_ids:
         if cid not in seen:
@@ -223,20 +339,14 @@ def _h_show_many(t: Target, concept_ids: list[str], max_tokens: int,
     # concept's YAML frontmatter inside a shared token budget would waste
     # it on fixed overhead already visible via the concept's own
     # id/type/title (okfy_overview) and via `neighbours` below; `sha256`
-    # stays the FILE's bytes regardless, same as single-id show.
-    #
-    # v0.25 (F06): ONE read of each concept's bytes here — body and digest
-    # must be two derivations of that SAME capture, not `resolved[cid]`'s
-    # earlier (separate) read paired with a later, independent hash read.
-    # Two independent reads let an edit land between them and hand back a
-    # stale body under the new file's digest; a later okfy_fresh call would
-    # then wrongly answer "unchanged" for content the agent never received.
+    # stays the FILE's bytes regardless, same as single-id show. See
+    # `_read_concept` for why this is ONE read per concept (F06) and why
+    # its text view is newline-normalized before frontmatter.parse (A6).
     bodies = []
     shas: dict[str, str] = {}
     for cid in ok_ids:
-        raw = resolved[cid].path.read_bytes()
-        shas[cid] = hashlib.sha256(raw).hexdigest()
-        _, body = frontmatter.parse(raw.decode("utf-8"))
+        _, shas[cid], text = _read_concept(resolved[cid].path)
+        _, body = frontmatter.parse(text)
         bodies.append(body)
     rendered = render.fair_share(bodies, max_tokens) if bodies else []
 
@@ -317,9 +427,6 @@ def h_overview(t: Target, type_: str | None = None, max_items: int = 50,
     if truncated:
         out["truncated"] = True
     return out
-
-
-_CODED = re.compile(r"^([EW]_[A-Z_]+): ")
 
 
 def h_propose(t: Target, target: str, action: str, note: str,
@@ -424,12 +531,10 @@ def h_propose(t: Target, target: str, action: str, note: str,
                                  flag_type=flag_type, query=query, patch=patch,
                                  observed=observed)
     except ValueError as e:
-        msg = str(e)
-        m = _CODED.match(msg)
-        if m is None:
+        env = _coded_envelope(str(e))
+        if env is None:
             raise
-        return {"error": m.group(1), "message": msg,
-                "way_out": msg.rsplit(" — ", 1)[1] if " — " in msg else ""}
+        return env
     c = t.bundle.get(t.bundle.concept_id(path))
     env = c.meta.get("proposal") or {}
     near = env.get("near") or []

@@ -12,6 +12,7 @@ judged by ITS OWN `at` only, never by a related event's. See
 `okfy.memory.changes` for the filter itself.
 """
 from okfy.bundle import Bundle
+from okfy.memory import EVENTS
 from okfy.memory import changes as memory_changes
 from okfy.memory import parse_window_bound
 
@@ -25,7 +26,7 @@ def cmd_changes(a) -> int:
 
     `--event` and `--action` are two different filters on two different
     fields of the same row: `--event` is the ledger EVENT kind (propose/
-    accept/reject/superseded — `okfy.memory.EVENTS`), `--action` is the
+    accept/reject/superseded/dismiss — `okfy.memory.EVENTS`), `--action` is the
     underlying proposal's ACTION (create/update/delete/supersede/flag/gap —
     `okfy.proposals.ACTIONS`). An `accept` event can carry a `delete`
     action; the two names are not interchangeable.
@@ -52,8 +53,8 @@ def cmd_changes(a) -> int:
             "that is later than --since (bare dates like 2026-01-31, or "
             "full RFC3339 UTC timestamps like 2026-01-31T14:30:00Z), or "
             "drop one of the two flags")
-    # --event filters row["event"] (propose/accept/reject/superseded — the
-    # ledger's own EVENTS); --action filters row["action"]
+    # --event filters row["event"] (propose/accept/reject/superseded/
+    # dismiss — the ledger's own EVENTS); --action filters row["action"]
     # (okfy.proposals.ACTIONS — create/update/delete/supersede/flag/gap).
     # Two different fields on the same row: never conflate them.
     event_kinds = tuple(a.event) if a.event else None
@@ -71,7 +72,7 @@ def cmd_changes(a) -> int:
     print(f"changes: bundle={a.bundle} since={since} until={until} "
           f"count={len(rows)}")
     print("(each event below is in the window by its own `at` — never by a "
-          "related propose/accept/reject/superseded row's time)")
+          f"related {'/'.join(EVENTS)} row's time)")
     if problems:
         print(f"WARNING: {len(problems)} unreadable meta/memory.jsonl "
               "line(s) — the events below are only what could be read:")

@@ -13,8 +13,8 @@ the enclosing repo is the user's corpus repo and `-A` would stage their
 unrelated changes.
 
 Prompt versions (stamp these into every ledger row so provenance is
-reproducible): worker drafts = `extract-worker@2`, gleaning drafts =
-`glean-worker@2`, consolidation = `consolidate@1`. Bump the number here
+reproducible): worker drafts = `extract-worker@3`, gleaning drafts =
+`glean-worker@3`, consolidation = `consolidate@1`. Bump the number here
 whenever you change the corresponding prompt. The human label is not the real version: for worker rows the ledger
 also records the digest of a core-built job artifact (see Stage 4) that
 hashes the actual prompt text and inputs.
@@ -87,7 +87,7 @@ hashes the actual prompt text and inputs.
      and the fix is to re-run the worker — never to rewrite its report, the
      plan, or the job artifact.
    - `okfy ledger add <bundle> --run <run-id> --segment <segment-id>
-     --inputs <corpus-paths-the-worker-used> --prompt-version extract-worker@2
+     --inputs <corpus-paths-the-worker-used> --prompt-version extract-worker@3
      --outputs <draft-ids-written> --validation <pass|fail>
      --job <segment-id> --spans-file /tmp/spans-<segment-id>.json` — one row
      per worker, after its drafts commit.
@@ -113,7 +113,7 @@ entries — spans included — of the assigned corpus files no concept cites. A
 glean pass is not a new provenance mechanism: it is another segment, so Stage 4
 runs over it unchanged and `release-check` needs no exception. Run Stage 4
 step 3 on the new segments with **`plugin/prompts/glean-worker.md`** in place of
-`extract-worker.md`, ledger them with `--prompt-version glean-worker@2` and
+`extract-worker.md`, ledger them with `--prompt-version glean-worker@3` and
 `--spans-file`, then re-run Stage 5 over the new drafts and return to Stage 6
 step 1.
 
@@ -136,19 +136,35 @@ Two rules the gleaning prompt depends on you honouring:
    its final path (plan layout, e.g. `strategies/<name>.md`) — union of
    sources/aliases/tags, best content wins, contradictions resolved toward the
    more specific source. For singleton clusters: move draft to its final path.
-3. Resolve links: make link targets point at final paths; leave genuinely
+3. Doc-vs-code conflicts: before deleting `drafts/` (step 6), grep every draft
+   for a `## Doc-vs-code conflict` heading (extract-worker.md / glean-worker.md
+   rule on absolute claims — must/must not/always/never/maximum/minimum/
+   only/required). A hit means a worker found the documentation and the code
+   disagreeing and could not resolve it. The final concept it merges into
+   must NOT carry the disputed wording as settled fact — write the
+   qualified/disputed version instead, and file the conflict through the
+   existing review lane so the owner rules on it:
+   `okfy propose <bundle> --target <final-concept-id> --action flag --type
+   contradicts-source --note "<the draft's conflict note>" --as <actor>
+   --evidence agent-inference`. This is the smallest existing path that
+   reaches the owner — `flag`/`contradicts-source` already exists for exactly
+   "this concept disagrees with its source", and `okfy propose --action flag`
+   writes nothing to the concept itself, only a proposal `okfy review`
+   surfaces later. Same discipline as the injection scan in Stage 6 and
+   `/okfy:schism` in step 9 below: you surface, the owner decides.
+4. Resolve links: make link targets point at final paths; leave genuinely
    missing targets dangling (spec tolerates).
-4. Synthesize the glossary: every Seed Glossary term used by ≥1 concept gets a
+5. Synthesize the glossary: every Seed Glossary term used by ≥1 concept gets a
    GlossaryTerm concept with cross-language aliases.
-5. Delete `drafts/` contents. Commit: `consolidate: <N> concepts from <M> drafts`.
-6. After the consolidation commit, ledger the transition with the draft→final
+6. Delete `drafts/` contents. Commit: `consolidate: <N> concepts from <M> drafts`.
+7. After the consolidation commit, ledger the transition with the draft→final
    merge map: `okfy ledger add <bundle> --run <run-id> --segment consolidate
    --inputs <draft-ids-consumed> --prompt-version consolidate@1
    --outputs <final-concept-ids> --validation <pass|fail>
    --merge-map "<draft>=<final>,<draft2>=<final>"`.
-7. Run the shadow consolidation audit — `okfy merge-audit <bundle>`. It
+8. Run the shadow consolidation audit — `okfy merge-audit <bundle>`. It
    reconstructs the merge groups from the `merge_map` you just recorded and
-   recovers the drafts from the commit before step 5 deleted them (the ref is
+   recovers the drafts from the commit before step 6 deleted them (the ref is
    auto-detected). It is a REPORT, not a gate: it exits 0 either way and never
    blocks the pipeline. Read it. `lost-source` means a citation vanished in a
    merge; `enum-collapse` means two drafts disagreed on an archetype enum
@@ -156,7 +172,7 @@ Two rules the gleaning prompt depends on you honouring:
    is a real loss, and tell the user what you left as a deliberate merge
    decision. If the output says `NOT AUDITED`, the drafts could not be
    recovered — say so; it does not mean nothing was lost.
-8. If `meta/purpose.md` declares `acceptance.dissent: required`, the bundle has
+9. If `meta/purpose.md` declares `acceptance.dissent: required`, the bundle has
    opted into recorded adjudication and `release-check` will refuse it until every
    multi-draft group carries a ruling. Do NOT write those rulings yourself — tell
    the user to run `/okfy:schism <bundle>`, which puts each group in front of them

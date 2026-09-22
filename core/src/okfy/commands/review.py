@@ -3,9 +3,10 @@ import sys
 
 from okfy import frontmatter
 from okfy.bundle import Bundle
-from okfy.proposals import (accept, distinct_overlap_warnings, evidence_state,
-                            list_proposals, near_warning, nearest, propose,
-                            propose_batch, refine, reject, show_proposal)
+from okfy.proposals import (accept, dismiss, distinct_overlap_warnings,
+                            evidence_state, list_proposals, near_warning,
+                            nearest, propose, propose_batch, refine, reject,
+                            show_proposal)
 
 from .common import _archetype_for, _print
 
@@ -176,4 +177,11 @@ def cmd_refine(a) -> int:
     refine(b, a.concept_id, a.from_file.read_text(encoding="utf-8"),
            message=a.message)
     _print({"refined": a.concept_id})
+    return 0
+
+
+def cmd_dismiss(a) -> int:
+    b = Bundle(a.bundle)
+    dismiss(b, a.concept_id, a.reason)
+    _print({"dismissed": a.concept_id, "reason": a.reason})
     return 0

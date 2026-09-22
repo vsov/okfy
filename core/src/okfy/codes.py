@@ -731,13 +731,13 @@ CODES: dict[str, dict] = {
     },
     "E_MEMORY_LINE": {
         "kind": "error",
-        "summary": "a meta/memory.jsonl line is not JSON, not an object, missing a required key, or names an unknown event",
+        "summary": "a meta/memory.jsonl line is not JSON, not an object, missing a required key, names an unknown event, or its `at` is not a usable RFC3339 UTC timestamp",
         "way_out": "fix or remove the reported line; `okfy propose`'s rejected-content gate refuses to run while any line is unreadable",
     },
     "E_LEDGER_REWRITTEN": {
         "kind": "error",
-        "summary": "meta/memory.jsonl or meta/ledger.jsonl's working-tree content is not a byte-prefix of its committed HEAD version — an already-committed row was edited or removed instead of only ever being appended to; proves nothing about a rewrite that was itself already committed, only catches an uncommitted one",
-        "way_out": "restore the file from git (the committed HEAD blob), then re-append the corrected decision as a NEW row — the ledger never edits a row in place",
+        "summary": "meta/memory.jsonl or meta/ledger.jsonl's index (staged) or working-tree content is not a byte-prefix of its committed HEAD version — an already-committed row was edited or removed instead of only ever being appended to; proves nothing about a rewrite that was itself already committed, only catches an uncommitted or staged-but-uncommitted one",
+        "way_out": "restore the file from git (the committed HEAD blob), re-stage it, then re-append the corrected decision as a NEW row — the ledger never edits a row in place",
     },
     "W_LEDGER_UNVERIFIABLE": {
         "kind": "warning",
@@ -792,6 +792,11 @@ CODES: dict[str, dict] = {
         "kind": "error",
         "summary": "(v0.25 audit F04) `okfy snapshot` refused because proposals filed for this update are still pending owner review — pending owner proposals are not a completed update, and declaring the corpus baseline current now would drop the affected concepts out of the next `okfy diff` before anything was actually decided",
         "way_out": "review each pending proposal with `okfy review accept` / `okfy review reject` (see `okfy review list`) and run okfy snapshot again, or pass --force to snapshot anyway and treat them as out of scope for this baseline",
+    },
+    "E_UPDATE_REJECTION_UNRESOLVED": {
+        "kind": "error",
+        "summary": "(v0.26 audit A3) `okfy snapshot` refused because a still-affected concept's most recent meta/memory.jsonl event is a `reject`, with nothing since to dispose of it — rejecting a proposed interpretation of a corpus change is not the same decision as deciding the source change itself needs no action, and snapshotting now would drop it out of the next `okfy diff` before anyone actually decided that",
+        "way_out": "file a fresh `okfy propose` and get it accepted if the rejected text just needed rework, or run `okfy dismiss <bundle> <concept-id> --reason \"...\"` to record that the source change itself needs no action, then run okfy snapshot again, or pass --force to snapshot anyway and treat it as out of scope for this baseline",
     },
     "E_SOURCEMAP_JSON": {
         "kind": "error",
@@ -1184,5 +1189,15 @@ CODES: dict[str, dict] = {
         "kind": "error",
         "summary": "MCP okfy_fresh was called against a workspace target — fresh targets a single bundle",
         "way_out": "point the server at the member bundle's own path, not the workspace",
+    },
+    "E_MCP_REFUSAL": {
+        "kind": "error",
+        "summary": "a registered MCP tool's handler raised a ValueError or KeyError refusal with no leading E_/W_ code of its own; the tool-dispatch boundary (okfy_mcp.handlers.safe_call, used by every tool in server.py) wraps it in the documented {error, message, way_out} envelope instead of letting it escape as a raw ToolError — `message` always carries the original refusal text verbatim",
+        "way_out": "read `message` for the underlying refusal and what to change, then retry the call",
+    },
+    "E_SHOW_TOO_MANY_IDS": {
+        "kind": "error",
+        "summary": "MCP okfy_show was called with more concept_ids than the per-call limit (`_MAX_SHOW_IDS`, 10)",
+        "way_out": "pass at most 10 concept_ids per call",
     },
 }
