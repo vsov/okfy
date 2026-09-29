@@ -28,7 +28,7 @@ from okfy.release import (DEFAULT_MIN_OWNER_PASS, MIN_TEST_QUERIES,
                           retrieval_fingerprint, release_check)
 from okfy.workspace import Workspace, workspace_status
 
-WS_FINGERPRINT_SCHEMA = "okfy-ws-retrieval@1"
+WS_FINGERPRINT_SCHEMA = "okfy-ws-retrieval@2"
 # The modules that decide what a FEDERATED query returns, on top of the
 # per-bundle retrieval code already covered by retrieval_code_digest().
 FEDERATION_MODULES = ("crosswalk.py", "federate.py", "workspace.py")
@@ -44,15 +44,36 @@ def federation_code_digest() -> str:
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
-def workspace_retrieval_fingerprint(ws: Workspace) -> str:
-    """Everything that decides what a federated query returns.
+def _personal_scope(ws: Workspace) -> dict:
+    """For every `personal` member, `concept id -> applies_to`, read the way
+    `federate.personal_scope_ids` reads it (straight from the concept files —
+    the index does not carry `applies_to`). Only `personal` narrows a query, so
+    only `personal` members are listed; a knowledge/constraints member's own
+    `applies_to` is inert to federation and stays out of the fingerprint. A list
+    of strings is sorted (its order decides nothing); anything else — the
+    malformed values that fail closed — is carried as written."""
+    from okfy.bundle import Bundle
+    out: dict = {}
+    for m in sorted(ws.members, key=lambda x: x.name):
+        if m.role != "personal":
+            continue
+        try:
+            scope = {}
+            for c in Bundle(m.path).concepts():
+                a = c.meta.get("applies_to")
+                if isinstance(a, list) and all(isinstance(k, str) for k in a):
+                    a = sorted(a)
+                scope[c.id] = a
+            out[m.name] = dict(sorted(scope.items()))
+        except Exception as e:                      # unreadable personal member
+            out[m.name] = f"__unreadable__:{type(e).__name__}"
+    return out
 
-    A member's own `retrieval_fingerprint` is included rather than its git SHA:
-    the SHA moves for a README edit, and a federated answer does not. The roster
-    carries roles because routing depends on them — re-roling a member from
-    knowledge to constraints changes every answer without touching a concept.
-    The accepted crosswalk rows are in because `same-as` merges results and
-    `constrains` drives the auto-pull that makes federation worth having."""
+
+def _workspace_fingerprint_payload(ws: Workspace) -> dict:
+    """The named inputs of `workspace_retrieval_fingerprint`, before hashing.
+    One dict, so the guide can be pinned to its keys: a new input cannot be
+    added here without `docs/guide/GUIDE.md` naming it."""
     from okfy.bundle import Bundle
     from okfy.crosswalk import load_rows as load_crosswalk
     from okfy.lexicon import load_rows as load_lexicon
@@ -71,9 +92,11 @@ def workspace_retrieval_fingerprint(ws: Workspace) -> str:
         lex = [{"__unreadable__": f"{type(e).__name__}: {e}"}]
     rows = sorted(f"{r.rel}|{r.src}|{r.dst}|{r.status}"
                   for r in load_crosswalk(ws))
-    payload = json.dumps({
+    return {
         "fingerprint_schema": WS_FINGERPRINT_SCHEMA,
         "members": members,
+        "project_key": ws.meta.get("project_key"),
+        "personal_scope": _personal_scope(ws),
         "workspace_lexicon": lex,
         "crosswalk": rows,
         "test_queries": [str(q) for q in (ws.meta.get("test_queries") or [])],
@@ -83,7 +106,29 @@ def workspace_retrieval_fingerprint(ws: Workspace) -> str:
             for q in (ws.meta.get("adversarial_queries") or [])),
         "retrieval_code": retrieval_code_digest(),
         "federation_code": federation_code_digest(),
-    }, sort_keys=True, ensure_ascii=False)
+    }
+
+
+def workspace_retrieval_fingerprint(ws: Workspace) -> str:
+    """Everything that decides what a federated query returns.
+
+    A member's own `retrieval_fingerprint` is included rather than its git SHA:
+    the SHA moves for a README edit, and a federated answer does not. The roster
+    carries roles because routing depends on them — re-roling a member from
+    knowledge to constraints changes every answer without touching a concept.
+    The accepted crosswalk rows are in because `same-as` merges results and
+    `constrains` drives the auto-pull that makes federation worth having.
+
+    `okfy-ws-retrieval@2` adds the two inputs that SCOPE personal memory:
+    the workspace `project_key`, and each `personal` member's per-concept
+    `applies_to` (`federate` reads it from the concept files, the member's own
+    fingerprint does not carry it). Editing either changes what
+    `federated_query` returns; under `@1` the fingerprint stayed put, so a run
+    recorded before the edit looked current after it. A run recorded under
+    `@1` is a previous era: the schema tag differs, so it reads as stale and its
+    stored bytes are left alone."""
+    payload = json.dumps(_workspace_fingerprint_payload(ws), sort_keys=True,
+                         ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -97,29 +142,32 @@ def _flat_hits(out: dict, n: int) -> list:
     the constrains auto-pull dragged in — the pull is the answer too, and an
     expectation about a constraint firing has to be able to see it.
 
-    v0.24 / finding 43: `federated_query` added a third, additive `personal`
-    group (out only when the workspace has a `personal` member — already
-    scoped to in-scope hits by `_personal_scope_filter`, so nothing extra to
-    filter here). Flattening only knowledge+constraints made every personal
-    hit invisible to workspace eval: a `covered` expectation on an in-scope
-    personal concept recorded `top_hits=[]` and graded `unmet` although
-    federation answered it correctly, and the owner judged acceptance runs
-    with the personal evidence missing from the record. `out.get("personal")`
-    is `None` for a workspace with no personal member, so this line is a
-    no-op there and every existing (pre-v0.24) recorded run and its era stays
-    byte-identical — this is additive to the FLATTENING, not a bump of
-    WS_FINGERPRINT_SCHEMA (which pins the federated CONTRACT, not this
-    projection of it, and staying `okfy-ws-retrieval@1` keeps every run
-    recorded before this fix comparable rather than stale-by-fiat)."""
+    Truncation rule (what a persisted eval record keeps): each role group —
+    `knowledge`, `constraints`, `personal` — is kept in that order, whole, up to
+    `n` entries each (`federated_query` already cuts each to `n`; the cap here
+    keeps the record honest if a caller hands over more). EVERY `pulled` hit is
+    kept after them: a pull is the answer to a `constrains` expectation, so it is
+    never sliced off. There is no blanket cut across groups. Until
+    `okfy-ws-retrieval@2` the flat list was cut to the first `2n`, which for a
+    10/10/10/1 result stored 20 knowledge+constraint hits and dropped every
+    personal hit and the pulled constraint — and `adversarial_outcome` graded
+    that truncated list. It now grades exactly what is kept.
+
+    `personal` is the third, additive group `federated_query` emits only when
+    the workspace has a `personal` member (already scoped to in-scope hits by
+    `_personal_scope_filter`); `out.get("personal")` is `None` otherwise, so a
+    workspace without one flattens exactly as before. The projection changed
+    together with the schema bump to `okfy-ws-retrieval@2`; runs recorded under
+    `@1` are a previous era and read as stale rather than being rewritten."""
     hits = []
-    for e in ((out.get("knowledge") or []) + (out.get("constraints") or [])
-             + (out.get("personal") or [])):
-        hits.append({"id": e["ref"], "member": e["member"], "role": e["role"],
-                     "score": e.get("score")})
+    for group in ("knowledge", "constraints", "personal"):
+        for e in (out.get(group) or [])[:n]:
+            hits.append({"id": e["ref"], "member": e["member"],
+                         "role": e["role"], "score": e.get("score")})
     for e in (out.get("pulled") or []):
         hits.append({"id": e["ref"], "member": e["member"], "role": e["role"],
                      "score": None, "via": "constrains"})
-    return hits[:max(n * 2, n)]
+    return hits
 
 
 def ws_eval_run(ws: Workspace, n: int = 10, suite: str = "acceptance") -> dict:
@@ -245,11 +293,23 @@ def _check_ws_eval(ws: Workspace, suite: str, problems: list, notes: list):
         problems.append(
             f"E_REL_WS_{tag}_PROVISIONAL: federated {suite} run {st['run_id']} "
             f"— {t['owner_confirmed']}/{t['of']} owner verdicts recorded")
-    if latest.get("retrieval_fingerprint") != workspace_retrieval_fingerprint(ws):
+    if latest.get("retrieval_schema") != WS_FINGERPRINT_SCHEMA:
+        # A previous era: the run was fingerprinted under a payload that did not
+        # cover every input (`@1` omitted project_key and personal applies_to),
+        # so its fingerprint cannot vouch for today's contract even if it were
+        # to compare equal. Reported, never rewritten.
+        problems.append(
+            f"E_REL_WS_{tag}_STALE: the federated {suite} run was recorded "
+            f"under {latest.get('retrieval_schema')!r}, not "
+            f"{WS_FINGERPRINT_SCHEMA!r} — a previous fingerprint era that "
+            "did not cover the personal scope inputs; re-run "
+            f"`okfy eval run <workspace> --suite {suite}`")
+    elif latest.get("retrieval_fingerprint") != workspace_retrieval_fingerprint(ws):
         problems.append(
             f"E_REL_WS_{tag}_STALE: the federated {suite} run was judged "
             "against a different federated contract — a member's content, the "
-            "roster, the workspace lexicon or the crosswalk moved since")
+            "roster, project_key, a personal concept's applies_to, the workspace "
+            "lexicon or the crosswalk moved since")
     key = ("min_owner_pass" if suite == "acceptance" else "min_adversarial_pass")
     acc = ws.meta.get("acceptance")
     acc = acc if isinstance(acc, dict) else {}

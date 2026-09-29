@@ -85,10 +85,19 @@ def cmd_index(a) -> int:
 
 
 def cmd_package(a) -> int:
+    shard, flat = getattr(a, "shard_index", False), getattr(a, "flat_index", False)
+    if shard and flat:
+        # Refused before Bundle() is even read, so nothing can have been written.
+        raise ValueError(
+            "E_PACKAGE_MODE_CONFLICT: --shard-index and --flat-index are "
+            "opposite requests for the index mode; pass one, or neither to "
+            "keep the mode meta/package.json recorded")
     b = Bundle(a.bundle)
-    package(b, _archetype_for(b), demote_unretrieved=getattr(a, "demote_unretrieved", False),
-           shard_index=getattr(a, "shard_index", False))
-    _print({"packaged": str(b.root)})
+    mode = package(b, _archetype_for(b),
+                   demote_unretrieved=getattr(a, "demote_unretrieved", False),
+                   shard_index=True if shard else False if flat else None)
+    _print({"packaged": str(b.root), "index": mode,
+            "mode_source": "flag" if (shard or flat) else "recorded"})
     return 0
 
 

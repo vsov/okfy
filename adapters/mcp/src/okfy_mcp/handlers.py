@@ -3,10 +3,12 @@ No MCP types here — server.py owns the protocol surface, this owns the logic."
 import hashlib
 import inspect
 import re
+from urllib.parse import unquote
 
 from okfy import federate, frontmatter, proposals, query as q
 from okfy.codes import CODES
 from okfy.index import load_index
+from okfy.package import GENERATED_MARKER
 from okfy_mcp import render
 from okfy_mcp.resolve import Target
 from okfy_mcp.session import Session
@@ -66,6 +68,25 @@ E_FRESH_WORKSPACE = "E_FRESH_WORKSPACE"
 # verified-but-re-checkable enumeration over a single, small, closed file —
 # is deliberately not blurred into one blanket claim.
 E_SHOW_TOO_MANY_IDS = "E_SHOW_TOO_MANY_IDS"
+
+# okfy_overview's shard reader and paging. Every one of these is RAISED as a
+# ValueError("E_CODE: message — way out") and reaches the caller through
+# `safe_call` as {error, message, way_out} — the raise side is the
+# structural guarantee described above, so no returned refusal dict is added.
+E_OVERVIEW_SHARD_UNKNOWN = "E_OVERVIEW_SHARD_UNKNOWN"
+E_OVERVIEW_SHARD_PATH = "E_OVERVIEW_SHARD_PATH"
+E_OVERVIEW_SHARD_MISSING = "E_OVERVIEW_SHARD_MISSING"
+E_OVERVIEW_SHARD_NOT_GENERATED = "E_OVERVIEW_SHARD_NOT_GENERATED"
+E_OVERVIEW_SHARD_FLAT = "E_OVERVIEW_SHARD_FLAT"
+E_OVERVIEW_SHARD_WORKSPACE = "E_OVERVIEW_SHARD_WORKSPACE"
+E_OVERVIEW_SHARD_TYPE = "E_OVERVIEW_SHARD_TYPE"
+E_OVERVIEW_PAGE = "E_OVERVIEW_PAGE"
+E_SHOW_IS_SHARD = "E_SHOW_IS_SHARD"
+
+# The resident index's shard links — the same regex family as core
+# validate._check_index_shard. The percent-decoded targets are the ONLY
+# shard names okfy_overview will open.
+_SHARD_LINK_RE = re.compile(r"\]\(index/([^)\s]+)\.md\)")
 
 # v0.27 (A9): a core refusal — a ValueError (most of core) or KeyError
 # (`okfy.query.show`/`links`, `okfy.federate.fed_show` — "concept not
@@ -248,6 +269,15 @@ def h_query(t: Target, text: str, type_: str | None = None,
 def _resolve_concept(t: Target, concept_id: str):
     if t.is_workspace:
         return federate.fed_show(t.workspace, concept_id)
+    if concept_id.startswith("index/"):
+        # `index/<dir>.md` is generated navigation, not a concept: q.show
+        # would refuse with a frontmatter error that names no way out.
+        name = concept_id[len("index/"):]
+        if name.endswith(".md"):
+            name = name[:-len(".md")]
+        raise ValueError(
+            f"{E_SHOW_IS_SHARD}: {concept_id} is a generated index shard, "
+            f"not a concept — read it with okfy_overview(shard=\"{name}\")")
     return q.show(t.bundle, concept_id)
 
 
@@ -395,8 +425,148 @@ def h_links(t: Target, concept_id: str) -> dict:
     return q.links(t.bundle, concept_id)
 
 
+def _check_page_args(offset, max_chars) -> None:
+    """`offset` and `max_chars` must be real ints (bool is not one), offset
+    >= 0 and max_chars >= 1 — anything else is a refusal, never a clamp."""
+    for name, v, lo in (("offset", offset, 0), ("max_chars", max_chars, 1)):
+        if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+            raise ValueError(
+                f"{E_OVERVIEW_PAGE}: {name} must be an integer >= {lo}, "
+                f"got {v!r} — pass offset >= 0 (a next_offset from a "
+                "previous page) and max_chars >= 1")
+
+
+def _normalize(raw: bytes) -> str:
+    """Decode + newline-normalise (CRLF and lone CR -> LF), the same text
+    view `_read_concept` gives. Offsets are counted in THIS text."""
+    return raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _page(text: str, offset: int, max_chars: int) -> dict:
+    """The EXACT slice text[offset:offset+max_chars] plus its continuation.
+    `truncated` (only when true, as everywhere in this adapter) and
+    `next_offset` appear iff more text remains after this slice; an offset
+    at/past the end is a defined empty page."""
+    end = offset + max_chars
+    out = {"index": text[offset:end], "total_chars": len(text)}
+    if end < len(text):
+        out["truncated"] = True
+        out["next_offset"] = end
+    return out
+
+
+def _shard_names(root) -> list[str]:
+    """The percent-decoded shard names the resident index.md links — the
+    allowlist. Empty for a flat bundle (or a missing index.md)."""
+    idx = root / "index.md"
+    if not idx.is_file():
+        return []
+    text = _normalize(idx.read_bytes())
+    names: list[str] = []
+    for m in _SHARD_LINK_RE.finditer(text):
+        n = unquote(m.group(1))
+        if n not in names:
+            names.append(n)
+    return names
+
+
+def _shard_path_refusal(shard: str, why: str) -> ValueError:
+    return ValueError(
+        f"{E_OVERVIEW_SHARD_PATH}: shard {shard!r} is not a plain file "
+        f"directly under index/ ({why}) — pass a directory name exactly as "
+        "linked from the resident index (okfy_overview with no arguments)")
+
+
+def _read_shard(t: Target, shard: str) -> tuple[str, str]:
+    """(sha256 of the raw bytes, newline-normalised text) of one shard, or a
+    raised refusal. Never writes. The file's bytes are read exactly ONCE and
+    both the digest and the text derive from that capture (see
+    `_read_concept`)."""
+    root = t.bundle.root
+    names = _shard_names(root)
+    if not names:
+        raise ValueError(
+            f"{E_OVERVIEW_SHARD_FLAT}: this bundle's index is flat (its "
+            "resident index.md links no index/<dir>.md) — there are no "
+            "shards to read — call okfy_overview with no shard: the whole "
+            "index is resident")
+    if shard not in names:
+        raise ValueError(
+            f"{E_OVERVIEW_SHARD_UNKNOWN}: {shard!r} is not a shard the "
+            "resident index links — call okfy_overview with no arguments "
+            "and pass a <dir> from one of its index/<dir>.md links")
+    if (not shard or shard in (".", "..")
+            or any(ch in shard for ch in "/\\\0")):
+        raise _shard_path_refusal(shard, "separator, NUL or dot name")
+    shard_dir = root / "index"
+    path = shard_dir / f"{shard}.md"
+    if shard_dir.is_symlink() or path.is_symlink():
+        raise _shard_path_refusal(shard, "symlink")
+    try:
+        inside = path.resolve().is_relative_to(shard_dir.resolve())
+    except (OSError, RuntimeError):
+        inside = False
+    if not inside:
+        raise _shard_path_refusal(shard, "resolves outside index/")
+    if not path.is_file():
+        raise ValueError(
+            f"{E_OVERVIEW_SHARD_MISSING}: the resident index links "
+            f"index/{shard}.md but no such regular file exists — the "
+            "package is damaged or stale — re-run `okfy package "
+            "--shard-index` on the bundle")
+    raw = path.read_bytes()
+    text = None
+    if raw.startswith(GENERATED_MARKER.encode("utf-8")):
+        try:
+            text = _normalize(raw)
+        except UnicodeDecodeError:
+            pass
+    if text is None:
+        raise ValueError(
+            f"{E_OVERVIEW_SHARD_NOT_GENERATED}: index/{shard}.md does not "
+            "open with the okfy generated-file marker (or is not UTF-8), so "
+            "it is not package output and will not be served — re-run "
+            "`okfy package --shard-index` on the bundle")
+    return hashlib.sha256(raw).hexdigest(), text
+
+
+def _stale_keys(bundle) -> dict:
+    """The navigation freshness flag for an overview response — computed once
+    per call, read-only. Fresh: NO key (the common case adds nothing).
+    `stale: True` + reason + way_out: the view differs from what `okfy
+    package` recorded. `stale: None` + reason: cannot tell (the manifest
+    predates the navigation fingerprint) — deliberately not False. The bytes
+    are returned either way; nothing is written."""
+    from okfy.package import navigation_state
+    state, reason = navigation_state(bundle)
+    if state == "stale":
+        return {"stale": True, "stale_reason": reason,
+                "way_out": "run `okfy package` on the bundle (the recorded "
+                           "index mode is kept), then call okfy_overview again"}
+    if state == "unverifiable":
+        return {"stale": None, "stale_reason": reason}
+    return {}
+
+
 def h_overview(t: Target, type_: str | None = None, max_items: int = 50,
-               max_chars: int = 20000) -> dict:
+               max_chars: int = 20000, shard: str | None = None,
+               offset: int = 0) -> dict:
+    if shard is not None:
+        if t.is_workspace:
+            raise ValueError(
+                f"{E_OVERVIEW_SHARD_WORKSPACE}: shard reading is a "
+                "single-bundle view; a workspace has no index shards — "
+                "point the server at a member bundle's own path, not the "
+                "workspace")
+        if type_ is not None:
+            raise ValueError(
+                f"{E_OVERVIEW_SHARD_TYPE}: shard and type are mutually "
+                "exclusive (a shard is a text page, a type is a structured "
+                "listing) — pass either shard or type, not both")
+        _check_page_args(offset, max_chars)
+        sha, text = _read_shard(t, shard)
+        return {**_page(text, offset, max_chars), "shard": shard,
+                "sha256": sha, **_stale_keys(t.bundle)}
     if type_ is not None:
         if t.is_workspace:
             return {"error": E_OVERVIEW_TYPE_WORKSPACE,
@@ -414,6 +584,8 @@ def h_overview(t: Target, type_: str | None = None, max_items: int = 50,
                      "description": c.get("description", "")}
                     for c in matches[:max_items]]
         return {"concepts": concepts, "total": len(matches)}
+    _check_page_args(offset, max_chars)
+    sha = None
     if t.is_workspace:
         lines = ["# Workspace: " + str(t.workspace.meta.get("title", ""))]
         for m in t.workspace.members:
@@ -421,11 +593,16 @@ def h_overview(t: Target, type_: str | None = None, max_items: int = 50,
         text = "\n".join(lines)
     else:
         idx = t.bundle.root / "index.md"
-        text = idx.read_text(encoding="utf-8") if idx.is_file() else "# (no index)"
-    index, truncated = _cap(text, max_chars)
-    out = {"index": index}
-    if truncated:
-        out["truncated"] = True
+        if idx.is_file():
+            raw = idx.read_bytes()
+            sha, text = hashlib.sha256(raw).hexdigest(), _normalize(raw)
+        else:
+            text = "# (no index)"
+    out = _page(text, offset, max_chars)
+    if sha is not None:
+        out["sha256"] = sha
+    if not t.is_workspace:
+        out.update(_stale_keys(t.bundle))
     return out
 
 

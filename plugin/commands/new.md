@@ -91,12 +91,28 @@ Interview the user, one question at a time, in their language:
 - Write `meta/extraction-plan.md` (`type: ExtractionPlan`) with frontmatter:
   `archetype`, `archetype_version`, `types` (name → one-line extraction rule),
   `layout` (type → directory), `segmentation` (include/exclude/budget),
-  `segments: []`; body: prose rationale — what the bundle will look like and why.
+  `segments: []`; optionally `categories` (top-level directory → one-line
+  description, copied verbatim into the resident index by `okfy package
+  --shard-index`); body: prose rationale — what the bundle will look like and why.
   `types` is **not optional and not decoration**: it is the closed set of concept
   types this bundle may contain, and `okfy validate --strict-schema` holds every
   concept to it. Write it even when you adapted nothing — then it is the
   archetype's `canonical_types` verbatim. Omitting it is what made a typo
   (`Strategyy`) indistinguishable from a deliberate custom type.
+- Writing category descriptions (only if you declare `categories`):
+  - one line, plain text, no newline, at most 200 characters;
+  - say when to open the branch (the kind of question it answers), what evidence
+    lives there (the kind of source text), and where related constraints live
+    (another directory, or a concept id in backticks);
+  - never answer a question in it (no figures or holdings);
+  - never claim a branch holds nothing or does not cover something — absence is
+    what `okfy query` and the lexicon's `not-covered` rows are for, not a
+    description;
+  - any concept id it cites must be a real concept;
+  - write it from the questions the bundle should answer (`test_queries`), not
+    from the shard's file names.
+  `okfy validate` warns (never errors) on a key that is no directory, a dangling
+  id, a multi-line or over-long value.
 - Run `okfy validate <bundle> --no-archetype` — meta completeness must pass.
 - Commit: `git -C <bundle> add . && git -C <bundle> commit -m "plan: purpose + extraction plan"`
 - Present the plan to the user: types table, layout, segment count estimate,

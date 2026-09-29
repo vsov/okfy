@@ -287,6 +287,30 @@ bash "$(dirname "$0")/reference-bundle.sh" "$WORK/reference" > "$WORK/reference.
 grep -q 'REFERENCE BUNDLE OK' "$WORK/reference.log" \
   || fail "reference-bundle.sh exited 0 without reporting OK"
 
+step "sharded navigation: shard, MCP reader, sticky mode, rollback"
+# v0.28: the resident index can be a short list of directories with the full
+# listings in generated shards. A plain package must KEEP that mode, the MCP
+# overview must be able to read a shard, and --flat-index must be the way back
+# without touching a concept.
+okfy package "$BUNDLE" --shard-index >/dev/null || fail "okfy package --shard-index"
+[ -f "$BUNDLE/index/glossary.md" ] || fail "shard-index wrote no index/glossary.md"
+okfy package "$BUNDLE" >/dev/null || fail "plain okfy package after sharding"
+[ -f "$BUNDLE/index/glossary.md" ] \
+  || fail "a plain package dropped the shards (index mode is not sticky)"
+python - "$BUNDLE" <<'PY' || fail "okfy_overview could not read a generated shard"
+import sys
+from okfy_mcp.handlers import h_overview
+from okfy_mcp.resolve import Target
+r = h_overview(Target(sys.argv[1]), shard="glossary")
+assert "Gamma" in r["index"], r
+assert r.get("sha256") and r.get("truncated") is not True, r
+PY
+CONCEPTS_BEFORE=$(cat "$BUNDLE"/glossary/*.md "$BUNDLE"/strategies/*.md | shasum -a 256)
+okfy package "$BUNDLE" --flat-index >/dev/null || fail "okfy package --flat-index"
+[ ! -e "$BUNDLE/index/glossary.md" ] || fail "--flat-index left a shard behind"
+[ "$CONCEPTS_BEFORE" = "$(cat "$BUNDLE"/glossary/*.md "$BUNDLE"/strategies/*.md | shasum -a 256)" ] \
+  || fail "--flat-index changed a concept file"
+
 step "mcp adapter"
 okfy-mcp --help >/dev/null 2>&1 || python -c "import okfy_mcp" \
   || fail "okfy-mcp not installed"

@@ -1,5 +1,6 @@
 import datetime
 import stat
+import unicodedata
 from pathlib import Path
 from string import Template
 from urllib.parse import quote
@@ -148,14 +149,29 @@ def _link_target(id_: str) -> str:
     return "/".join(quote(part, safe="") for part in id_.split("/"))
 
 
+def _one_line(text) -> str:
+    """Every Cc/Zl/Zp character (newline, carriage return, tab, U+2028/9 ...)
+    becomes one space, so a value interpolated into ONE generated line cannot
+    end that line and start another — a heading, a list item or a link the
+    renderer never wrote. Nothing else changes (runs of ordinary spaces are
+    kept), so content with no such character renders byte-for-byte as before.
+    Concept titles/descriptions may still carry a markdown link on their own
+    line: that is authored content, a documented limit. A plan category may
+    not (see the `](` step in `render_sharded_index`)."""
+    return "".join(" " if unicodedata.category(ch) in ("Cc", "Zl", "Zp") else ch
+                   for ch in str(text))
+
+
 def _plan_categories(bundle: Bundle) -> dict[str, str]:
     """`categories` on meta/extraction-plan.md: an OPTIONAL owner-approved
     mapping of top-level concept directory -> one-line category description
     (`/okfy:new`'s Extraction Plan step already calls this "category layout"
     in plugin/commands/new.md; this is its first machine-readable form).
 
-    Read-only, copied verbatim by `render_sharded_index` — never reworded,
-    never invented for a directory the plan does not mention."""
+    Read-only, never reworded and never invented for a directory the plan
+    does not mention. `render_sharded_index` copies it as ONE line: control
+    characters become spaces and `](` becomes `] (` (see there); ordinary
+    text is untouched."""
     plan = bundle.plan()
     cats = plan.meta.get("categories") if plan else None
     return ({str(k): str(v) for k, v in cats.items()}
@@ -175,14 +191,14 @@ def render_index(bundle: Bundle, demote=frozenset()) -> str:
             continue
         by_type.setdefault(str(c.meta.get("type")), []).append(c)
     purpose = bundle.purpose()
-    lines = [f"# {purpose.get('title', 'Knowledge Bundle')}", ""]
+    lines = [f"# {_one_line(purpose.get('title', 'Knowledge Bundle'))}", ""]
 
     def entries(cs):
-        return [f"- [{c.meta.get('title', c.id)}]({c.id}.md) — "
-                f"{str(c.meta.get('description', '')).strip()}"
+        return [f"- [{_one_line(c.meta.get('title', c.id))}]({c.id}.md) — "
+                f"{_one_line(str(c.meta.get('description', '')).strip())}"
                 for c in sorted(cs, key=lambda x: x.id)] + [""]
     for t in sorted(by_type):
-        lines += [f"## {t}", ""] + entries(by_type[t])
+        lines += [f"## {_one_line(t)}", ""] + entries(by_type[t])
     if demoted:
         lines += [DEMOTED_HEADING, "",
                   "No recorded eval run retrieved these. They are listed last, "
@@ -206,8 +222,9 @@ def _shard_entries(cs, *, root_relative: bool = False) -> list[str]:
     contains a space or `)` (from a directory name with one) would otherwise
     write a target no reader regex can parse back out."""
     prefix = "/" if root_relative else ""
-    return [f"- [{c.meta.get('title', c.id)}]({prefix}{_link_target(c.id)}.md) — "
-            f"{str(c.meta.get('description', '')).strip()}"
+    return [f"- [{_one_line(c.meta.get('title', c.id))}]"
+            f"({prefix}{_link_target(c.id)}.md) — "
+            f"{_one_line(str(c.meta.get('description', '')).strip())}"
             for c in sorted(cs, key=lambda x: x.id)] + [""]
 
 
@@ -240,30 +257,34 @@ def render_sharded_index(bundle: Bundle, demote=frozenset()) -> tuple[str, dict[
 
     purpose = bundle.purpose()
     cats = _plan_categories(bundle)
-    lines = [f"# {purpose.get('title', 'Knowledge Bundle')}", ""]
+    lines = [f"# {_one_line(purpose.get('title', 'Knowledge Bundle'))}", ""]
 
     if top_level:
         by_type: dict[str, list] = {}
         for c in top_level:
             by_type.setdefault(str(c.meta.get("type")), []).append(c)
         for t in sorted(by_type):
-            lines += [f"## {t}", ""] + _shard_entries(by_type[t])
+            lines += [f"## {_one_line(t)}", ""] + _shard_entries(by_type[t])
 
     lines += ["## Directories", ""]
     shard_files: dict[str, str] = {}
     for d in sorted(by_dir):
         cs = by_dir[d]
         n = len(cs)
-        desc = cats.get(d)  # verbatim from the plan, or nothing invented
-        tail = f" — {desc}" if desc else ""
-        lines.append(f"- [{d}/](index/{_link_target(d)}.md) — "
+        desc = cats.get(d)  # the plan's words, or nothing invented
+        # Untrusted text on ONE line: no line break (`_one_line`), and no
+        # `](` — so a category cannot write a link of its own. Both leave
+        # ordinary category text byte-identical.
+        tail = (f" — {_one_line(desc).replace('](', '] (')}" if desc else "")
+        lines.append(f"- [{_one_line(d)}/](index/{_link_target(d)}.md) — "
                     f"{n} concept{'s' if n != 1 else ''}{tail}")
         by_type = {}
         for c in cs:
             by_type.setdefault(str(c.meta.get("type")), []).append(c)
-        shard_lines = [f"# {d}/", ""]
+        shard_lines = [f"# {_one_line(d)}/", ""]
         for t in sorted(by_type):
-            shard_lines += [f"## {t}", ""] + _shard_entries(by_type[t], root_relative=True)
+            shard_lines += [f"## {_one_line(t)}", ""] + _shard_entries(
+                by_type[t], root_relative=True)
         # `d` (unencoded) is the real relative FILE path — only the markdown
         # LINK to it (above) needs encoding; the filesystem handles a space
         # or `)` in a name fine. GENERATED_MARKER is the recognisability
@@ -289,15 +310,15 @@ def render_readme(bundle: Bundle, archetype: Archetype) -> str:
             t = str(c.meta.get("type"))
             counts[t] = counts.get(t, 0) + 1
     rows = "\n".join(f"| {t} | {n} |" for t, n in sorted(counts.items()))
-    return f"""# {p.get('title', 'Knowledge Bundle')}
+    return f"""# {_one_line(p.get('title', 'Knowledge Bundle'))}
 
 An [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog) knowledge bundle,
 built with OKFy. Archetype: {archetype.name} v{archetype.version}.
 
-**Purpose:** {p.get('title', '')} — see [meta/purpose.md](meta/purpose.md).
-**Corpus:** `{corpus.meta.get('corpus') if corpus else 'unknown'}`
-(snapshot {corpus.meta.get('extracted_at') if corpus else '?'}).
-**Language:** {p.get('language', 'en')}.
+**Purpose:** {_one_line(p.get('title', ''))} — see [meta/purpose.md](meta/purpose.md).
+**Corpus:** `{_one_line(corpus.meta.get('corpus')) if corpus else 'unknown'}`
+(snapshot {_one_line(corpus.meta.get('extracted_at')) if corpus else '?'}).
+**Language:** {_one_line(p.get('language', 'en'))}.
 
 | Type | Concepts |
 |---|---|
@@ -363,8 +384,9 @@ MEMORY_PROTOCOL = """# Memory: before and after a task
 # sharded sentence reads as one continued sentence rather than a new
 # paragraph (which would have shifted blank-line spacing either way).
 INDEX_SHARD_NOTE = (
-    " The index is two-level: open `index/<dir>.md` for a directory's full "
-    "listing, or use `okfy query`.")
+    " The index is two-level: open `index/<dir>.md` (MCP: "
+    "`okfy_overview(shard=\"<dir>\")`) for a directory's full listing, or use "
+    "`okfy query`.")
 
 
 def render_agents_md(bundle: Bundle, archetype: Archetype, shard: bool = False) -> str:
@@ -398,7 +420,7 @@ def render_agents_md(bundle: Bundle, archetype: Archetype, shard: bool = False) 
     types_rows = "\n".join(f"- **{t}** — files under `{layout.get(t, './')}`"
                            for t in types)
     text = tmpl.substitute(
-        purpose_title=p.get("title", ""), language=p.get("language", "en"),
+        purpose_title=_one_line(p.get("title", "")), language=p.get("language", "en"),
         write_policy=p.get("write_policy", "proposals"),
         types_table=types_rows,
         index_note=(INDEX_SHARD_NOTE if shard else "")).rstrip("\n") + "\n"
@@ -457,8 +479,8 @@ def _write_shard_files(bundle: Bundle, shard_files: dict[str, str]) -> None:
 
 
 def _clear_shard_dir(bundle: Bundle) -> None:
-    """Repackaging WITHOUT `--shard-index` returns a previously-sharded
-    bundle to flat: `index/` is entirely generated output, so it is removed
+    """Repackaging with `--flat-index` returns a previously-sharded
+    bundle to flat (plain `okfy package` keeps the recorded mode): `index/` is entirely generated output, so it is removed
     rather than left behind to describe a shape the resident index no longer
     has.
 
@@ -498,25 +520,111 @@ def _write_memory_protocol(bundle: Bundle, write_policy: str) -> None:
             pass  # not empty — something else lives under protocols/
 
 
+NAVIGATION_SCHEMA = "okfy-navigation@1"
+
+
+def _render_navigation(bundle: Bundle, sharded: bool,
+                       demote=frozenset()) -> tuple[str, dict[str, str]]:
+    """The navigation view exactly as `package()` writes it: the resident
+    index text plus the shard files ({} when flat). The ONE place both the
+    writer and the fingerprint get the view from."""
+    if sharded:
+        return render_sharded_index(bundle, demote)
+    return render_index(bundle, demote), {}
+
+
+def _navigation_digest(sharded: bool, resident: str,
+                       shard_files: dict[str, str]) -> str:
+    import hashlib
+    h = hashlib.sha256()
+
+    def part(name: str, text: str) -> None:
+        raw = text.encode("utf-8")
+        h.update(f"{name}\n{len(raw)}\n".encode("utf-8"))
+        h.update(raw)
+        h.update(b"\n")
+    part("schema", NAVIGATION_SCHEMA)
+    part("mode", "sharded" if sharded else "flat")
+    part("index.md", resident)
+    for rel in sorted(shard_files):
+        part(rel, shard_files[rel])
+    return h.hexdigest()
+
+
+def navigation_fingerprint(bundle: Bundle, sharded: bool,
+                           demote=frozenset()) -> str:
+    """sha256 over the RENDERED navigation view — the resident index text and,
+    when sharded, every shard file in sorted path order — not over a list of
+    the inputs the renderer reads. A hand-enumerated key list silently misses
+    the next input someone teaches the renderer to read (the plan's
+    `categories` and the purpose title were exactly that: rendered, never
+    fingerprinted); hashing what the renderer produced cannot."""
+    resident, shard_files = _render_navigation(bundle, sharded, demote)
+    return _navigation_digest(sharded, resident, shard_files)
+
+
+def navigation_state(bundle: Bundle) -> tuple[str, str]:
+    """(`fresh` | `stale` | `unverifiable`, reason). Re-renders the view with
+    the mode and demote set `meta/package.json` recorded and compares the
+    result with the recorded `navigation_fingerprint`. A manifest with no
+    such key (it predates the fingerprint, or there is no manifest) is
+    `unverifiable` — a reader may say "cannot tell"; it is never `fresh` by
+    default and never `stale` without evidence. Pure read: writes nothing."""
+    from okfy.index import manifest_digests
+    from okfy.validate import _index_mode
+    data = manifest_digests(bundle)
+    recorded = data.get("navigation_fingerprint")
+    if not data:
+        return ("unverifiable", "no readable meta/package.json — the "
+                "navigation view has no recorded fingerprint to compare")
+    if not isinstance(recorded, str) or not recorded:
+        return ("unverifiable", "meta/package.json has no navigation_fingerprint "
+                "— the view predates it, so its freshness cannot be checked")
+    demoted = data.get("demoted", [])
+    if (not isinstance(demoted, list)
+            or not all(isinstance(i, str) for i in demoted)):
+        return ("unverifiable", "meta/package.json's `demoted` is not a list of "
+                "ids — the view cannot be re-rendered to compare")
+    sharded = _index_mode(bundle) == "sharded"
+    try:
+        live = navigation_fingerprint(bundle, sharded, frozenset(demoted))
+    except (OSError, ValueError) as e:
+        return ("unverifiable", f"the navigation view could not be re-rendered "
+                f"({type(e).__name__}: {e})")
+    if live != recorded:
+        return ("stale", "the navigation view (index.md" +
+                (" and index/ shards" if sharded else "") + ") rendered from "
+                "the bundle's current concepts, categories and title differs "
+                "from what `okfy package` recorded")
+    return ("fresh", "the rendered navigation view matches the recorded fingerprint")
+
+
 def package(bundle: Bundle, archetype: Archetype, demote_unretrieved: bool = False,
-           shard_index: bool = False) -> None:
+           shard_index: bool | None = None) -> str:
+    """Regenerate the consumption surface. `shard_index`: True = two-level
+    index, False = flat, None (default) = keep the mode `meta/package.json`
+    recorded (no manifest, or no `index` key, means flat). The mode is sticky
+    on purpose: `/okfy:update` runs plain `okfy package`, and a sharded bundle
+    must not be silently returned to flat by a refresh. Returns the mode used,
+    "sharded" or "flat"."""
     import json
 
-    from okfy.validate import package_fingerprint
+    from okfy.validate import _index_mode, package_fingerprint
     # Findings 12/27/28: refuse before any write if index/ or protocols/
     # holds a file package did not generate — a pre-v0.24 bundle can still
     # have an owner concept there, and deleting/overwriting it first made
     # E_RESERVED_DIR's "move it" way out a no-op.
     _check_reserved_dirs_are_ours(bundle)
+    if shard_index is None:
+        shard_index = _index_mode(bundle) == "sharded"   # the ONE reader of the recorded mode
     demote = frozenset()
     if demote_unretrieved:   # opt-in: the signal is bounded by the query set
         from okfy.budget import usage_report
         demote = frozenset(usage_report(bundle)["zero_hit_ids"])
+    resident_index, shard_files = _render_navigation(bundle, shard_index, demote)
     if shard_index:
-        resident_index, shard_files = render_sharded_index(bundle, demote)
         _write_shard_files(bundle, shard_files)
     else:
-        resident_index = render_index(bundle, demote)
         _clear_shard_dir(bundle)
     (bundle.root / "index.md").write_text(resident_index, encoding="utf-8")
     (bundle.root / "README.md").write_text(render_readme(bundle, archetype), encoding="utf-8")
@@ -544,12 +652,21 @@ def package(bundle: Bundle, archetype: Archetype, demote_unretrieved: bool = Fal
                "memory_accepted": accepted_since(bundle, None)}
     if shard_index:   # absent (not "flat") when not sharded — see validate._index_mode
         manifest["index"] = "sharded"
+    # Fingerprint of the view AS WRITTEN (the same strings, not a re-render), so
+    # `navigation_state` can tell a later category/title edit from a fresh view.
+    # `demoted` is recorded only when non-empty, so a validator can re-render
+    # with the same demote set.
+    manifest["navigation_fingerprint"] = _navigation_digest(
+        bool(shard_index), resident_index, shard_files)
+    if demote:
+        manifest["demoted"] = sorted(demote)
     (bundle.root / "meta" / "package.json").write_text(
         json.dumps(manifest) + "\n", encoding="utf-8")
     save_index(bundle, idx)
     install_precommit(bundle)
     append_log(bundle, "package: regenerated index.md, README.md, AGENTS.md, "
                        "retrieval index")
+    return "sharded" if shard_index else "flat"
 
 
 def package_workspace(ws) -> None:
@@ -563,12 +680,12 @@ def package_workspace(ws) -> None:
     qnote = ("\n## Acceptance queries\n\n" +
              "\n".join(f"- {q}" for q in queries) + "\n") if queries else ""
     agents = Template(tmpl_path.read_text(encoding="utf-8")).substitute(
-        title=ws.meta.get("title", "Workspace"), members_table=rows,
+        title=_one_line(ws.meta.get("title", "Workspace")), members_table=rows,
         queries_note=qnote)
     (ws.root / "AGENTS.md").write_text(agents, encoding="utf-8")
     (ws.root / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
     (ws.root / "README.md").write_text(
-        f"# {ws.meta.get('title', 'Workspace')}\n\n"
+        f"# {_one_line(ws.meta.get('title', 'Workspace'))}\n\n"
         f"An OKFy federation workspace: no knowledge of its own, only the\n"
         f"manifest, roles, and reviewed crosswalks over these member bundles:\n\n"
         f"{rows}\n\nAgents: read [AGENTS.md](AGENTS.md). "

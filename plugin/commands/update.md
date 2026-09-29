@@ -151,7 +151,10 @@ list to the user and ask for confirmation ONCE for the whole batch.
      in this stage.
 2. `okfy index <bundle>` then `okfy validate <bundle>` — errors to zero,
    fixing in place as in /okfy:extract stage 6.
-3. `okfy package <bundle>` and `okfy index <bundle>` again.
+3. `okfy package <bundle>` and `okfy index <bundle>` again. Plain
+   `okfy package` keeps the index mode recorded in `meta/package.json`
+   (a sharded bundle stays sharded); pass `--flat-index` only to go back
+   to a flat `index.md`, or `--shard-index` to switch to the sharded one.
 4. `okfy log <bundle> "update: <N> refreshed, <M> new, <K> retired"`.
 5. Commit. IMPORTANT: use `git -C <bundle> add .` (NOT `add -A`) — in embed
    bundles the repo is the corpus repo and `-A` would stage unrelated user

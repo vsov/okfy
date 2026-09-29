@@ -1200,4 +1200,89 @@ CODES: dict[str, dict] = {
         "summary": "MCP okfy_show was called with more concept_ids than the per-call limit (`_MAX_SHOW_IDS`, 10)",
         "way_out": "pass at most 10 concept_ids per call",
     },
+    "E_OVERVIEW_SHARD_UNKNOWN": {
+        "kind": "error",
+        "summary": "MCP okfy_overview was called with a `shard` that the bundle's resident index.md does not link as index/<name>.md",
+        "way_out": "call okfy_overview with no arguments and pass a <dir> from one of its index/<dir>.md links",
+    },
+    "E_OVERVIEW_SHARD_PATH": {
+        "kind": "error",
+        "summary": "MCP okfy_overview was asked for a shard that is not a plain regular file directly under index/ — a name with a separator, NUL or dot component, a symlinked shard file or index directory, or a path resolving outside index/",
+        "way_out": "pass a directory name exactly as linked from the resident index (okfy_overview with no arguments); a symlinked index/ must be replaced by re-running `okfy package --shard-index`",
+    },
+    "E_OVERVIEW_SHARD_MISSING": {
+        "kind": "error",
+        "summary": "MCP okfy_overview was asked for a shard the resident index links but whose file is absent or not a regular file — never served as an empty page",
+        "way_out": "re-run `okfy package --shard-index` on the bundle",
+    },
+    "E_OVERVIEW_SHARD_NOT_GENERATED": {
+        "kind": "error",
+        "summary": "MCP okfy_overview was asked for a file under index/ that does not open with the okfy generated-file marker (or is not UTF-8), so it is not package output",
+        "way_out": "re-run `okfy package --shard-index` on the bundle",
+    },
+    "E_OVERVIEW_SHARD_FLAT": {
+        "kind": "error",
+        "summary": "MCP okfy_overview was called with `shard` on a bundle whose resident index.md links no index/<dir>.md (a flat index)",
+        "way_out": "call okfy_overview with no shard: the whole index is resident",
+    },
+    "E_OVERVIEW_SHARD_WORKSPACE": {
+        "kind": "error",
+        "summary": "MCP okfy_overview was called with `shard` against a workspace target — shard reading is a single-bundle view",
+        "way_out": "point the server at a member bundle's own path, not the workspace",
+    },
+    "E_OVERVIEW_SHARD_TYPE": {
+        "kind": "error",
+        "summary": "MCP okfy_overview was called with both `shard` and `type` — a shard is a text page, a type is a structured listing",
+        "way_out": "pass either shard or type, not both",
+    },
+    "E_OVERVIEW_PAGE": {
+        "kind": "error",
+        "summary": "MCP okfy_overview was called with an `offset` that is not an integer >= 0 or a `max_chars` that is not an integer >= 1",
+        "way_out": "pass offset >= 0 (a next_offset from a previous page) and max_chars >= 1",
+    },
+    "E_SHOW_IS_SHARD": {
+        "kind": "error",
+        "summary": "MCP okfy_show was asked for an `index/<dir>` id — a generated index shard, not a concept",
+        "way_out": "read it with okfy_overview(shard=\"<dir>\")",
+    },
+    "E_PACKAGE_MODE_CONFLICT": {
+        "kind": "error",
+        "summary": "`okfy package` was given both --shard-index and --flat-index, which ask for opposite index modes",
+        "way_out": "pass one of them, or neither to keep the mode meta/package.json recorded; nothing was written",
+    },
+    "E_STALE_NAVIGATION": {
+        "kind": "error",
+        "summary": "(--strict-package) the navigation view (index.md and any index/ shards) no longer matches what `okfy package` recorded — typically the plan's categories or the purpose title changed while the concept files did not",
+        "way_out": "run `okfy package` again (the recorded index mode is kept)",
+    },
+    "W_STALE_NAVIGATION": {
+        "kind": "warning",
+        "summary": "the navigation view (index.md and any index/ shards) no longer matches what `okfy package` recorded, although the concept set is unchanged",
+        "way_out": "run `okfy package` again (the recorded index mode is kept); becomes an error under --strict-package",
+    },
+    "W_NAVIGATION_UNVERIFIABLE": {
+        "kind": "warning",
+        "summary": "meta/package.json records no navigation_fingerprint (the view predates it), so whether the generated index is fresh cannot be told; always a warning, never an error, even under --strict-package",
+        "way_out": "run `okfy package` to record the fingerprint",
+    },
+    "W_CATEGORY_UNKNOWN_DIR": {
+        "kind": "warning",
+        "summary": "meta/extraction-plan.md `categories` has a key that is not a top-level directory holding a concept, so its description is never used; always a warning, at every strictness",
+        "way_out": "rename the key to a real top-level concept directory, or remove it",
+    },
+    "W_CATEGORY_DANGLING_ID": {
+        "kind": "warning",
+        "summary": "a `categories` description cites a backticked concept id that is not a concept in this bundle; always a warning, at every strictness",
+        "way_out": "cite an existing concept id (see index.md), or drop the citation",
+    },
+    "W_CATEGORY_MULTILINE": {
+        "kind": "warning",
+        "summary": "a `categories` description contains a newline or other control character (it is copied verbatim into the resident index and could inject index lines) or is longer than 200 characters; always a warning, at every strictness",
+        "way_out": "rewrite the description as one plain line of at most 200 characters",
+    },
+    "W_CATEGORY_SHAPE": {
+        "kind": "warning",
+        "summary": "meta/extraction-plan.md `categories` is not a mapping of directory to string, or one of its values is not a string; always a warning, at every strictness",
+        "way_out": "make `categories` a mapping of top-level directory to a one-line string",
+    },
 }

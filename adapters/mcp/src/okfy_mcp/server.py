@@ -143,16 +143,30 @@ def build_server(path: Path, journal: Path | None = None,
 
     @mcp.tool()
     def okfy_overview(type: str | None = None, max_items: int = 50,
-                      max_chars: int = 20000) -> dict:
+                      max_chars: int = 20000, shard: str | None = None,
+                      offset: int = 0) -> dict:
         """The bundle's index (or the workspace's member list). Read this first
-        for progressive disclosure — never bulk-read concepts. With no type,
-        returns the index text (capped at max_chars, default 20000, with a
-        truncation marker + truncated=true when cut). With type (bundle only;
-        a workspace raises), returns a structured listing
+        for progressive disclosure — never bulk-read concepts. With no type
+        and no shard, returns the index text as `index`: the exact slice
+        text[offset:offset+max_chars] (max_chars default 20000; offsets count
+        characters of the newline-normalised text), plus `total_chars` and
+        `sha256` (of index.md's bytes). When more text remains the response
+        carries truncated=true and `next_offset` — pass it back as `offset` to
+        continue; an offset past the end is an empty page. For a bundle
+        packaged with a sharded index, the resident index links
+        `index/<dir>.md`; read one with shard="<dir>" (the directory name as
+        linked, percent-decoded). It returns the same shape under the same
+        `index` key, plus `shard`, and pages with offset/next_offset exactly
+        like the root; only names the resident index links are served
+        (each refusal carries its own code and way_out; a bad offset or
+        max_chars is E_OVERVIEW_PAGE). Shards are not concepts: okfy_show on one refuses.
+        shard is exclusive with type and works on a single bundle only. With
+        type (bundle only; a workspace raises), returns a structured listing
         {concepts:[{id,type,title,description}], total} capped at max_items
         (default 50) while total reports the full count for that type."""
         out = handlers.safe_call(handlers.h_overview, target, type_=type,
-                                 max_items=max_items, max_chars=max_chars)
+                                 max_items=max_items, max_chars=max_chars,
+                                 shard=shard, offset=offset)
         if jrnl is not None and "error" not in out:
             jrnl.write("overview")
         return out

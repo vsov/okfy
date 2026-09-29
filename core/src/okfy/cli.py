@@ -229,7 +229,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--shard-index", action="store_true",
                    help="v0.24: opt-in two-level index.md — one resident line "
                         "per top-level concept directory, full listings moved "
-                        "to non-resident index/<dir>.md")
+                        "to non-resident index/<dir>.md. With neither this "
+                        "nor --flat-index, `package` keeps the mode "
+                        "meta/package.json recorded")
+    p.add_argument("--flat-index", action="store_true",
+                   help="force a flat index.md (removes generated index/ "
+                        "shards); refused together with --shard-index")
 
     p = sub.add_parser("log");      p.add_argument("bundle", type=Path)
     p.add_argument("message")

@@ -327,6 +327,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_orphans(bundle, concepts, linked_ids, r, strict=strict_package)
     _check_index_drift(bundle, concepts, r)
     _check_index_shard(bundle, concepts, r)
+    _check_categories(bundle, concepts, r)
     _check_reserved_dir_concepts(bundle, r)
     _check_quality(bundle, archetype, r, strict=strict_quality)
     _check_provenance(bundle, r, strict=strict_provenance)
@@ -1922,9 +1923,11 @@ def _check_links(bundle, concepts, r: Report) -> set[str]:
 
 def _index_mode(bundle: Bundle) -> str:
     """"sharded" or "flat" (default), read from meta/package.json's `index`
-    key — written by `okfy package --shard-index`, absent otherwise. Read
-    here rather than by sniffing the `index/` directory so a leftover
-    hand-copied file cannot flip the mode a validator checks against."""
+    key — written by `okfy package --shard-index` (and kept by a plain
+    `okfy package`), absent otherwise. Read here rather than by sniffing the
+    `index/` directory so a leftover hand-copied file cannot flip the mode a
+    validator checks against. This is also the ONE reader `package()` uses
+    to resolve "keep the recorded mode"."""
     p = bundle.root / "meta" / "package.json"
     if not p.is_file():
         return "flat"
@@ -2091,6 +2094,67 @@ def _check_index_shard(bundle: Bundle, concepts, r: Report):
             r.add("error", "E_INDEX_SHARD", c.id,
                   f"appears in {places} place(s) across the resident index and "
                   f"its shards (want exactly 1) — {WAY_OUT}")
+
+
+CATEGORY_MAX_CHARS = 200
+_CATEGORY_ID_RE = re.compile(r"`([a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9/_.-]*)`")
+
+
+def _check_categories(bundle: Bundle, concepts, r: Report):
+    """Phase 5: the plan's OPTIONAL `categories` mapping (top-level directory
+    -> one-line description) is copied into the resident index by
+    `okfy package --shard-index`, so a bad value is a bad resident line.
+    Everything here is a WARNING at every strictness level — an owner's
+    prose is never a reason to refuse a bundle — and silent when the plan
+    declares no `categories`.
+
+    `W_CATEGORY_SHAPE` (not a mapping / a value that is not a string),
+    `W_CATEGORY_UNKNOWN_DIR` (a key that is no top-level directory holding a
+    non-meta concept), `W_CATEGORY_DANGLING_ID` (a backticked concept id that
+    resolves to no concept) and `W_CATEGORY_MULTILINE` (a control character —
+    a newline could inject index lines — or more than
+    `CATEGORY_MAX_CHARS` characters)."""
+    plan = bundle.plan()
+    if plan is None or "categories" not in plan.meta:
+        return
+    cats = plan.meta["categories"]
+    where = "meta/extraction-plan"
+    if not isinstance(cats, dict):
+        r.add("warning", "W_CATEGORY_SHAPE", where,
+              f"`categories` must be a mapping of top-level directory to a "
+              f"one-line description, not {type(cats).__name__}")
+        return
+    top_dirs = {c.id.split("/", 1)[0] for c in concepts
+                if "/" in c.id and not c.id.startswith("meta/")}
+    ids = {c.id for c in concepts}
+    for key, value in cats.items():
+        name = str(key)
+        if name not in top_dirs:
+            r.add("warning", "W_CATEGORY_UNKNOWN_DIR", where,
+                  f"categories key {name!r} is not a top-level directory "
+                  f"holding a concept, so its description is never used")
+        if not isinstance(value, str):
+            r.add("warning", "W_CATEGORY_SHAPE", where,
+                  f"categories[{name!r}] must be a one-line string, "
+                  f"not {type(value).__name__}")
+            continue
+        bad = sorted({f"U+{ord(ch):04X}" for ch in value
+                      if unicodedata.category(ch) in ("Cc", "Zl", "Zp")})
+        if bad:
+            r.add("warning", "W_CATEGORY_MULTILINE", where,
+                  f"categories[{name!r}] contains a newline or other control "
+                  f"character ({', '.join(bad)}) — it is copied into "
+                  f"the resident index; the renderer turns control characters into "
+                  f"spaces, but fix the source so the line reads as written")
+        if len(value) > CATEGORY_MAX_CHARS:
+            r.add("warning", "W_CATEGORY_MULTILINE", where,
+                  f"categories[{name!r}] is {len(value)} characters, over the "
+                  f"{CATEGORY_MAX_CHARS}-character limit for a one-line description")
+        for cid in dict.fromkeys(_CATEGORY_ID_RE.findall(value)):
+            if cid not in ids:
+                r.add("warning", "W_CATEGORY_DANGLING_ID", where,
+                      f"categories[{name!r}] cites `{cid}`, which is not a "
+                      f"concept in this bundle")
 
 
 def _check_reserved_dir_concepts(bundle: Bundle, r: Report):
@@ -2360,6 +2424,20 @@ def _check_package(bundle: Bundle, r: Report, strict: bool = False):
         r.add(level, code("STALE_PACKAGE"), "meta/package.json",
               "concepts changed since `okfy package` — the generated index "
               "no longer reflects the bundle; repackage before acceptance")
+        return   # already stale: a navigation finding would report it twice
+    # The concept set is fresh, but the rendered view also reads things the
+    # concept fingerprint skips (the plan's `categories`, the purpose title).
+    # Three states — a reader may say "cannot tell", so `unverifiable` is a
+    # warning even under --strict-package, never an error.
+    from okfy.package import navigation_state
+    state, reason = navigation_state(bundle)
+    if state == "stale":
+        r.add(level, code("STALE_NAVIGATION"), "meta/package.json",
+              f"{reason} — run `okfy package` again (the recorded index mode "
+              "is kept)")
+    elif state == "unverifiable":
+        r.add("warning", "W_NAVIGATION_UNVERIFIABLE", "meta/package.json",
+              f"{reason} — run `okfy package` to record it")
 
 
 def _section_text(body: str, name: str) -> str | None:

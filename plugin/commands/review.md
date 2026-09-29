@@ -21,6 +21,7 @@ explicit user decision.
    accept validates against the archetype and refuses broken content (exit 2)
    — report refusals back to the user rather than forcing.
 6. Finish: `okfy index <bundle>` and if anything was accepted,
-   `okfy package <bundle>` (regenerate index/docs), then report counts.
+   `okfy package <bundle>` (regenerate index/docs; the recorded index
+   mode is kept), then report counts.
    All mutations were committed by the CLI itself (--no-verify) — do NOT
    git-commit concept files by hand.
