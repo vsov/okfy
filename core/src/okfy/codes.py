@@ -1085,8 +1085,23 @@ CODES: dict[str, dict] = {
     },
     "E_REL_WS_EVAL_INVALID": {
         "kind": "error",
-        "summary": "the workspace's meta/eval.json cannot be read",
-        "way_out": "repair meta/eval.json",
+        "summary": "the workspace's meta/eval.json cannot be read, or its latest run is not a valid eval record",
+        "way_out": "repair meta/eval.json, or re-run `okfy eval run <workspace>` and judge it again",
+    },
+    "E_REL_WS_EVAL_REPLAY": {
+        "kind": "error",
+        "summary": "the recorded federated acceptance run does not match what the workspace produces now, though the fingerprint still matches",
+        "way_out": "re-run `okfy eval run <workspace> --suite acceptance` and repeat the owner checkpoint",
+    },
+    "E_REL_WS_ADVERSARIAL_REPLAY": {
+        "kind": "error",
+        "summary": "the recorded federated adversarial run does not match what the workspace produces now, though the fingerprint still matches",
+        "way_out": "re-run `okfy eval run <workspace> --suite adversarial` and repeat the owner checkpoint",
+    },
+    "E_REL_WS_REPLAY_INCOMPLETE": {
+        "kind": "error",
+        "summary": "the federated eval replay stopped before the time budget let it compare every query",
+        "way_out": "re-run `okfy eval run <workspace> --suite <suite>` so the record is fresh, or shorten the suite",
     },
     "E_REL_WS_EVAL_SURFACE": {
         "kind": "error",
@@ -1130,8 +1145,8 @@ CODES: dict[str, dict] = {
     },
     "E_REL_WS_ACCEPTANCE_INVALID": {
         "kind": "error",
-        "summary": "the workspace's acceptance.min_owner_pass or min_adversarial_pass is not an integer",
-        "way_out": "fix meta/workspace.md's acceptance bar to an integer",
+        "summary": "the workspace's acceptance.min_owner_pass or min_adversarial_pass is not an integer, or is outside 1..(the number of that suite's queries)",
+        "way_out": "fix meta/workspace.md's acceptance bar to an integer between 1 and the suite's query count",
     },
     "E_REL_WS_EVAL_POLICY": {
         "kind": "error",
@@ -1252,12 +1267,12 @@ CODES: dict[str, dict] = {
     },
     "E_STALE_NAVIGATION": {
         "kind": "error",
-        "summary": "(--strict-package) the navigation view (index.md and any index/ shards) no longer matches what `okfy package` recorded — typically the plan's categories or the purpose title changed while the concept files did not",
+        "summary": "(--strict-package) the navigation view (index.md and any index/ shards) no longer matches what `okfy package` recorded — typically the plan's categories or the purpose title changed while the concept files did not, or a generated file (index.md, an index/ shard) was edited, deleted or added after packaging",
         "way_out": "run `okfy package` again (the recorded index mode is kept)",
     },
     "W_STALE_NAVIGATION": {
         "kind": "warning",
-        "summary": "the navigation view (index.md and any index/ shards) no longer matches what `okfy package` recorded, although the concept set is unchanged",
+        "summary": "the navigation view (index.md and any index/ shards) no longer matches what `okfy package` recorded, although the concept set is unchanged — the rendered view moved, or a generated file was edited, deleted or added after packaging",
         "way_out": "run `okfy package` again (the recorded index mode is kept); becomes an error under --strict-package",
     },
     "W_NAVIGATION_UNVERIFIABLE": {

@@ -3,6 +3,82 @@
 This changelog starts at v0.26.0. Earlier releases are not back-filled here —
 their history is not something this file can verify.
 
+## v0.29.0 — 2026-09-30
+
+An audit of v0.28 found two gaps in the shipped tool and four in a local experiment
+harness. This release closes the two in the tool. Nothing changes how `okfy query`
+ranks: the retrieval digest is unchanged.
+
+### Stricter behaviour — read this before upgrading
+
+- **A hand-edited navigation file now reads stale.** `okfy validate` and
+  `okfy_overview` used to call the navigation view fresh whenever a re-render of the
+  concepts matched the recorded `navigation_fingerprint`; a hand edit of the file a
+  reader is actually served (`index.md`, or an `index/<dir>.md` shard) was invisible.
+  Freshness now compares three objects and is `fresh` only when all agree: the
+  recorded fingerprint, the live re-render, and the generated files on disk, hashed by
+  the same rule that hashed what `okfy package` wrote. An edited, deleted or added
+  shard, a shard that is not valid UTF-8 or not a regular file, and a hand-edited
+  flat `index.md` are all `stale` (`W_STALE_NAVIGATION`, `E_STALE_NAVIGATION` under
+  `--strict-package`), with a reason that says the files were edited after packaging.
+  The way out is `okfy package` again, which rewrites them and keeps the index mode.
+  A bundle that validated clean before can therefore warn now if someone had edited a
+  generated file by hand.
+- **Workspace `release-check` re-derives the federated eval it certifies.** The
+  bundle gate has re-derived every recorded answer since v0.21; the workspace gate
+  only checked the record's fingerprint and owner verdicts, so a hand-edited federated
+  record passed. It now replays the latest run of each suite with the real federated
+  query and compares exactly: `query_options`, the queries against the workspace's own
+  suite, `expanded_query` per member, `top_hits` (id, member, role, score, `via`),
+  `notes`, and for the adversarial suite `expect`, `concept`, `why`, `outcome` and
+  `outcome_detail`. A difference is `E_REL_WS_EVAL_REPLAY` or
+  `E_REL_WS_ADVERSARIAL_REPLAY`; a replay that runs out of its time budget stops
+  before the next query and reports `E_REL_WS_REPLAY_INCOMPLETE` with the number left
+  uncompared. Owner and LLM verdicts are judgements and are not compared. The replay
+  runs only when the record's retrieval schema and fingerprint already match, so
+  records from an earlier era are unchanged: they stay reported stale, not replayed.
+  A latest run that is not a valid eval record is `E_REL_WS_EVAL_INVALID`, reported
+  before anything walks it.
+- **A workspace acceptance bar outside `1..N` now fails `release-check`.** A workspace
+  whose `acceptance.min_owner_pass` or `min_adversarial_pass` was `0` or negative
+  (or above the number of that suite's queries) passed the gate even when every
+  owner verdict was `fail`: the gate only checked that the value was an integer,
+  while a bundle's `validate` already refused it as `E_ACCEPTANCE_RANGE`. The workspace
+  gate now reports `E_REL_WS_ACCEPTANCE_INVALID` for a bar the owner set outside
+  `1..N`, `N` being that suite's own query count. The default bar is not
+  range-checked, as on the bundle side. The way out is a bar inside the range.
+
+### MCP and validate
+
+- `okfy_overview`'s `stale` flag is computed from the very bytes the response returns
+  (the file is read once), so the flag and the payload cannot describe different reads.
+  Its shape is unchanged: `stale: true` with `stale_reason` and `way_out`,
+  `stale: null` with `stale_reason` when freshness cannot be told, no key when fresh.
+  `stale: null` now also covers a generated file that could not be read.
+- `okfy.package.navigation_state(bundle, served=None)` takes an optional map of
+  bundle-relative path to the bytes a caller is about to return.
+- Generated navigation is written as LF bytes on every platform, so the on-disk hash
+  is the same wherever a bundle was packaged.
+
+### Codes
+
+- **Added:** `E_REL_WS_EVAL_REPLAY`, `E_REL_WS_ADVERSARIAL_REPLAY`,
+  `E_REL_WS_REPLAY_INCOMPLETE`.
+- **Widened, same names:** `E_STALE_NAVIGATION` and `W_STALE_NAVIGATION` also mean a
+  generated file was edited, deleted or added after packaging;
+  `E_REL_WS_EVAL_INVALID` also covers a malformed latest run;
+  `E_REL_WS_ACCEPTANCE_INVALID` also covers a bar outside `1..N`.
+
+### Not claimed
+
+- No claim that category descriptions help an agent. The paired experiment is still
+  unrun: it waits for the owner's approved tasks, answer keys and signed thresholds.
+- `README.md`, `AGENTS.md` and `protocols/` are generated too but are outside the
+  navigation fingerprint; a hand edit of them is not reported by this check.
+- The experiment harness is local development tooling and not part of the shipped tool;
+  its own fixes are not product behaviour and are not listed here.
+- Nothing here measures extraction accuracy.
+
 ## v0.28.0 — 2026-09-29
 
 Makes the existing `overview → shard → concept` navigation usable by the two real

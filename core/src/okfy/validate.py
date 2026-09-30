@@ -995,7 +995,7 @@ def _check_ledger_append_only(bundle: Bundle, r: Report):
     It catches an UNCOMMITTED edit (or one already staged but not yet
     committed), which is the case that actually happens (a hand edit or an
     agent touching an already-written row before the next commit); see the
-    finding text below and GUIDE.md/GUIDE.ru.md for the same wording.
+    finding text below and GUIDE.md for the same wording.
 
     Both files are checked and reported separately. When the file exists in
     the working tree but cannot be verified against a committed baseline —

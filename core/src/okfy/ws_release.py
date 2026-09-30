@@ -170,6 +170,16 @@ def _flat_hits(out: dict, n: int) -> list:
     return hits
 
 
+def ws_query_options(n: int) -> dict:
+    """How `ws_eval_run` invokes federated retrieval, in ONE place.
+
+    The recorder writes it and the release check replays against it, so a
+    record whose `query_options` are not exactly this one is a record
+    `ws_eval_run` did not write (`n = 0`, an extra key, `federated: false`).
+    The bundle-side twin is `evaluation.canonical_query_options`."""
+    return {"n": int(n), "federated": True}
+
+
 def ws_eval_run(ws: Workspace, n: int = 10, suite: str = "acceptance") -> dict:
     """A federated Eval Run, in the bundle eval's format and verdict machinery.
 
@@ -215,7 +225,7 @@ def ws_eval_run(ws: Workspace, n: int = 10, suite: str = "acceptance") -> dict:
            "retrieval_schema": WS_FINGERPRINT_SCHEMA,
            "retrieval_fingerprint": workspace_retrieval_fingerprint(ws),
            "suite": suite,
-           "query_options": {"n": n, "federated": True},
+           "query_options": ws_query_options(n),
            "results": results}
     data = load_evals(ws)
     data["runs"].append(run)
@@ -223,6 +233,160 @@ def ws_eval_run(ws: Workspace, n: int = 10, suite: str = "acceptance") -> dict:
     _commit(ws, ["meta/eval.json"],
             f"eval: workspace {suite} run {ts} — {len(results)} queries")
     return run
+
+
+# MEASURED, not guessed. On 2026-09-30 a two-member workspace built from clones
+# of the two largest real bundles here (sec-cftc-sfp-okf, 309 concepts, and
+# crypto-options-okf, 368) answered a federated query in about 3.1 s: 12
+# acceptance queries recorded in 37.0 s and replayed in 36.4 s; 10 adversarial
+# queries recorded in 31.2 s and replayed in 30.2 s. `federated_query` rebuilds
+# every member's index on every call (`load_index` was 7.3 of 7.6 profiled
+# seconds, nearly all of it YAML parsing), so the cost is per QUERY and grows
+# with the members' size, not with the workspace's. `_ws_replay` is called once
+# per suite, so the bound is per suite: 37.0 s is the worst suite measured, and
+# 296 s is EIGHT TIMES that, room for members roughly eight times as large
+# before the bound can fire on honest work. Determinism was measured first
+# (record in one process, replay in others under different PYTHONHASHSEED,
+# personal + constraints + knowledge members, two pulled constraints and 15
+# personal hits): 0 field differences, scores included, so the comparison
+# stays exact. The bundle-side twin is `release.REPLAY_BUDGET_S` (30 s).
+WS_REPLAY_BUDGET_MEASURED_S = 37.0
+WS_REPLAY_BUDGET_MULTIPLE = 8
+WS_REPLAY_BUDGET_S = WS_REPLAY_BUDGET_MEASURED_S * WS_REPLAY_BUDGET_MULTIPLE
+
+
+def ws_replay_run_bounded(ws: Workspace, run: dict, suite: str,
+                          budget_s: float | None = None
+                          ) -> tuple[list[dict], int, int]:
+    """Re-derive a recorded FEDERATED run and return `(differences, compared,
+    total)`, the way `evaluation.replay_run_bounded` does for a bundle.
+
+    Compared, exactly (no rounding, no excluded field): `query_options`, the
+    count of results against the workspace's own suite, and per result `query`,
+    `expanded_query` (a per-member mapping), `top_hits` (id, member, role,
+    score, `via`), `notes`; for the adversarial suite also `expect`, `concept`,
+    `why`, `outcome`, `outcome_detail`. The owner/llm verdict fields are
+    judgements, not derivations, and are never compared.
+
+    The same `federated_query` and `_flat_hits` the recorder uses, so the
+    stored personal group and every pulled hit are re-derived whole. The clock
+    is consulted BEFORE each query; `compared < total` means the bound stopped
+    the replay and the caller must report that as a problem. A structural
+    refusal (options, result count) returns `compared == total == 0`: nothing
+    was left unexamined, the record simply is not a run of this suite."""
+    import time
+
+    from okfy.evaluation import MIN_TOP_HITS, adversarial_outcome
+    from okfy.federate import federated_query
+    diffs: list[dict] = []
+    deadline = None if budget_s is None else time.monotonic() + budget_s
+    opts = run.get("query_options")
+    if not isinstance(opts, dict):
+        return ([{"field": "query_options", "recorded": opts,
+                  "expected": "a mapping of n/federated"}], 0, 0)
+    n = opts.get("n")
+    if isinstance(n, bool) or not isinstance(n, int) or n < MIN_TOP_HITS:
+        return ([{"field": "query_options.n", "recorded": n,
+                  "expected": f"an integer >= {MIN_TOP_HITS}"}], 0, 0)
+    want = ws_query_options(n)
+    if opts != want:
+        return ([{"field": "query_options", "recorded": opts,
+                  "expected": want}], 0, 0)
+    specs = ws_suite_queries(ws, suite)
+    results = run.get("results") or []
+    if len(results) != len(specs):
+        return ([{"field": "results", "recorded": f"{len(results)} queries",
+                  "expected": f"{len(specs)} in meta/workspace.md"}], 0, 0)
+    compared = 0
+    for i, (spec_raw, rec) in enumerate(zip(specs, results)):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        compared += 1
+        spec = spec_raw if isinstance(spec_raw, dict) else {"query": str(spec_raw)}
+        text = str(spec.get("query") or "")
+        out = federated_query(ws, text, n=n)
+        hits = _flat_hits(out, n)
+        got = {"query": text,
+               "expanded_query": out.get("expanded_query"),
+               "top_hits": hits,
+               "notes": out.get("notes") or []}
+        if suite == "adversarial":
+            got.update({"expect": spec.get("expect"),
+                        "concept": spec.get("concept"),
+                        "why": spec.get("why")})
+            got.update(adversarial_outcome(
+                spec, {"results": hits, "notes": got["notes"]}))
+        for field, value in got.items():
+            if rec.get(field) != value:
+                diffs.append({"index": i, "field": field,
+                              "recorded": rec.get(field), "replayed": value})
+    return diffs, compared, len(results)
+
+
+def _ws_replay(ws: Workspace, run: dict, suite: str, tag: str,
+               problems: list, notes: list) -> None:
+    """Report what no longer matches. Called only when `retrieval_schema` and
+    `retrieval_fingerprint` already match: a previous era or a moved contract
+    keeps its stale finding and is never replayed (a second finding about the
+    same fact, implying the record was edited when the environment moved)."""
+    import time
+    code = f"E_REL_WS_{tag}_REPLAY"
+    t0 = time.monotonic()
+    try:
+        diffs, compared, total = ws_replay_run_bounded(
+            ws, run, suite, WS_REPLAY_BUDGET_S)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        problems.append(
+            f"{code}: the recorded federated {suite} run could not be "
+            f"replayed ({type(e).__name__}: {e}) — evidence that cannot be "
+            "re-derived is not replayable evidence")
+        return
+    elapsed = time.monotonic() - t0
+    if compared < total:
+        problems.append(
+            f"E_REL_WS_REPLAY_INCOMPLETE: the federated {suite} replay stopped "
+            f"after {compared}/{total} queries and {elapsed:.1f}s, leaving "
+            f"{total - compared} unexamined — the {WS_REPLAY_BUDGET_S:.0f}s "
+            "budget bounds release-time retrieval work, and a partial replay "
+            "cannot stand as evidence for the whole run. Re-run "
+            f"`okfy eval run <workspace> --suite {suite}` so the record is "
+            "fresh, or shorten the suite")
+    if not diffs and compared == total:
+        notes.append(f"workspace {suite} replay: "
+                     f"{len(run.get('results') or [])} queries re-derived and "
+                     f"identical ({elapsed:.1f}s)")
+        return
+    if not diffs:
+        return
+    where = ", ".join(
+        f"query {d['index']} field {d['field']}" if "index" in d
+        else f"field {d['field']}" for d in diffs[:3])
+    problems.append(
+        f"{code}: the recorded federated {suite} run does not match what this "
+        f"workspace produces now — {len(diffs)} difference(s), first: {where}. "
+        "The fingerprint still matches, so the environment did not move: the "
+        f"record did. Re-run `okfy eval run <workspace> --suite {suite}` and "
+        "repeat the owner checkpoint.")
+    if elapsed > WS_REPLAY_BUDGET_S:
+        notes.append(f"workspace {suite} replay took {elapsed:.1f}s, over the "
+                     f"{WS_REPLAY_BUDGET_S:.0f}s budget")
+
+
+def _ws_record_invalid(run, suite: str, problems: list) -> bool:
+    """A malformed latest run, reported as a finding rather than a traceback.
+    Called BEFORE `eval_status` and the replay, which both walk the record
+    assuming every result is a mapping (`release._record_invalid` twin)."""
+    from okfy.evaluation import eval_record_problems
+    bad = eval_record_problems(run)
+    if not bad:
+        return False
+    problems.append(
+        f"E_REL_WS_EVAL_INVALID: the latest federated {suite} run "
+        f"{run.get('run_id') if isinstance(run, dict) else run!r} is not a "
+        f"valid eval record — {'; '.join(bad)}. Nothing in a malformed record "
+        "can be judged or replayed; repair meta/eval.json or re-run "
+        f"`okfy eval run <workspace> --suite {suite}` and judge it again")
+    return True
 
 
 def _check_members(ws: Workspace, problems: list, notes: list):
@@ -287,6 +451,10 @@ def _check_ws_eval(ws: Workspace, suite: str, problems: list, notes: list):
             "answers them, and a claim in log.md is not that evidence; run "
             f"`okfy eval run <workspace> --suite {suite}`")
         return
+    # BEFORE eval_status and the replay: both walk the nested record assuming
+    # every result is a mapping.
+    if _ws_record_invalid(latest, suite, problems):
+        return
     st = eval_status(ws, "latest", suite=suite)
     t = st["totals"]
     if st["provisional"]:
@@ -310,6 +478,8 @@ def _check_ws_eval(ws: Workspace, suite: str, problems: list, notes: list):
             "against a different federated contract — a member's content, the "
             "roster, project_key, a personal concept's applies_to, the workspace "
             "lexicon or the crosswalk moved since")
+    else:
+        _ws_replay(ws, latest, suite, tag, problems, notes)
     key = ("min_owner_pass" if suite == "acceptance" else "min_adversarial_pass")
     acc = ws.meta.get("acceptance")
     acc = acc if isinstance(acc, dict) else {}
@@ -317,6 +487,17 @@ def _check_ws_eval(ws: Workspace, suite: str, problems: list, notes: list):
     if isinstance(bar, bool) or not isinstance(bar, int):
         problems.append(f"E_REL_WS_ACCEPTANCE_INVALID: acceptance.{key} is "
                         f"{type(bar).__name__} {bar!r}, not an integer")
+        return
+    n_queries = len(ws_suite_queries(ws, suite))
+    if key in acc and not 1 <= bar <= max(n_queries, 1):
+        # the bundle side refuses this at validate (E_ACCEPTANCE_RANGE) for a
+        # bar the owner SET: a bar below 1 accepts a run whose every verdict
+        # is `fail`, one above the query count can never be met. The default
+        # is not range-checked (as on the bundle side): it is a policy minimum
+        # that a short suite simply fails.
+        problems.append(f"E_REL_WS_ACCEPTANCE_INVALID: acceptance.{key}={bar} "
+                        f"is outside 1..{n_queries} (the number of the "
+                        f"workspace's {suite} queries)")
         return
     if t["passes_owner"] < bar:
         problems.append(

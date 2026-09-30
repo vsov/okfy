@@ -455,13 +455,20 @@ def _page(text: str, offset: int, max_chars: int) -> dict:
     return out
 
 
-def _shard_names(root) -> list[str]:
-    """The percent-decoded shard names the resident index.md links — the
-    allowlist. Empty for a flat bundle (or a missing index.md)."""
+def _read_resident(root) -> bytes | None:
+    """The resident index.md's raw bytes, read ONCE per call (None when there
+    is no such file). The same capture feeds the response or the shard
+    allowlist AND the freshness state (see `_stale_keys`)."""
     idx = root / "index.md"
-    if not idx.is_file():
+    return idx.read_bytes() if idx.is_file() else None
+
+
+def _shard_names(resident: bytes | None) -> list[str]:
+    """The percent-decoded shard names the resident index.md (its captured
+    bytes) links — the allowlist. Empty for a flat bundle (or no index.md)."""
+    if resident is None:
         return []
-    text = _normalize(idx.read_bytes())
+    text = _normalize(resident)
     names: list[str] = []
     for m in _SHARD_LINK_RE.finditer(text):
         n = unquote(m.group(1))
@@ -477,13 +484,15 @@ def _shard_path_refusal(shard: str, why: str) -> ValueError:
         "linked from the resident index (okfy_overview with no arguments)")
 
 
-def _read_shard(t: Target, shard: str) -> tuple[str, str]:
-    """(sha256 of the raw bytes, newline-normalised text) of one shard, or a
-    raised refusal. Never writes. The file's bytes are read exactly ONCE and
-    both the digest and the text derive from that capture (see
-    `_read_concept`)."""
+def _read_shard(t: Target, shard: str, resident: bytes | None
+                ) -> tuple[str, str, bytes]:
+    """(sha256 of the raw bytes, newline-normalised text, the raw bytes) of
+    one shard, or a raised refusal. Never writes. The file's bytes are read
+    exactly ONCE and the digest, the text and the returned capture all derive
+    from it (see `_read_concept`); `resident` is the caller's one capture of
+    index.md, used for the allowlist."""
     root = t.bundle.root
-    names = _shard_names(root)
+    names = _shard_names(resident)
     if not names:
         raise ValueError(
             f"{E_OVERVIEW_SHARD_FLAT}: this bundle's index is flat (its "
@@ -527,18 +536,23 @@ def _read_shard(t: Target, shard: str) -> tuple[str, str]:
             "open with the okfy generated-file marker (or is not UTF-8), so "
             "it is not package output and will not be served — re-run "
             "`okfy package --shard-index` on the bundle")
-    return hashlib.sha256(raw).hexdigest(), text
+    return hashlib.sha256(raw).hexdigest(), text, raw
 
 
-def _stale_keys(bundle) -> dict:
+def _stale_keys(bundle, served: dict[str, bytes] | None = None) -> dict:
     """The navigation freshness flag for an overview response — computed once
     per call, read-only. Fresh: NO key (the common case adds nothing).
     `stale: True` + reason + way_out: the view differs from what `okfy
     package` recorded. `stale: None` + reason: cannot tell (the manifest
     predates the navigation fingerprint) — deliberately not False. The bytes
-    are returned either way; nothing is written."""
+    are returned either way; nothing is written.
+
+    `served` is the RAW BYTES this call is returning (`index.md`, and for a
+    shard read `index/<dir>.md`): the state describes those captured bytes,
+    not a later re-read of the files. `stale` also covers the generated files
+    having been edited after `okfy package` wrote them."""
     from okfy.package import navigation_state
-    state, reason = navigation_state(bundle)
+    state, reason = navigation_state(bundle, served)
     if state == "stale":
         return {"stale": True, "stale_reason": reason,
                 "way_out": "run `okfy package` on the bundle (the recorded "
@@ -564,9 +578,13 @@ def h_overview(t: Target, type_: str | None = None, max_items: int = 50,
                 "exclusive (a shard is a text page, a type is a structured "
                 "listing) — pass either shard or type, not both")
         _check_page_args(offset, max_chars)
-        sha, text = _read_shard(t, shard)
+        resident = _read_resident(t.bundle.root)
+        sha, text, raw = _read_shard(t, shard, resident)
+        served = {f"index/{shard}.md": raw}
+        if resident is not None:
+            served["index.md"] = resident
         return {**_page(text, offset, max_chars), "shard": shard,
-                "sha256": sha, **_stale_keys(t.bundle)}
+                "sha256": sha, **_stale_keys(t.bundle, served)}
     if type_ is not None:
         if t.is_workspace:
             return {"error": E_OVERVIEW_TYPE_WORKSPACE,
@@ -586,23 +604,24 @@ def h_overview(t: Target, type_: str | None = None, max_items: int = 50,
         return {"concepts": concepts, "total": len(matches)}
     _check_page_args(offset, max_chars)
     sha = None
+    served = None
     if t.is_workspace:
         lines = ["# Workspace: " + str(t.workspace.meta.get("title", ""))]
         for m in t.workspace.members:
             lines.append(f"- {m.name} ({m.role}) — {m.path}")
         text = "\n".join(lines)
     else:
-        idx = t.bundle.root / "index.md"
-        if idx.is_file():
-            raw = idx.read_bytes()
+        raw = _read_resident(t.bundle.root)
+        if raw is not None:
             sha, text = hashlib.sha256(raw).hexdigest(), _normalize(raw)
+            served = {"index.md": raw}
         else:
             text = "# (no index)"
     out = _page(text, offset, max_chars)
     if sha is not None:
         out["sha256"] = sha
     if not t.is_workspace:
-        out.update(_stale_keys(t.bundle))
+        out.update(_stale_keys(t.bundle, served))
     return out
 
 

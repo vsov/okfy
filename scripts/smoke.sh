@@ -305,6 +305,31 @@ r = h_overview(Target(sys.argv[1]), shard="glossary")
 assert "Gamma" in r["index"], r
 assert r.get("sha256") and r.get("truncated") is not True, r
 PY
+# v0.29: freshness compares the recorded fingerprint, a re-render AND the files
+# on disk. A hand edit of the resident index.md must read stale through the MCP
+# overview (the bytes a reader is served) and as a validate finding; packaging
+# again is the way back.
+cp "$BUNDLE/index.md" "$WORK/index.md.good"
+printf '\nA hand-written line nobody rendered.\n' >> "$BUNDLE/index.md"
+python - "$BUNDLE" <<'PY' || fail "an edited index.md was not reported stale by okfy_overview"
+import sys
+from okfy_mcp.handlers import h_overview
+from okfy_mcp.resolve import Target
+r = h_overview(Target(sys.argv[1]))
+assert r.get("stale") is True and r.get("way_out"), r
+PY
+# to a file, not `| grep -q`: under pipefail grep exiting early SIGPIPEs validate
+okfy validate "$BUNDLE" > "$WORK/validate-stale.txt" 2>&1 || true
+grep -q "STALE_NAVIGATION" "$WORK/validate-stale.txt" \
+  || fail "okfy validate did not report the edited index.md as stale navigation"
+okfy package "$BUNDLE" >/dev/null || fail "okfy package after a hand edit"
+python - "$BUNDLE" <<'PY' || fail "okfy package did not make the navigation fresh again"
+import sys
+from okfy_mcp.handlers import h_overview
+from okfy_mcp.resolve import Target
+r = h_overview(Target(sys.argv[1]))
+assert not r.get("stale"), r
+PY
 CONCEPTS_BEFORE=$(cat "$BUNDLE"/glossary/*.md "$BUNDLE"/strategies/*.md | shasum -a 256)
 okfy package "$BUNDLE" --flat-index >/dev/null || fail "okfy package --flat-index"
 [ ! -e "$BUNDLE/index/glossary.md" ] || fail "--flat-index left a shard behind"

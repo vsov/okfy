@@ -471,7 +471,9 @@ def _write_shard_files(bundle: Bundle, shard_files: dict[str, str]) -> None:
     keep = set()
     for rel, text in shard_files.items():
         p = bundle.root / rel
-        p.write_text(text, encoding="utf-8")
+        # LF bytes on every platform: `navigation_state` hashes the files as
+        # written, and `write_text` would translate to CRLF on Windows
+        p.write_bytes(text.encode("utf-8"))
         keep.add(p)
     for existing in shard_dir.glob("*.md"):
         if existing not in keep and _is_generated_file(existing):
@@ -563,13 +565,68 @@ def navigation_fingerprint(bundle: Bundle, sharded: bool,
     return _navigation_digest(sharded, resident, shard_files)
 
 
-def navigation_state(bundle: Bundle) -> tuple[str, str]:
-    """(`fresh` | `stale` | `unverifiable`, reason). Re-renders the view with
-    the mode and demote set `meta/package.json` recorded and compares the
-    result with the recorded `navigation_fingerprint`. A manifest with no
-    such key (it predates the fingerprint, or there is no manifest) is
-    `unverifiable` — a reader may say "cannot tell"; it is never `fresh` by
-    default and never `stale` without evidence. Pure read: writes nothing."""
+def _read_generated_navigation(bundle: Bundle, served: dict[str, bytes] | None
+                               ) -> tuple[str | None, dict[str, str], list[str]]:
+    """The navigation files as a reader would meet them: (resident text or
+    None, {`index/<dir>.md`: text}, problems). `index.md` plus every regular
+    `index/*.md`, each decoded as UTF-8 STRICTLY and NOT newline-normalised
+    (a CRLF-rewritten file is not what `package` wrote). A path in `served`
+    uses those bytes instead of a disk read. A missing/irregular file or
+    non-UTF-8 bytes is a PROBLEM (the view is stale); an `OSError` while
+    reading propagates (the caller says `unverifiable`)."""
+    served = served or {}
+    problems: list[str] = []
+
+    def load(rel: str) -> str | None:
+        raw = served.get(rel)
+        if raw is None:
+            p = bundle.root / rel
+            if p.is_symlink() or (p.exists() and not p.is_file()):
+                problems.append(f"{rel} is not a regular file")
+                return None
+            if not p.exists():
+                problems.append(f"{rel} is missing")
+                return None
+            raw = p.read_bytes()
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            problems.append(f"{rel} is not valid UTF-8")
+            return None
+
+    resident = load("index.md")
+    shard_dir = bundle.root / "index"
+    names = {rel for rel in served if rel.startswith("index/")}
+    if shard_dir.is_symlink():
+        problems.append("index/ is a symlink")
+    elif shard_dir.is_dir():
+        names |= {f"index/{p.name}" for p in shard_dir.glob("*.md")}
+    shards: dict[str, str] = {}
+    for rel in sorted(names):
+        text = load(rel)
+        if text is not None:
+            shards[rel] = text
+    return resident, shards, problems
+
+
+def navigation_state(bundle: Bundle, served: dict[str, bytes] | None = None
+                     ) -> tuple[str, str]:
+    """(`fresh` | `stale` | `unverifiable`, reason). Three objects must agree
+    for `fresh`: the `navigation_fingerprint` `meta/package.json` recorded,
+    the view re-rendered from the bundle's current concepts (with the
+    recorded mode and demote set), and the generated files ON DISK
+    (`index.md` plus every `index/*.md`) hashed by the same rule that hashed
+    the strings `package` wrote. A re-render alone cannot see a hand edit of
+    the file a reader is actually served.
+
+    `served` maps a bundle-relative path (`index.md`, `index/<dir>.md`) to the
+    raw bytes a caller is about to return; those bytes are used instead of
+    re-reading that file, so the flag describes the bytes returned, not a
+    later read. A manifest with no such key (it predates the fingerprint, or
+    there is no manifest), an unreadable manifest and an `OSError` reading a
+    file are `unverifiable` — a reader may say "cannot tell"; it is never
+    `fresh` by default and never `stale` without evidence. Pure read: writes
+    nothing."""
     from okfy.index import manifest_digests
     from okfy.validate import _index_mode
     data = manifest_digests(bundle)
@@ -587,16 +644,54 @@ def navigation_state(bundle: Bundle) -> tuple[str, str]:
                 "ids — the view cannot be re-rendered to compare")
     sharded = _index_mode(bundle) == "sharded"
     try:
-        live = navigation_fingerprint(bundle, sharded, frozenset(demoted))
+        resident, shards, problems = _read_generated_navigation(bundle, served)
+    except OSError as e:
+        return ("unverifiable", f"the generated navigation files could not be "
+                f"read ({type(e).__name__}: {e})")
+    try:
+        render = _render_navigation(bundle, sharded, frozenset(demoted))
     except (OSError, ValueError) as e:
-        return ("unverifiable", f"the navigation view could not be re-rendered "
-                f"({type(e).__name__}: {e})")
-    if live != recorded:
-        return ("stale", "the navigation view (index.md" +
-                (" and index/ shards" if sharded else "") + ") rendered from "
-                "the bundle's current concepts, categories and title differs "
-                "from what `okfy package` recorded")
-    return ("fresh", "the rendered navigation view matches the recorded fingerprint")
+        render = None
+        render_error = f"{type(e).__name__}: {e}"
+    live = (_navigation_digest(sharded, *render) if render is not None else None)
+    source_moved = live is not None and live != recorded
+    files_differ = bool(problems) or (
+        _navigation_digest(sharded, resident, shards) != recorded)
+    view = "index.md" + (" and index/ shards" if sharded else "")
+    moved = ("the navigation view (" + view + ") rendered from the bundle's "
+             "current concepts, categories and title differs from what "
+             "`okfy package` recorded")
+    if files_differ:
+        if problems:
+            what = "; ".join(problems)
+        elif render is not None and not source_moved:
+            # the re-render equals what package wrote, so it is a faithful
+            # proxy for naming the files that were touched
+            want_resident, want_shards = render
+            diff = ["index.md differs"] if resident != want_resident else []
+            for rel, want in sorted(want_shards.items()):
+                if rel not in shards:
+                    diff.append(f"{rel} is missing")
+                elif shards[rel] != want:
+                    diff.append(f"{rel} differs")
+            diff += [f"{rel} is not a shard `okfy package` writes"
+                     for rel in sorted(shards) if rel not in want_shards]
+            what = "; ".join(diff) if diff else "differ"
+        else:
+            what = "differ"
+        reason = ("the generated navigation files on disk (" + view + ") "
+                  f"were edited after packaging and differ from what `okfy "
+                  f"package` recorded ({what})")
+        if source_moved:
+            reason += "; and " + moved
+        return ("stale", reason)
+    if render is None:
+        return ("unverifiable", f"the navigation view could not be "
+                f"re-rendered ({render_error})")
+    if source_moved:
+        return ("stale", moved)
+    return ("fresh", "the generated navigation files, the rendered view and "
+            "the recorded fingerprint agree")
 
 
 def package(bundle: Bundle, archetype: Archetype, demote_unretrieved: bool = False,
@@ -626,7 +721,7 @@ def package(bundle: Bundle, archetype: Archetype, demote_unretrieved: bool = Fal
         _write_shard_files(bundle, shard_files)
     else:
         _clear_shard_dir(bundle)
-    (bundle.root / "index.md").write_text(resident_index, encoding="utf-8")
+    (bundle.root / "index.md").write_bytes(resident_index.encode("utf-8"))  # LF on every platform, see _write_shard_files
     (bundle.root / "README.md").write_text(render_readme(bundle, archetype), encoding="utf-8")
     (bundle.root / "AGENTS.md").write_text(
         render_agents_md(bundle, archetype, shard=shard_index), encoding="utf-8")
