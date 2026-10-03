@@ -8,7 +8,7 @@ from pathlib import Path
 
 from okfy import frontmatter
 from okfy.actor import utc_now
-from okfy.bundle import Bundle
+from okfy.bundle import Bundle, drop_bundle_paths
 from okfy.gitenv import run_git
 
 DEFAULT_BUDGET = 50_000  # ~tokens of material per Worker (ADR-0008)
@@ -80,7 +80,7 @@ def _walk(corpus: Path) -> list[str]:
                 "--exclude-standard", "-z",
                 capture_output=True, text=True, check=True).stdout
             rels = {r for r in out.split("\0") if r and (corpus / r).is_file()}
-            return sorted(rels)
+            return drop_bundle_paths(corpus, sorted(rels))
         except subprocess.CalledProcessError:
             print(f"warning: {corpus} has .git but is not a valid git repo; "
                   "falling back to rglob", file=sys.stderr)
@@ -89,7 +89,7 @@ def _walk(corpus: Path) -> list[str]:
         rel = p.relative_to(corpus)
         if p.is_file() and not any(part.startswith(".") for part in rel.parts):
             rels.append(rel.as_posix())
-    return rels
+    return drop_bundle_paths(corpus, rels)
 
 
 def survey(corpus: Path, sample_chars: int = 400, max_samples: int = 25) -> dict:

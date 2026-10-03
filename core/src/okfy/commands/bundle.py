@@ -1,5 +1,6 @@
 from okfy.budget import usage_report
 from okfy.bundle import Bundle
+from okfy.ids import migrate_ids
 from okfy.index import build_index, save_index
 from okfy.init import init_bundle
 from okfy.package import append_log, package
@@ -14,6 +15,23 @@ def cmd_init(a) -> int:
     # `acceptance` echoed back because the scaffold now declares a policy the
     # caller did not ask for: a default that is on is only honest if it is said.
     _print({"created": str(b), "acceptance": {"dissent": "required"}})
+    return 0
+
+
+def cmd_migrate(a) -> int:
+    """`migrate ids`: backfill bundle_uid/okf_id. Commits past the policy hook
+    like `okfy stale` does — adding an id is not a content edit to review."""
+    from okfy.proposals import _commit
+    b = Bundle(a.bundle)
+    out = migrate_ids(b)
+    paths = ([f"{c}.md" for c in out["okf_id"]]
+             + (["meta/purpose.md"] if out["bundle_uid"] else []))
+    if paths:
+        msg = f"migrate ids: {len(out['okf_id'])} page(s)" + (
+            ", bundle_uid" if out["bundle_uid"] else "")
+        append_log(b, msg)
+        _commit(b, paths + ["log.md"], msg)
+    _print(out)
     return 0
 
 

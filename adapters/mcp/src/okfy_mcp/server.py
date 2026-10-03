@@ -135,7 +135,8 @@ def build_server(path: Path, journal: Path | None = None,
 
     @mcp.tool()
     def okfy_links(concept_id: str) -> dict:
-        """Outgoing links and backlinks for a concept (single bundle only)."""
+        """Outgoing links, backlinks and external (any URI scheme) links for a
+        concept (single bundle only)."""
         out = handlers.safe_call(handlers.h_links, target, concept_id)
         if jrnl is not None and "error" not in out:
             jrnl.write("links")

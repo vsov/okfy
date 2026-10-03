@@ -4,9 +4,11 @@ import json
 import os
 from pathlib import Path
 
+from okfy.bundle import is_bundle_dir
 from okfy.frontmatter import serialize
 from okfy.gitenv import run_git
 from okfy.guard import assert_safe_bundle_path
+from okfy.ids import new_id
 
 
 def _git(bundle: Path, *args) -> None:
@@ -69,8 +71,11 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
 
     for dirpath, dirnames, filenames in os.walk(corpus, onerror=onerror):
         # Prune hidden dirs from descent — matches the old rglob filter,
-        # which excluded any path with a "."-prefixed component.
-        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        # which excluded any path with a "."-prefixed component — and any
+        # bundle embedded in the corpus, wherever it sits: `.okf/` was only
+        # ever skipped for its dot, so one at `kb/` was listed as corpus.
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".")
+                             and not is_bundle_dir(Path(dirpath) / d))
         for name in sorted(filenames):
             if name.startswith("."):
                 continue
@@ -86,6 +91,15 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
                 if errors is not None:
                     errors.append(rel)
     return out
+
+
+def manifest_digest(manifest: dict[str, str]) -> str:
+    """One sha256 over a `_manifest` — every path read and the sha256 of the
+    bytes read from it. This is what a snapshot can prove it acted on; the
+    corpus git SHA cannot, because the walk reads the working tree (dirty
+    files included) and an embedded bundle shares the corpus HEAD."""
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+                          .encode("utf-8")).hexdigest()
 
 
 def init_bundle(path: Path | None, corpus: Path, language: str = "en",
@@ -104,6 +118,9 @@ def init_bundle(path: Path | None, corpus: Path, language: str = "en",
     if write_policy is None:
         write_policy = "direct" if embed else "proposals"
     assert_safe_bundle_path(path)
+    # Listed before the bundle exists: an embedded one is recognised by the
+    # meta/corpus.md written below, so a later walk would read it as corpus.
+    manifest = _manifest(corpus)
     path.mkdir(parents=True, exist_ok=False)
     meta = path / "meta"
     meta.mkdir()
@@ -112,6 +129,7 @@ def init_bundle(path: Path | None, corpus: Path, language: str = "en",
     (path / ".gitignore").write_text(".okfy-cache/\n", encoding="utf-8")
     (meta / "purpose.md").write_text(serialize(
         {"type": "Purpose", "title": "(to be written by Purpose Interview)",
+         "bundle_uid": new_id(),
          "language": language, "write_policy": write_policy, "test_queries": [],
          # The dissent gate reads this declaration and returns early when it is
          # absent, so omitting it left the gate off for every bundle created
@@ -122,11 +140,11 @@ def init_bundle(path: Path | None, corpus: Path, language: str = "en",
          "acceptance": {"dissent": "required"}},
         "Purpose statement pending — /okfy:new fills this in.\n"), encoding="utf-8")
     (meta / "corpus-manifest.json").write_text(
-        json.dumps(_manifest(corpus), indent=0, sort_keys=True), encoding="utf-8")
+        json.dumps(manifest, indent=0, sort_keys=True), encoding="utf-8")
     (meta / "corpus.md").write_text(serialize(
         {"type": "CorpusSnapshot", "corpus": str(corpus), "extracted_at": today,
          "git_sha": _corpus_git_sha(corpus), "manifest": "corpus-manifest.json",
-         "embed": embed},
+         "manifest_digest": manifest_digest(manifest), "embed": embed},
         f"Snapshot of {corpus} taken {today}.\n"), encoding="utf-8")
     (path / "log.md").write_text(f"# Log\n\n## {today}\n\n- init: bundle skeleton\n",
                                  encoding="utf-8")

@@ -75,6 +75,16 @@ similar makes you distrust the measurement. This is diagnosis, same as
 `affected` — `okfy diff` never re-anchors an anchor itself, so nothing here is
 authoritative until you look.
 
+**Renames keep the page's `okf_id`.** Every concept page carries an opaque
+`okf_id` in its frontmatter; other tools address the page by it. Never write,
+change or drop that line when rewriting a concept. If a concept must move to a
+new id (path), MOVE the file (`git -C <bundle> mv old.md new.md`) and reroute
+the links to it — the frontmatter, `okf_id` included, travels with the file.
+Deleting it and writing a fresh page is a different page with a new id, and
+so is a `supersede` proposal. There is no move proposal: under
+`write_policy: proposals` the hook refuses the move, so ask the owner to make
+it (and commit it with `--no-verify`) instead.
+
 `affected` is diagnosis, not truth (ADR-0013). Split it at the review: a
 concept whose substance no longer holds but is kept for reference gets an owner
 staleness decision — `okfy stale <bundle> <id> --reason "..."` marks it "do not
@@ -149,7 +159,9 @@ list to the user and ask for confirmation ONCE for the whole batch.
      <patched-file.md>`, building `<patched-file.md>` from the dry run's
      report — and leave it for `/okfy:review`, same as every other mutation
      in this stage.
-2. `okfy index <bundle>` then `okfy validate <bundle>` — errors to zero,
+2. `okfy migrate ids <bundle>` (gives pages created in step 3 their
+   `okf_id`; a no-op otherwise), then `okfy index <bundle>` and
+   `okfy validate <bundle>` — errors to zero,
    fixing in place as in /okfy:extract stage 6.
 3. `okfy package <bundle>` and `okfy index <bundle>` again. Plain
    `okfy package` keeps the index mode recorded in `meta/package.json`
@@ -161,7 +173,7 @@ list to the user and ask for confirmation ONCE for the whole batch.
    changes. Commit message: `update: <N> refreshed, <M> new, <K> retired`.
    Under `write_policy: proposals` this commit carries only what the hook
    already allows — `drafts/`, `proposals/`, the regenerated root docs, and
-   (v0.25 audit F04) `meta/corpus.md` when its `git_sha`/`extracted_at` are
+   (v0.25 audit F04) `meta/corpus.md` when its `git_sha`/`extracted_at`/`manifest_digest` are
    the only lines that changed — so it is expected to succeed even though
    none of this update's actual concept mutations (steps 2-4 above) have
    landed yet; they are still pending review as proposals.

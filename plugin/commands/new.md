@@ -57,7 +57,8 @@ Interview the user, one question at a time, in their language:
 ## 4. Write the plan and stop
 
 - Fill `meta/purpose.md`: title, statement body, language, write_policy,
-  test_queries (all 10), adversarial_queries (all 10).
+  test_queries (all 10), adversarial_queries (all 10). Leave `bundle_uid` as
+  `okfy init` wrote it — it is the bundle's stable identity.
 
   `adversarial_queries` is the second acceptance layer and it is REQUIRED for
   release. Ten test queries prove the bundle answers what it was built for; they

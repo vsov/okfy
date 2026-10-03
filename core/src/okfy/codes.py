@@ -360,6 +360,36 @@ CODES: dict[str, dict] = {
         "summary": "two concept ids collide case-insensitively",
         "way_out": "rename one of the colliding concepts",
     },
+    "W_BUNDLE_UID_MISSING": {
+        "kind": "warning",
+        "summary": "meta/purpose.md declares no `bundle_uid` (a bundle made before ids existed)",
+        "way_out": "run `okfy migrate ids`",
+    },
+    "E_BUNDLE_UID": {
+        "kind": "error",
+        "summary": "meta/purpose.md `bundle_uid` is present but not a non-empty string",
+        "way_out": "delete the bundle_uid line, then run `okfy migrate ids`",
+    },
+    "W_OKF_ID_MISSING": {
+        "kind": "warning",
+        "summary": "one or more concept pages outside meta/ carry no `okf_id`; one warning carries the count",
+        "way_out": "run `okfy migrate ids`",
+    },
+    "E_OKF_ID": {
+        "kind": "error",
+        "summary": "a concept page's `okf_id` is present but not a non-empty string",
+        "way_out": "delete the okf_id line, then run `okfy migrate ids`",
+    },
+    "E_OKF_ID_DUPLICATE": {
+        "kind": "error",
+        "summary": "two concept pages carry the same `okf_id` — a page copied rather than moved",
+        "way_out": "delete the okf_id line from the copy, then run `okfy migrate ids`",
+    },
+    "E_MANIFEST_DIGEST": {
+        "kind": "error",
+        "summary": "meta/corpus.md `manifest_digest` does not match meta/corpus-manifest.json — the snapshot no longer describes the bytes it read",
+        "way_out": "re-run `okfy snapshot`",
+    },
     "W_DANGLING_LINK": {
         "kind": "warning",
         "summary": "a concept body links to a missing concept",

@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--write-policy", dest="write_policy",
                    choices=["proposals", "direct"], default=None)
 
+    p = sub.add_parser("migrate", help="one-time bundle upgrades")
+    msub = p.add_subparsers(dest="mcmd", required=True)
+    m = msub.add_parser("ids", help="backfill bundle_uid and every missing "
+                                    "okf_id; a rerun is a no-op")
+    m.add_argument("bundle", type=Path)
+
     p = sub.add_parser("survey");   p.add_argument("corpus", type=Path)
 
     p = sub.add_parser("segment");  p.add_argument("bundle", type=Path)
