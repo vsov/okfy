@@ -16,6 +16,39 @@ ROOT_DOC_FILES = {"README.md", "AGENTS.md", "CLAUDE.md"}  # generated docs, not 
 # owner or agent, so they are reserved the same way index.md/log.md are:
 # excluded from concept discovery unconditionally, at the bundle root only.
 RESERVED_DIRS = {"index", "protocols"}
+# What `okfy init` writes: a bundle is known by these, not by its folder name,
+# because `--embed` may put one at any path inside the corpus.
+BUNDLE_MARKERS = {"meta/purpose.md": "Purpose", "meta/corpus.md": "CorpusSnapshot"}
+
+
+def is_bundle_dir(path) -> bool:
+    """The marker files with the frontmatter `type` init gives them: a corpus
+    folder that merely has its own meta/purpose.md and meta/corpus.md is corpus."""
+    for rel, typ in BUNDLE_MARKERS.items():
+        try:
+            meta, _ = frontmatter.parse((Path(path) / rel).read_text(encoding="utf-8"))
+        except (OSError, ValueError):            # absent, undecodable, not frontmatter
+            return False
+        if meta.get("type") != typ:
+            return False
+    return True
+
+
+def drop_bundle_paths(root, rels) -> list[str]:
+    """`rels` (posix, relative to `root`) minus every path inside a bundle
+    nested under `root` — a corpus listing must not read a bundle as corpus."""
+    seen: dict[str, bool] = {}
+
+    def inside(rel: str) -> bool:
+        parts = rel.split("/")[:-1]
+        for i in range(1, len(parts) + 1):
+            d = "/".join(parts[:i])
+            if d not in seen:
+                seen[d] = is_bundle_dir(Path(root) / d)
+            if seen[d]:
+                return True
+        return False
+    return [r for r in rels if not inside(r)]
 
 
 @dataclass

@@ -5,6 +5,7 @@ from okfy import lexicon
 from okfy.bm25 import BM25, tokenize
 from okfy.bundle import Bundle, Concept
 from okfy.index import load_index
+from okfy.validate import external_links
 
 
 def _hit(c: dict, score: float | None = None) -> dict:
@@ -60,4 +61,7 @@ def links(bundle: Bundle, concept_id: str) -> dict:
         raise KeyError(f"concept not found in index: {concept_id}")
     out = by_id[concept_id]["links"]
     backlinks = sorted(c["id"] for c in idx["concepts"] if concept_id in c["links"])
-    return {"id": concept_id, "out": out, "backlinks": backlinks}
+    # Read from the page, not the index: adding it there would move the
+    # retrieval fingerprint every recorded eval is pinned to.
+    external = external_links(show(bundle, concept_id).body)
+    return {"id": concept_id, "out": out, "backlinks": backlinks, "external": external}

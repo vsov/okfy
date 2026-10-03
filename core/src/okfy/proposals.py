@@ -18,6 +18,7 @@ from okfy.bm25 import tokenize
 from okfy.bundle import DRAFT_DIR, PROPOSAL_DIR, RESERVED_DIRS, SKIP_DIRS, Bundle, Concept
 from okfy.cluster import _alias_keys, _jaccard, _title_key
 from okfy.gitenv import run_git
+from okfy.ids import IDENTITY_KEYS, carries_okf_id, new_id as mint_id
 from okfy.package import append_log
 from okfy.sourcemap import cited_span
 from okfy.transcript_lint import _SEGMENT
@@ -1889,6 +1890,8 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
         if not str(new_meta.get("type", "")).strip():
             raise ValueError("proposed concept has no type")
         new_meta["supersedes"] = target
+        new_meta["okf_id"] = mint_id()           # a new page; the old keeps its own
+        new_meta.pop("bundle_uid", None)         # purpose.md's alone
         if archetype is not None and archetype_applies(new_id):
             r = Report()
             probe = Concept(new_id, bundle.root / f"{new_id}.md", new_meta, c.body)
@@ -1970,6 +1973,16 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
             meta["generated"] = existing.meta["generated"]
         if isinstance(existing.meta.get("verified"), list):
             prior = list(existing.meta["verified"])
+    # Identity is the core's, never the proposal's: an update keeps the page's
+    # own okf_id — and purpose.md its bundle_uid — whatever the proposed text
+    # carries (a rewrite that dropped or copied one must not re-identify the
+    # page or the bundle), and a create gets a fresh okf_id.
+    for key in IDENTITY_KEYS:
+        meta.pop(key, None)
+        if existing is not None and key in existing.meta:
+            meta[key] = existing.meta[key]
+    if existing is None and carries_okf_id(target):
+        meta["okf_id"] = mint_id()
     entry = {"by": owner, "at": utc_now(),
              "content": content_sha256(c.body)}
     if proposed_by:
@@ -2098,6 +2111,12 @@ def refine(bundle: Bundle, concept_id: str, text: str, message: str = "") -> Non
     meta, body = frontmatter.parse(text)            # raises FrontmatterError
     if not str(meta.get("type", "")).strip():
         raise ValueError("refined concept has no type")
+    for key in IDENTITY_KEYS:
+        if meta.get(key) != existing.meta.get(key):
+            raise ValueError(
+                f"refined text changes {key} ({existing.meta.get(key)!r} -> "
+                f"{meta.get(key)!r}) — an id is never recomputed; keep the "
+                f"{key} line as it is")
     # v0.26 audit A5: checked at entry, before the concept file is written
     # or `memory.record` appends the `accept`/owner-refine row — see
     # `_accept`'s matching comment and `_refuse_if_ledger_rewritten`'s

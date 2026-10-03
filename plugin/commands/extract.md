@@ -177,6 +177,9 @@ Two rules the gleaning prompt depends on you honouring:
    multi-draft group carries a ruling. Do NOT write those rulings yourself — tell
    the user to run `/okfy:schism <bundle>`, which puts each group in front of them
    and records only what they decide. A `no-schism` you chose is not evidence.
+10. `okfy migrate ids <bundle>` — gives every new final concept its `okf_id`.
+    Never write or edit an `okf_id` yourself; a merged concept keeps the id of
+    the existing page it merged into.
 
 ## Stage 6 — Validate + package
 

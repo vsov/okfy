@@ -9,6 +9,8 @@ from urllib.parse import unquote
 
 from okfy import frontmatter
 from okfy.bundle import RESERVED_DIRS, Bundle
+from okfy.ids import carries_okf_id
+from okfy.init import manifest_digest
 from okfy.lexicon import row_problems
 from okfy.update import _embedded_prefix, _source_path
 from okfy.workspace import PROJECT_KEY_RE
@@ -267,6 +269,21 @@ META_REQUIRED = {"purpose": ["language", "write_policy", "test_queries"],
                  "corpus": ["corpus", "extracted_at"]}
 
 
+# RFC 3986 §3.1: an absolute URI starts with a scheme. Any scheme is external —
+# not only http(s)/mailto: an `other-tool://x/page.md` used to resolve as a
+# local path and warn W_DANGLING_LINK, and one without `.md` vanished silently.
+SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+
+def is_external(target: str) -> bool:
+    return bool(SCHEME_RE.match(target))
+
+
+def external_links(body: str) -> list[str]:
+    """Every link target in `body` that carries a URI scheme, in order, once."""
+    return list(dict.fromkeys(t for t in LINK_RE.findall(body) if is_external(t)))
+
+
 def resolve_link(bundle: Bundle, concept_path, target: str) -> str | None:
     """Return concept id a local md link points to, or None for external/anchor-only.
 
@@ -276,7 +293,7 @@ def resolve_link(bundle: Bundle, concept_path, target: str) -> str | None:
     (`[^)\\s]+` can't capture either character). Decoded after the
     leading-`/` check, since that slash is never itself encoded."""
     target = target.split("#", 1)[0]
-    if not target or target.startswith(("http://", "https://", "mailto:")):
+    if not target or is_external(target):
         return None
     if not target.endswith(".md"):
         return None
@@ -307,6 +324,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_corpus_snapshot(bundle, r, strict=strict_sources)
     _check_execution(bundle, r, strict=strict_execution)
     _check_collisions(concepts, r)
+    _check_identity(bundle, concepts, r)
     _check_stale(concepts, r)
     _check_supersede(concepts, r)
     _check_supersede_cycles(concepts, r)
@@ -662,6 +680,19 @@ def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
         return
     if snap is None:
         return
+    want = snap.meta.get("manifest_digest")
+    mf = bundle.root / "meta" / "corpus-manifest.json"
+    if want is not None and mf.is_file():
+        try:
+            got = manifest_digest(json.loads(mf.read_text(encoding="utf-8")))
+        except (OSError, ValueError, TypeError):
+            got = None
+        if got != want:
+            r.add("error", "E_MANIFEST_DIGEST", "meta/corpus.md",
+                  "manifest_digest does not match meta/corpus-manifest.json — "
+                  "the snapshot no longer describes the bytes it read (the "
+                  "manifest was edited, or written by something other than "
+                  "`okfy snapshot`); re-run `okfy snapshot`")
     sha = str(snap.meta.get("git_sha") or "").strip()
     corpus = Path(str(snap.meta.get("corpus") or ""))
     if not sha or not corpus.is_dir() or not (corpus / ".git").exists():
@@ -1904,6 +1935,48 @@ def _check_collisions(concepts, r: Report):
         if key in seen:
             r.add("error", "E_ID_COLLISION", c.id, f"case-insensitive collision with {seen[key]}")
         seen[key] = c.id
+
+
+def _check_identity(bundle: Bundle, concepts, r: Report):
+    """`bundle_uid` and `okf_id` (okfy.ids). Absent is a warning, so a bundle
+    made before ids existed stays green until `okfy migrate ids` backfills
+    them. A present but non-string or blank value, or two pages sharing one
+    `okf_id` (a page copied instead of moved), is an error: an identity that
+    names nothing, or two things, is worse than none."""
+    try:
+        purpose = bundle.get("meta/purpose")
+    except frontmatter.FrontmatterError:
+        purpose = None                       # layer 1's problem
+    if purpose is not None:
+        uid = purpose.meta.get("bundle_uid")
+        if "bundle_uid" not in purpose.meta:
+            r.add("warning", "W_BUNDLE_UID_MISSING", purpose.id,
+                  "no bundle_uid — run `okfy migrate ids`")
+        elif not isinstance(uid, str) or not uid.strip():
+            r.add("error", "E_BUNDLE_UID", purpose.id,
+                  f"bundle_uid must be a non-empty string, got {uid!r}")
+    missing, seen = [], {}
+    for c in concepts:
+        if not carries_okf_id(c.id):
+            continue
+        if "okf_id" not in c.meta:
+            missing.append(c.id)
+            continue
+        v = c.meta["okf_id"]
+        if not isinstance(v, str) or not v.strip():
+            r.add("error", "E_OKF_ID", c.id,
+                  f"okf_id must be a non-empty string, got {v!r}")
+        elif v in seen:
+            r.add("error", "E_OKF_ID_DUPLICATE", c.id,
+                  f"okf_id {v} is also carried by {seen[v]} — a page copied "
+                  "rather than moved; give the copy a fresh id (delete its "
+                  "okf_id line, then `okfy migrate ids`)")
+        else:
+            seen[v] = c.id
+    if missing:
+        r.add("warning", "W_OKF_ID_MISSING", missing[0],
+              f"{len(missing)} page(s) without okf_id (e.g. "
+              f"{', '.join(missing[:3])}) — run `okfy migrate ids`")
 
 
 def _check_links(bundle, concepts, r: Report) -> set[str]:

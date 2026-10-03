@@ -22,6 +22,7 @@ table" section for the one-paragraph summary."""
 
 MUTATES: dict[str, bool] = {
     "init": True,
+    "migrate ids": True,      # backfills bundle_uid/okf_id; a rerun writes nothing, but the leaf's intent is a write
     "survey": False,
     "segment": True,
     "segment-status": True,
