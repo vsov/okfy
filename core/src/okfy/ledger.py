@@ -388,7 +388,10 @@ def read_rows(bundle: Bundle, run_id: str | None = None) -> list:
     path = ledger_path(bundle)
     if not path.is_file():
         return []
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    # JSONL rows are framed by LF alone: the writers use ensure_ascii=False, so a raw
+    # U+0085/U+2028/U+2029 inside a string would be cut by str.splitlines(). A CRLF
+    # file stays readable (json.loads treats the trailing CR as whitespace).
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").split("\n")
             if line.strip()]
     if run_id is not None:
         rows = [r for r in rows if r.get("run_id") == run_id]

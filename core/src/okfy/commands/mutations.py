@@ -36,6 +36,7 @@ MUTATES: dict[str, bool] = {
     "sourcemap": False,
     "index": True,            # writes .okfy-cache/index.json (and meta/package.json if present); --usage alone is read-only, but the leaf covers both
     "query": False,
+    "preedit": False,         # ADR 0018: read-only, advisory lookup; writes nothing, builds no index
     "show": False,
     "fresh": False,
     "links": False,

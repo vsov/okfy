@@ -6,7 +6,8 @@ import inspect
 import re
 from urllib.parse import unquote
 
-from okfy import federate, frontmatter, proposals, query as q
+from okfy import federate, frontmatter, preedit as core_preedit, proposals, query as q
+from okfy import passages as core_passages
 from okfy.codes import CODES
 from okfy.commands.common import _archetype_for
 from okfy.index import load_index
@@ -254,7 +255,13 @@ def h_query(t: Target, text: str, type_: str | None = None,
             tag: str | None = None, n: int = 10, expand: bool = True,
             include_stale: bool = True,
             max_tokens: int = render.DEFAULT_QUERY_MAX_TOKENS,
-            session: Session | None = None) -> dict:
+            session: Session | None = None, passages: bool = False,
+            passage_tokens: int = core_passages.DEFAULT_PASSAGE_TOKENS) -> dict:
+    if passages:
+        # Refusals first: a workspace, or a budget outside core's range, is
+        # raised before any query runs (contract h, b).
+        core_passages.check_request(t.path, passage_tokens)
+        fp_before = core_passages.bundle_fingerprint(t.bundle)
     if t.is_workspace:
         kw = {"n": n}
         if "expand" in _FED_PARAMS:
@@ -280,6 +287,13 @@ def h_query(t: Target, text: str, type_: str | None = None,
                 "nothing matched: file okfy_propose(action=\"gap\", "
                 "query=<the user's own words>) so the owner learns what "
                 "the bundle lacks")
+        if passages:
+            # Fragments only for the hits the adapter shows: `omitted` hits
+            # never reach the selector (contract i). The selection is core's.
+            out.update(core_passages.select_passages(
+                t.bundle, text, out, fp_before=fp_before,
+                passage_tokens=passage_tokens, type_=type_, tag=tag,
+                include_stale=include_stale))
         result = {"mode": "bundle", **out}
     result["notice"] = render.NOTICE
     if session is not None:
@@ -879,3 +893,12 @@ def h_fresh(t: Target, ids: dict) -> dict:
                 "way_out": "point the server at the member bundle's own "
                           "path, not the workspace"}
     return proposals.fresh(t.bundle, ids)
+
+
+def h_preedit(t: Target, paths: list[str], root: str | None = None,
+              limit: int = 50, offset: int = 0) -> dict:
+    """ADR 0018: the pre-edit lookup. No selection logic lives here: this hands
+    the bound target (bundle or workspace) to `okfy.preedit.preedit` and returns
+    its `okfy-preedit@1` object unchanged. A whole-call refusal is a coded
+    PreeditError (a ValueError) and reaches the caller through `safe_call`."""
+    return core_preedit.preedit(t.path, paths, root=root, limit=limit, offset=offset)

@@ -130,7 +130,14 @@ def _parse_lines(raw_text: str) -> tuple[list[dict], list[str]]:
     honest "I cannot tell what time this happened", not a refusal: every
     OTHER readable row on the same ledger is still returned."""
     out, problems = [], []
-    for n, raw in enumerate(raw_text.splitlines(), start=1):
+    # JSONL is framed by LF alone (R20-5). `str.splitlines()` also breaks on
+    # U+0085, U+2028, U+2029 (and \x0b \x0c \x1c-\x1e), which `json.dumps(...,
+    # ensure_ascii=False)` leaves raw inside a string, so a row this module
+    # itself wrote would be cut in two and both halves reported unreadable.
+    # One trailing CR is a CRLF ledger's, not part of the row; line numbers
+    # count LF rows, the way git and `ledger_prefix_check` count them.
+    for n, raw in enumerate(raw_text.split("\n"), start=1):
+        raw = raw.removesuffix("\r")
         if not raw.strip():
             continue
         where = f"{E_MEMORY_LINE}: {MEMORY_FILE} line {n}"

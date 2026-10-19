@@ -12,6 +12,7 @@ from okfy.bundle import RESERVED_DIRS, Bundle
 from okfy.ids import carries_okf_id
 from okfy.init import manifest_digest
 from okfy.lexicon import row_problems
+from okfy.pathscope import WHOLE_ROOT, nfc, path_scope_problems
 from okfy.update import _embedded_prefix, _source_path
 from okfy.workspace import PROJECT_KEY_RE
 
@@ -319,6 +320,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_meta(bundle, r)
     _check_write_policy(bundle, r)
     _check_direct(bundle, archetype, r, strict=strict_schema)
+    _check_preedit(bundle, archetype, r)
     _check_acceptance(bundle, r)
     _check_adversarial(bundle, concepts, r)
     _check_types(bundle, concepts, archetype, r, strict=strict_schema)
@@ -334,6 +336,7 @@ def validate_integrity(bundle: Bundle, archetype=None, strict_sources=False,
     _check_ledger_append_only(bundle, r)
     _check_review_due(concepts, r)
     _check_applies_to(concepts, r)
+    _check_path_scope(bundle, concepts, r)
     _check_sources(bundle, concepts, r, strict=strict_sources)
     _check_coverage(bundle, concepts, r)
     _check_span_coverage(bundle, r)
@@ -610,6 +613,79 @@ def _check_direct(bundle: Bundle, archetype, r: Report, strict: bool = False):
                   f"direct.types entry {t!r} is not in {source}, so no concept "
                   "can have it and the lane never opens for it — fix the "
                   "name, or declare the type in meta/extraction-plan.md `types`")
+
+
+# ADR 0018: the owner declares which concept types GOVERN a pre-edit lookup.
+# One reader, shared by `okfy validate` (`_check_preedit`) and the lookup
+# (`preedit.preedit`), so the two cannot disagree about what is governing.
+# Closed for the reason `direct` is: a misspelled key is a policy that silently
+# does nothing.
+PREEDIT_KEYS = ("governing_types",)
+
+
+def preedit_policy(purpose_meta: dict, declared: set | None = None
+                   ) -> tuple[list[str] | None, list[tuple[str, str]]]:
+    """`(governing_types, problems)` for a purpose's `preedit` block — the ONE
+    reader of it. `governing_types` is None when the block is absent or its
+    list is malformed; `problems` is `[("E_PREEDIT_POLICY", message)]`, each
+    message ending in its way out. The lookup refuses on ANY problem: a trust
+    boundary that is half-declared is not open.
+
+    `declared` is the set of legal concept types (`_declared_types`); when
+    given, every governing type must be in it — a type no concept can have
+    governs nothing. A type may not be both governing and in `direct.types`:
+    a rule whose text an agent can rewrite without review is not owner
+    authority. The empty list is valid and deliberate (nothing governs)."""
+    if "preedit" not in purpose_meta:
+        return None, []
+    block = purpose_meta["preedit"]
+    code = "E_PREEDIT_POLICY"
+    if not isinstance(block, dict):
+        return None, [(code, f"preedit must be a mapping, got {type(block).__name__} — "
+                             "write it as `preedit: {governing_types: [<type>, ...]}`")]
+    problems: list[tuple[str, str]] = []
+    unknown = sorted(str(k) for k in block if k not in PREEDIT_KEYS)
+    if unknown:
+        problems.append((code, f"unknown preedit key(s) {unknown} (known: {list(PREEDIT_KEYS)}) "
+                               "— remove them; an unrecognised key is a policy that silently "
+                               "does nothing"))
+    if "governing_types" not in block:
+        problems.append((code, "preedit declares no governing_types — list the concept types "
+                               "that govern an edit, or `[]` to state that nothing does"))
+        return None, problems
+    types = block["governing_types"]
+    if not isinstance(types, list) or any(not isinstance(t, str) or not t.strip() for t in types):
+        problems.append((code, f"preedit.governing_types must be a list of type names, got "
+                               f"{types!r} — e.g. `governing_types: [Convention, Decision]`, "
+                               "or `[]` for none"))
+        return None, problems
+    if declared:
+        missing = sorted(t for t in types if t not in declared)
+        if missing:
+            problems.append((code, f"preedit.governing_types entry {missing} is not a declared "
+                                   f"type {sorted(declared)}, so no concept can have it and it "
+                                   "governs nothing — fix the name, or declare the type in "
+                                   "meta/extraction-plan.md `types`"))
+    direct_types, _ = direct_policy(purpose_meta)
+    both = sorted(t for t in types if t in (direct_types or []))
+    if both:
+        problems.append((code, f"type(s) {both} are in both preedit.governing_types and "
+                               "direct.types: a rule whose text an agent can rewrite without "
+                               "review is not owner authority — remove the type from one "
+                               "of the two lists"))
+    return list(types), problems
+
+
+def _check_preedit(bundle: Bundle, archetype, r: Report):
+    """The `preedit` block is a trust boundary like `direct`, so its shape is an
+    error at every strictness level."""
+    p = bundle.get("meta/purpose")
+    if p is None:
+        return                                   # _check_meta already reported it
+    allowed, _, _ = _declared_types(bundle, archetype)
+    _, problems = preedit_policy(p.meta, allowed or None)
+    for code, message in problems:
+        r.add("error", code, p.id, message)
 
 
 def _check_acceptance(bundle: Bundle, r: Report):
@@ -1065,6 +1141,70 @@ def _check_applies_to(concepts, r: Report):
               "fix by lowercasing/trimming to a valid slug")
 
 
+def _manifest_paths(bundle: Bundle) -> set[str] | None:
+    """The corpus manifest's file paths when `meta/corpus-manifest.json`
+    travels with the bundle and reads as a mapping, else None (no basis; an
+    unreadable manifest is `_source_checker`'s finding, not ours)."""
+    try:
+        snap = bundle.get("meta/corpus")
+        purpose = bundle.purpose()
+    except frontmatter.FrontmatterError:
+        return None
+    if purpose.get("exported") or (snap and snap.meta.get("exported")):
+        return None
+    f = bundle.root / "meta" / "corpus-manifest.json"
+    try:
+        manifest = json.loads(f.read_text(encoding="utf-8")) if f.is_file() else None
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    return {str(k) for k in manifest}
+
+
+def _check_path_scope(bundle: Bundle, concepts, r: Report):
+    """`path_scope` (ADR 0018) is an optional list of corpus-relative paths a
+    pre-edit lookup matches against the files an agent is about to change.
+    The shape is checked on EVERY non-meta concept that carries the key,
+    whatever the archetype (as `applies_to` is); meta concepts are exempt
+    (`archetype_applies`). Invalidity is `path_scope_problems`' alone — one
+    grammar predicate shared with the lookup and the write paths. ERROR: an
+    invalid value is neither provably in nor out of scope.
+
+    W_PATH_SCOPE_UNRESOLVED: a valid entry that matches nothing in the corpus
+    manifest (silent when the bundle carries none) — a typo such as
+    `src/ruff/` for `src/raft/` would otherwise never match and read as an
+    all-clear. A warning, because a rule may govern files not yet created."""
+    files = None
+    dirs: set[str] = set()
+    for c in concepts:
+        if "path_scope" not in c.meta or not archetype_applies(c.id):
+            continue
+        v = c.meta["path_scope"]
+        problems = path_scope_problems(v)
+        if problems:
+            r.add("error", "E_PATH_SCOPE", c.id,
+                  "path_scope is invalid: " + "; ".join(problems))
+            continue
+        if not v:
+            continue
+        if files is None:
+            paths = _manifest_paths(bundle)
+            if paths is None:
+                return                           # no basis: silent
+            files = {nfc(p) for p in paths}
+            for p in files:
+                parts = p.split("/")[:-1]
+                for i in range(1, len(parts) + 1):
+                    dirs.add("/".join(parts[:i]) + "/")
+        dangling = [e for e in v if e != WHOLE_ROOT
+                    and not ((nfc(e) in dirs) if e.endswith("/") else (nfc(e) in files))]
+        if dangling:
+            r.add("warning", "W_PATH_SCOPE_UNRESOLVED", c.id,
+                  f"path_scope entries match nothing in the corpus manifest: {dangling} — "
+                  "fix the path, or ignore this if the files do not exist yet")
+
+
 def review_due_date(value) -> datetime.date | None:
     """`review_due` as a date, or None when it is not one. YAML reads an
     unquoted 2026-10-01 as a date and a quoted one as a string; both count."""
@@ -1228,7 +1368,17 @@ def _source_checker(bundle: Bundle, r: Report | None = None, strict: bool = Fals
     else None: no basis to check (Standalone Bundle — the corpus may be gone).
     Exported fusions skip too: their concepts cite member corpora, not ws.root.
     A manifest that exists but cannot be read is reported, never silently
-    skipped — a corrupt file must not quietly disable the check."""
+    skipped — a corrupt file must not quietly disable the check.
+
+    A snapshot that DECLARES a `manifest_digest` pins the manifest as the
+    basis; if meta/corpus-manifest.json is then missing, a directory, or not
+    a readable file, there is no basis — the embedded live-tree fallback must
+    not stand in for what the snapshot pins (the tree moves; the manifest
+    does not). Every caller sees the same None: propose reports
+    `sources_state: unchecked`, strict validate omits the `sources` summary
+    (E_MANIFEST_DIGEST is `_check_corpus_snapshot`'s finding, not ours).
+    `manifest_digest: null` is a legacy opt-out, the same as an absent key:
+    it declares nothing, so the legacy branches below apply."""
     try:
         snap = bundle.get("meta/corpus")
         purpose = bundle.purpose()
@@ -1237,6 +1387,12 @@ def _source_checker(bundle: Bundle, r: Report | None = None, strict: bool = Fals
     if purpose.get("exported") or (snap and snap.meta.get("exported")):
         return None
     manifest_file = bundle.root / "meta" / "corpus-manifest.json"
+    declared = snap is not None and snap.meta.get("manifest_digest") is not None
+    if declared:
+        try:
+            manifest_file.read_bytes()
+        except OSError:                  # missing, a directory, unreadable
+            return None
     if manifest_file.is_file():
         try:
             manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
@@ -1262,34 +1418,14 @@ def _source_checker(bundle: Bundle, r: Report | None = None, strict: bool = Fals
     return None
 
 
-def _declared_manifest_unavailable(bundle: Bundle) -> bool:
-    """The snapshot declares a `manifest_digest`, yet meta/corpus-manifest.json
-    is not a readable file."""
-    try:
-        snap = bundle.get("meta/corpus")
-    except frontmatter.FrontmatterError:
-        return False
-    if snap is None or snap.meta.get("manifest_digest") is None:
-        return False
-    try:
-        (bundle.root / "meta" / "corpus-manifest.json").read_bytes()
-    except OSError:
-        return True
-    return False
-
-
 def _check_sources(bundle: Bundle, concepts, r: Report, strict=False):
     """ADR-0013: broken sources paths signal, never flip the flag — warnings by
     default, errors only under --strict-sources (new extractions)."""
-    if _declared_manifest_unavailable(bundle):
-        # E_MANIFEST_DIGEST (_check_corpus_snapshot) is the finding. No basis
-        # to resolve sources against, so no `sources` summary either: a
-        # report that omits it says the check did not run; an embedded bundle
-        # does not fall back to the live corpus tree, which the snapshot does
-        # not pin.
-        return
     exists = _source_checker(bundle, r, strict)
     if exists is None:
+        # No basis: no `sources` summary either — a report that omits it says
+        # the check did not run. (A declared manifest that is gone is reported
+        # once, as E_MANIFEST_DIGEST, by _check_corpus_snapshot.)
         return
     level, code = ("error", "E_BAD_SOURCE") if strict else ("warning", "W_BAD_SOURCE")
     with_sources = broken = 0

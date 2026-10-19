@@ -155,8 +155,10 @@ def _committed_tree(corpus: Path, rev: str) -> tuple[set[str], Callable[[str], b
     file of a directory that has both). `probe(dir)` is True iff `dir` is an
     embedded bundle in that tree. `ls-tree ... -- .` is relative to `corpus`,
     which is often a subdirectory of the repo (see _materialize_pinned_paths)."""
+    # bytes, not text=True: universal-newline decoding would turn a CR in a
+    # path into LF (and a CRLF pair into one LF).
     out = run_git(corpus, "ls-tree", "-r", "-z", "--name-only", rev, "--", ".",
-                  capture_output=True, text=True, check=True).stdout
+                  capture_output=True, check=True).stdout.decode("utf-8", "surrogateescape")
     names = {n for n in out.split("\0") if n}
     markers = list(BUNDLE_MARKERS)
     suffixes = ["/" + m for m in markers]
@@ -201,20 +203,31 @@ def _git_corpus_listing(corpus: Path, old_sha: str, new_sha: str,
     old_side: set[str] = set()
     new_side: set[str] = set()
     modified: set[str] = set()
-    for line in name_status.splitlines():
-        parts = line.split("\t")
-        status = parts[0]
-        if status.startswith("R"):
-            old_side.add(parts[1])
-            new_side.add(parts[2])
-        elif status == "A":
-            new_side.add(parts[1])
+    # `--name-status -z`: NUL-separated fields, never C-quoted (the human form
+    # quotes non-ASCII / tab / LF / quote paths unless core.quotePath=false,
+    # and a tab or LF in a name would split a record). A record is a status,
+    # then one path, or two for R/C (old, new).
+    fields = [f for f in name_status.split("\0") if f]
+    i = 0
+    while i < len(fields):
+        status = fields[i]
+        if status[0] in "RC":
+            old_p, new_p = fields[i + 1], fields[i + 2]
+            i += 3
+            if status[0] == "R":
+                old_side.add(old_p)
+            new_side.add(new_p)                 # a copy leaves its source in place
+            continue
+        path = fields[i + 1]
+        i += 2
+        if status == "A":
+            new_side.add(path)
         elif status == "D":
-            old_side.add(parts[1])
+            old_side.add(path)
         else:                                   # M, T, ...
-            old_side.add(parts[1])
-            new_side.add(parts[1])
-            modified.add(parts[1])
+            old_side.add(path)
+            new_side.add(path)
+            modified.add(path)
     # Either marker alone can flip a directory (the other one unchanged).
     touched = {p[:-len(sfx)] for p in old_side | new_side
                for sfx in ("/" + m for m in BUNDLE_MARKERS) if p.endswith(sfx)}
@@ -284,8 +297,9 @@ def corpus_diff(bundle: Bundle, *, rev: str | None = _UNSET) -> dict:
         # and new_sha` above), so this substitution changes nothing about
         # what gets diffed in the ordinary case — only what it is pinned to.
         out = run_git(
-            corpus, "diff", "--name-status", "--relative", "-M", old_sha, new_sha,
-            capture_output=True, text=True, check=True).stdout
+            corpus, "diff", "--name-status", "-z", "--relative", "-M", old_sha,
+            new_sha,
+            capture_output=True, check=True).stdout.decode("utf-8", "surrogateescape")
         # Which paths are corpus is decided by the two committed trees, not
         # by marker files in the working tree (the rule is written out in
         # _git_corpus_listing).

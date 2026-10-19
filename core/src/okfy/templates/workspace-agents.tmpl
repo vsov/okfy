@@ -26,7 +26,14 @@ $members_table
    lexicons for terms flagged NOT COVERED.
 6. Never edit member bundles from here; respect each member's write_policy.
    To suggest a change to a member concept, use
-   `okfy propose <member-bundle-path> --target <concept-id> ...` — the member's
-   owner reviews it via okfy review.
+   `okfy propose <member-bundle-path> --as <actor> --target <concept-id>
+   --action update --note "<why>" --from <file>` — the member's owner reviews
+   it via okfy review. A member whose own AGENTS.md carries an `Exception:`
+   line lets you write the types it names at once with `okfy write
+   <member-bundle-path> <concept-id> --as <actor> --expect <sha256|absent>
+   --from <file>`. Writes take the member's own path, never the workspace
+   directory: the CLI reads a workspace as a bundle with no direct types
+   (`E_DIRECT_DISABLED`, exit 2) and MCP `okfy_write` refuses it
+   (`E_WRITE_WORKSPACE`).
    Crosswalk rows change only through the review flow (/okfy:relink).
 $queries_note

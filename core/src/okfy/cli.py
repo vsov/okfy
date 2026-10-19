@@ -6,6 +6,7 @@ from okfy.commands import HANDLERS
 from okfy.cost import DEFAULT_N as COST_N
 from okfy.guard import GuardError
 from okfy.memory import EVENTS
+from okfy.passages import DEFAULT_PASSAGE_TOKENS
 from okfy.proposals import ACTIONS, FLAG_TYPES
 from okfy.segment import DEFAULT_BUDGET
 
@@ -15,6 +16,16 @@ def _positive_int(v: str) -> int:
     if n < 1:
         raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
     return n
+
+
+def _passage_budget(v: str):
+    """An int when the text is one. Anything else is passed on unchanged, so
+    okfy.passages refuses it with E_PASSAGE_BUDGET instead of argparse saying
+    something else."""
+    try:
+        return int(v)
+    except ValueError:
+        return v
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -133,6 +144,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("bundle", type=Path)
     p.add_argument("--json", action="store_true")
 
+    p = sub.add_parser("preedit",
+        help="pre-edit lookup: the governing rules for the paths you are about to edit "
+             "(read-only; advisory, not permission)",
+        description="Pre-edit lookup (ADR 0018). Given a bundle (or workspace) and the repo "
+                    "paths you are about to edit, print the okfy-preedit@1 JSON: the owner-"
+                    "declared rules that govern those paths. Read-only: it writes nothing and "
+                    "builds no index. Advisory, not permission: a result never authorises an "
+                    "edit, and `complete: false` means stop and ask the owner. Use `--` before "
+                    "a path that starts with a dash.")
+    p.add_argument("target", type=Path, help="a bundle or a workspace directory")
+    p.add_argument("paths", nargs="+", metavar="path", help="repo paths about to be edited")
+    p.add_argument("--root", type=Path, default=None,
+                   help="the checkout the snapshot was taken from (required for a workspace; "
+                        "for a bundle it must equal the corpus recorded in meta/corpus.md)")
+    p.add_argument("--limit", type=int, default=50, help="matches per page, 1..500 (default 50)")
+    p.add_argument("--offset", type=int, default=0, help="matches to skip (default 0)")
+
     p = sub.add_parser("index");    p.add_argument("bundle", type=Path)
     p.add_argument("--usage", action="store_true")
     p.add_argument("--journal", type=Path, default=None,
@@ -148,6 +176,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip lexicon query expansion")
     p.add_argument("--no-stale", dest="include_stale", action="store_false",
                    help="drop stale concepts instead of marking them")
+    p.add_argument("--passages", action="store_true",
+                   help="opt-in (v0.31): for the top 3 hits, add the source text "
+                        "they match (fragment: concept_id, path, sha256, lines, "
+                        "heading_path (the headings in force at the extract's "
+                        "first line), spans_sections (true when a heading line "
+                        "lies inside the extract after its first line; absent "
+                        "otherwise), extract) and print one JSON object "
+                        "{results, passages_omitted, passage_budget, "
+                        "passages_notice, ...} instead of the bare result list. "
+                        "Refused on a workspace (E_PASSAGES_WORKSPACE)")
+    p.add_argument("--passage-tokens", dest="passage_tokens", type=_passage_budget,
+                   default=DEFAULT_PASSAGE_TOKENS, metavar="N",
+                   help="token budget for the fragments of one response, an integer "
+                        "from 100 to 8000 (default 1200, E_PASSAGE_BUDGET otherwise); "
+                        "ignored unless --passages is given")
 
     p = sub.add_parser("show");     p.add_argument("bundle", type=Path)
     p.add_argument("concept_id")

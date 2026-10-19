@@ -1,6 +1,8 @@
 import sys
 
 from okfy.bundle import Bundle
+from okfy.passages import passage_query
+from okfy.preedit import preedit
 from okfy.proposals import fresh
 from okfy.query import links, query, show
 from okfy.sampling import sample_for_review
@@ -9,7 +11,24 @@ from okfy.workspace import Workspace, is_workspace
 from .common import _print
 
 
+def _cmd_query_passages(a) -> int:
+    """v0.31 `query --passages`. Selection lives in okfy.passages; this only
+    prints. The stderr lines are the legacy ones, and a refusal (workspace,
+    budget) raises before any query runs and reaches cli.main as stderr, exit 2."""
+    out = passage_query(Bundle(a.bundle), a.text, type_=a.type_, tag=a.tag, n=a.n,
+                        include_meta=a.include_meta, expand=a.expand,
+                        include_stale=a.include_stale, passage_tokens=a.passage_tokens)
+    if out["expanded_query"] != a.text:
+        print(f"expanded: {out['expanded_query']}", file=sys.stderr)
+    for note in out["notes"]:
+        print(f"note: {note}", file=sys.stderr)
+    _print(out)
+    return 0
+
+
 def cmd_query(a) -> int:
+    if a.passages:
+        return _cmd_query_passages(a)
     if is_workspace(a.bundle):
         from okfy.federate import federated_query
         ws = Workspace.load(a.bundle)
@@ -24,6 +43,14 @@ def cmd_query(a) -> int:
     for note in out["notes"]:
         print(f"note: {note}", file=sys.stderr)
     _print(out["results"])
+    return 0
+
+
+def cmd_preedit(a) -> int:
+    """ADR 0018 `okfy preedit`. Selection lives in okfy.preedit; this only prints.
+    A whole-call refusal is a PreeditError (a ValueError), which cli.main prints
+    to stderr, code first, exit 2."""
+    _print(preedit(a.target, a.paths, root=a.root, limit=a.limit, offset=a.offset))
     return 0
 
 

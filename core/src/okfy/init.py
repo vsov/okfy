@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from okfy.bundle import is_bundle_dir
+from okfy.bundle import drop_bundle_paths, is_bundle_dir
 from okfy.frontmatter import serialize
 from okfy.gitenv import run_git
 from okfy.guard import assert_safe_bundle_path
@@ -45,6 +45,14 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
               skipped_symlinks: list[str] | None = None) -> dict[str, str]:
     """path -> sha256, for every non-hidden file under `corpus`.
 
+    A corpus whose root holds `.git` is listed by `git ls-files --cached
+    --others --exclude-standard`, the listing `segment._walk` reads, so a
+    gitignored file (a private corpus, a build directory) never reaches the
+    committed manifest; hidden components and embedded bundles are dropped as
+    the walk below drops them. Any other corpus — no git, a subdirectory of a
+    repo, or git failing — takes the os.walk below unchanged, as `_walk`
+    takes rglob.
+
     Walked with `os.walk(..., onerror=...)` rather than `Path.rglob` so an
     unreadable directory or file can be REPORTED instead of silently dropped
     from the listing: `rglob` swallows `OSError` from `scandir` the same way
@@ -69,6 +77,21 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
         if errors is not None:
             errors.append(getattr(exc, "filename", None) or str(exc))
 
+    listed = _git_listing(corpus)
+    if listed is not None:
+        for rel in listed:
+            p = corpus / rel
+            if not p.is_file():
+                if skipped_symlinks is not None and p.is_symlink():
+                    skipped_symlinks.append(rel)
+                continue
+            try:
+                out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                if errors is not None:
+                    errors.append(rel)
+        return out
+
     for dirpath, dirnames, filenames in os.walk(corpus, onerror=onerror):
         # Prune hidden dirs from descent — matches the old rglob filter,
         # which excluded any path with a "."-prefixed component — and any
@@ -91,6 +114,28 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
                 if errors is not None:
                     errors.append(rel)
     return out
+
+
+def _git_listing(corpus: Path) -> list[str] | None:
+    """Corpus-relative posix paths git knows about under `corpus`, gitignore
+    respected (`--exclude-standard`), minus hidden components and embedded
+    bundles — or None when git fails or `corpus` has no `.git` of its own, so
+    the caller falls back to walking the directory.
+
+    Gated on `corpus / ".git"` exactly as `segment._walk` is: a corpus that is
+    a subdirectory of a repo is walked by the plan, gitignored files included,
+    so the manifest must walk it too — and a corpus inside an ignored
+    directory would otherwise list as empty. Bytes + `os.fsdecode`, as
+    `os.walk` names files, so a non-UTF-8 name is a key, not a crash."""
+    if not (corpus / ".git").exists():
+        return None
+    r = run_git(corpus, "ls-files", "--cached", "--others", "--exclude-standard",
+                "-z", capture_output=True)
+    if r.returncode != 0:
+        return None
+    rels = sorted({rel for rel in map(os.fsdecode, r.stdout.split(b"\0"))
+                   if rel and not any(part.startswith(".") for part in rel.split("/"))})
+    return drop_bundle_paths(corpus, rels)
 
 
 def manifest_digest(manifest: dict[str, str]) -> str:

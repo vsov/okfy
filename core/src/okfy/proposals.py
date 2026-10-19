@@ -24,6 +24,7 @@ from okfy.cluster import _alias_keys, _jaccard, _title_key
 from okfy.gitenv import run_git
 from okfy.ids import IDENTITY_KEYS, carries_okf_id, new_id as mint_id
 from okfy.package import append_log
+from okfy.pathscope import path_scope_problems
 from okfy.sourcemap import cited_span
 from okfy.transcript_lint import _SEGMENT
 from okfy.validate import (LINK_RE, Report, _check_archetype, _declared_types,
@@ -130,6 +131,17 @@ NEAR_THRESHOLD = 0.6
 # holding two different opinions about sameness at once.
 DISTINCT_OVERLAP_THRESHOLD = 0.6
 
+
+
+def _path_scope_refusal(concept_id: str, meta: dict) -> str | None:
+    """`E_PATH_SCOPE: ...` when the concept carries a malformed `path_scope`
+    (ADR 0018), else None. The shape is checked on every non-meta concept
+    whatever the archetype, with the same predicate `okfy validate` uses, so
+    a value the validator would reject never lands."""
+    if "path_scope" not in meta or not archetype_applies(concept_id):
+        return None
+    problems = path_scope_problems(meta["path_scope"])
+    return ("E_PATH_SCOPE: " + "; ".join(problems)) if problems else None
 
 def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -571,7 +583,7 @@ def propose(bundle: Bundle, meta: dict, body: str, target: str | None = None,
 
     `extends` turns a create into an update of that existing concept — the way
     out of E_PROPOSAL_DUPLICATE. `reopen` states what changed since an identical
-    (or reworded-identical) text was rejected or deleted — the way out of
+    (or cosmetically reworded identical) text was rejected or deleted — the way out of
     E_PROPOSAL_REJECTED. `distinct_from` (create only) declares that a
     near-duplicate concept found by `_gate` is NOT the same thing, stated as
     `{concept_id: reason}` — it suppresses W_PROPOSAL_NEAR for the ids it
@@ -1504,17 +1516,17 @@ def _gate(bundle: Bundle, meta: dict, body: str, target, action: str, reopen,
                     ledger_check,
                     f"the working copy no longer shows the {verb} by "
                     f"{tomb['actor']} on {when} that HEAD still has — "
-                    "re-proposing this text (reworded or not) unreopened over "
+                    "re-proposing this text (cosmetically reworded or not) unreopened over "
                     "a scrubbed decision repeats a closed decision instead of "
                     "reopening it"))
             if tomb["event"] == "accept":            # accepted delete: a tombstone
                 raise ValueError(
-                    f"{E_REJECTED}: this text (reworded or not) was deleted by "
+                    f"{E_REJECTED}: this text (cosmetically reworded or not) was deleted by "
                     f"{tomb['actor']} on {when} — re-proposing it repeats a closed "
                     'decision. If something changed, say what: `okfy propose ... '
                     '--reopen "<new evidence>"`')
             raise ValueError(
-                f"{E_REJECTED}: this text, reworded, was rejected by {tomb['actor']} "
+                f"{E_REJECTED}: this text, cosmetically reworded, was rejected by {tomb['actor']} "
                 f"on {when} ({tomb.get('reason') or 'no reason given'}) — "
                 "re-proposing it repeats a closed decision. If something changed, "
                 'say what: `okfy propose ... --reopen "<new evidence>"`')
@@ -1964,6 +1976,9 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
             _check_archetype(probe, archetype, r)
             if not r.ok:
                 raise ValueError("; ".join(f"{f.code}: {f.message}" for f in r.errors))
+        refusal = _path_scope_refusal(new_id, new_meta)
+        if refusal:
+            raise ValueError(refusal)
         proposed_by = (new_meta.get("generated") or {}).get("by") \
             if isinstance(new_meta.get("generated"), dict) else None
         entry = {"by": owner, "at": utc_now(),
@@ -2026,6 +2041,9 @@ def _accept(bundle: Bundle, proposal_id: str, archetype=None, *,
         _check_archetype(probe, archetype, r)
         if not r.ok:
             raise ValueError("; ".join(f"{f.code}: {f.message}" for f in r.errors))
+    refusal = _path_scope_refusal(target, meta)
+    if refusal:
+        raise ValueError(refusal)
 
     # Authorship survives an update: the concept's first author stays in
     # `generated`, and who proposed THIS text is recorded on the verification
@@ -2421,7 +2439,8 @@ def _write_direct(bundle: Bundle, concept_id: str, actor: str, expect_sha256: st
             f"{before.get('type')!r} to {meta.get('type')!r}, which would move "
             f"it across the review boundary — keep the type, or {propose_instead}")
     meta.pop("proposal", None)
-    for key in ("verified", "generated", "supersedes", "superseded_by", *STALE_FIELDS):
+    for key in ("verified", "generated", "supersedes", "superseded_by", "path_scope",
+                *STALE_FIELDS):
         if key == "generated" and create:
             continue
         if key in meta and (key not in before or meta[key] != before[key]):
@@ -2459,6 +2478,10 @@ def _write_direct(bundle: Bundle, concept_id: str, actor: str, expect_sha256: st
                 f"{E_DIRECT_INVALID}: "
                 + "; ".join(f"{f.code}: {f.message}" for f in r.errors)
                 + f" — fix the concept and write again, or {propose_instead}")
+    refusal = _path_scope_refusal(concept_id, meta)
+    if refusal:
+        raise ValueError(f"{E_DIRECT_INVALID}: {refusal} — fix the concept and write "
+                         f"again, or {propose_instead}")
     _refuse_if_ledger_rewritten(bundle, memory.MEMORY_FILE)
     # The row this write appends must stay readable beside the others: a line
     # the ledger reader cannot parse is refused here, before anything is

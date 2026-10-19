@@ -32,7 +32,10 @@ Canonical language: $language. Write policy: $write_policy.
   With the CLI, the sanctioned way is:
   `okfy propose <bundle> --as <actor> --target <concept-id> --action update
   --note "<why>" --from <file.md>`
-  — direct edits to concept files will be refused by the bundle's pre-commit hook.
+  — hand edits to concept files will be refused by the bundle's pre-commit hook.
+  The one exception is a type the owner opened for direct writes: an
+  `Exception:` line at the end of this file, if present, names it and the
+  command (`okfy write`).
 - Never edit `meta/`, `index.md`, or `log.md` by hand.
 
 ## Accelerated mode (if the okfy CLI is installed)

@@ -27,7 +27,8 @@ def _name_tokens(entry: dict) -> set[str]:
     return toks
 
 
-def active_rows(ws: Workspace) -> tuple[list, int, list[str]]:
+def active_rows(ws: Workspace, rows: list | None = None,
+                status: dict | None = None) -> tuple[list, int, list[str]]:
     """Accepted crosswalk rows minus stale ones (a row citing a concept that
     changed since its member SHA was pinned — or touching a member whose
     baseline cannot be verified at all: no pin, unreachable pin, broken git.
@@ -36,17 +37,17 @@ def active_rows(ws: Workspace) -> tuple[list, int, list[str]]:
     stop influencing answers too — an equivalence or constraint reviewed
     against a concept that has since changed is a hypothesis again."""
     from okfy.workspace import workspace_status
-    st = workspace_status(ws)
+    st = workspace_status(ws, rows=rows) if status is None else status
     stale = {(s["src"], s["rel"], s["dst"]) for s in st["stale_rows"]}
-    rows, n_stale = [], 0
-    for r in load_rows(ws):
+    out, n_stale = [], 0
+    for r in (load_rows(ws) if rows is None else rows):
         if r.status != "accepted":
             continue
         if (r.src, r.rel, r.dst) in stale:
             n_stale += 1
             continue
-        rows.append(r)
-    return rows, n_stale, st.get("unverifiable_members", [])
+        out.append(r)
+    return out, n_stale, st.get("unverifiable_members", [])
 
 
 def expansion_terms(ws: Workspace, member_name: str, text: str,

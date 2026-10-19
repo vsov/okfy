@@ -10,6 +10,137 @@ how `okfy query` ranks a single bundle. The contributed retrieval change (the fi
 contributed subsections below) does: it moves the retrieval code digest (see there), and
 the round-19 subsection moves it a second time.
 
+### Pre-edit lookup
+
+- **`path_scope`: where a concept applies, declared by the owner.** A concept may carry a list of
+  corpus-relative paths: an entry ending in `/` is a recursive directory prefix (whole
+  segments), an entry without it is one exact file, `./` is the whole root, `[]` means
+  reviewed and applies nowhere, and an absent key means unmapped. There is no glob language.
+  It is separate from `sources` (attribution) and from the personal `applies_to`.
+  `okfy validate` checks the grammar on every non-meta concept that carries the key, and the
+  proposal write paths refuse a malformed value before it lands. A direct-lane write
+  (`okfy_write`) cannot set or change it (`E_DIRECT_OWNER_FIELD`, summary extended).
+- **`preedit` policy block in `meta/purpose.md`.** `preedit: {governing_types: [...]}`
+  names the concept types that govern. A match is `governing` only through `path_scope` or
+  a `constrains` row, with a governing type, and (in a workspace) from a `constraints`
+  member; everything else is `advisory`. A type may not also be in `direct.types`.
+- **`okfy preedit <bundle|workspace> PATH... [--root R] [--limit N] [--offset K]` and the
+  `okfy_preedit` MCP tool.** Read-only: one `okfy-preedit@1` object, identical on both
+  surfaces, written to stdout or returned; nothing is written to the bundle and no index is
+  built. The CLI exits 0 for any result and 2 for a refusal. The MCP server now has eight
+  tools (it had seven).
+- **Completeness is explicit, and is not permission.** Every result carries `complete`,
+  `incomplete_reasons` (`unmapped`, `invalid_path_scope`, `truncated`, `snapshot_drift`,
+  `refused_path`, `stale_relation`, `invalid_relation`, `unsupported_member`,
+  `unreadable_concept`, `no_governing_policy`, `unresolved_conflict`) and `coverage:
+  declared_only`. `complete: true` does not mean no rule exists or that the edit is allowed,
+  and zero matches in a mapped bundle does not mean allowed. There is no `allowed` field.
+  `limit`/`offset` page the matches, and a window that leaves a governing match out is
+  `truncated`.
+- **A `conflicts` crosswalk relation and a validating reader.** An owner-declared
+  contradiction between two refs, with a required `reason` and an optional `scope` and
+  `resolution`. `crosswalk.read_rows` reports a malformed row as a named diagnostic instead of
+  dropping it; `load_rows` is unchanged, so `okfy query` and the federated query behave as
+  before. The lookup reports declared conflicts with `semantic: not_assessed`: it does not
+  judge whether two rules contradict. A stale `conflicts` row also covers its
+  `resolution.decision`, and workspace export drops a row whose decision names an
+  out-of-scope personal concept.
+- **New codes:** `E_PATH_SCOPE`, `W_PATH_SCOPE_UNRESOLVED`, `E_PREEDIT_POLICY`,
+  `E_PREEDIT_ROOT`, `E_PREEDIT_PATH`, `E_PREEDIT_PAGE`.
+- **The federation code digest changed.** `crosswalk.py`, `federate.py` and `workspace.py`
+  are in `federation_code_digest()` and all three changed, so recorded federated eval runs
+  read stale against the new code: re-run `okfy eval run <workspace>` and repeat the owner
+  checkpoint. The recorded workspace evals are historical; no run is rewritten. The retrieval
+  code digest is unchanged (`bm25.py`, `index.py`, `lexicon.py`, `query.py` are untouched).
+- **Docs and the agent protocol.** The User Guide (English and Russian) has a "Pre-edit
+  lookup" section, and the stale tool enumerations in the MCP chapter now describe all eight
+  tools. The codebase-map `AGENTS.md` template gains a short instruction (about 60 tokens in
+  the rendered resident file): run `okfy preedit` before the first edit of a subsystem, stop
+  and ask the owner when `complete` is false, and treat the result as context, not
+  permission. The lookup is an advisory preflight, not enforcement.
+
+### Fragment retrieval (opt-in)
+
+- **Source passages for the top three hits, behind a flag.** `okfy query <bundle> <text> --passages` and `okfy_query(..., passages=true, passage_tokens=N)` add a `fragment` (`concept_id`, `path`, `sha256` of the raw file bytes, 1-based `lines`, `heading_path` (the headings in force at the extract's first line, `[]` before the first heading), `spans_sections` (`true` when a heading line lies inside the extract after its first line; absent otherwise), exact `extract`) and a `passage_state` (`quoted`, `truncated`, or `none_selected` with `passage_reason`). The selector is `core/src/okfy/passages.py`. Off by default; without the flag the output is unchanged, and with it the CLI prints one JSON object instead of the bare list.
+- **A budget on fragments only.** `--passage-tokens` / `passage_tokens` is an integer from 100 to 8000, default 1200, and a hard limit on the summed fragment tokens, counted with the method named in `passage_budget.method`. The whole-response size is an estimate. Hit lists, lexicon and not-covered notes, stale marks and the existing `max_tokens` budget are never dropped to fit it.
+- **Two refusals, both before any file is read.** `E_PASSAGES_WORKSPACE` for a workspace target, since a passage reads one bundle's concept files, and `E_PASSAGE_BUDGET` for a budget that is not an integer from 100 to 8000.
+- **Ranking and federation are unchanged.** `bm25.py`, `index.py`, `lexicon.py`, `query.py` and `federate.py` are byte-unchanged, so `retrieval_code_digest()`, the federated query and the recorded evals are not affected. A fragment shares query terms with the question; it does not prove the answer.
+- **Economy is unproven.** Whether passages save tokens has not been measured; a live comparison is pending, so this release makes no cost claim.
+
+### Round 20
+
+- **`okfy migrate ids` refuses a file with other hard links.** A concept page hard-linked
+  to a file outside the bundle is neither a symlink nor outside the bundle by path, so the
+  migration rewrote the shared inode and gave the outside file an `okf_id`. Every target
+  (`meta/purpose.md` included) with `st_nlink > 1` is now refused with `E_MIGRATE_TARGET`
+  (exit 2) in the same preflight, before the first write. The inode is not detached; copy
+  the file to make it independent, then migrate. A plain copy of the same bytes still
+  migrates and leaves the original untouched.
+- **A `meta/purpose.md` symlink is refused by its own path.** The check read the Purpose
+  through `Bundle.get`, which resolves links, so `purpose.md -> other.md` inside `meta/`
+  looked like an ordinary file and the target was rewritten. The preflight now tests the
+  lexical `meta/purpose.md`. `Bundle.get` is unchanged.
+- **`okfy diff` / `okfy update` in git mode read paths from git's NUL format.** The corpus
+  diff parsed the human `git diff --name-status` output, which C-quotes a path with
+  non-ASCII, tab, LF or quote characters (the default `core.quotePath=true`), so the quoted
+  text was taken for a file name. When a directory such as `документы/` became an embedded
+  bundle, the removal list came back empty, no concept was marked affected, and `changed`
+  held a quoted marker path. It now reads `--name-status -z` (status, path, and both paths
+  of a rename), and the committed-tree listing is decoded from bytes so a CR in a name
+  survives. The result is the same under `core.quotePath=true` and `false` on the same
+  commits. Untracked or uncommitted marker files still change nothing.
+- **A declared `manifest_digest` with its manifest gone no longer lets proposals claim
+  `sources_state: checked`.** Round 19 made strict validate stop checking sources in that
+  state, but `_source_checker`, which `propose`, `write_direct` and the coverage check
+  also use, still fell back to the live corpus tree of an embedded bundle, so a proposal
+  citing a file that was never in the frozen manifest was filed as `checked`. The rule now
+  lives in `_source_checker` itself: when `meta/corpus.md` declares a non-null
+  `manifest_digest` and `meta/corpus-manifest.json` is missing, a directory, or unreadable,
+  there is no basis, so `propose` records `sources_state: unchecked` and `write_direct`
+  skips the source check (no new refusal; a source the live tree lacks is no longer
+  refused in that state either). A manifest that exists but is malformed or not a mapping
+  keeps its `E_SOURCE_MANIFEST` / `W_SOURCE_MANIFEST` report. Strict validate still reports
+  `E_MANIFEST_DIGEST` once and omits the `sources` summary. A present manifest, a legacy
+  bundle with no declaration, memory-only and exported bundles behave as before.
+  `manifest_digest: null` is recorded as a legacy opt-out, the same as an absent key: it
+  declares nothing and takes the legacy branch (no new validation, no migration).
+- **A ledger row with U+0085, U+2028 or U+2029 in a string is one row, not several.** The
+  reader of `meta/memory.jsonl` (`events` for the working tree and `events_at_head` for the
+  committed blob, one shared parser) cut the file with `str.splitlines()`, which also breaks
+  on those characters; `json.dumps(ensure_ascii=False)` writes them raw. So
+  `write_direct(..., observed={"by": "client\u2028name"})` reported `persisted: true`, the
+  file held one valid row, and the reader returned no rows and two `E_MEMORY_LINE` problems
+  (the next direct write then refused). Rows are now framed by LF only, one trailing CR is
+  dropped so a CRLF ledger still parses, and a problem names the LF line number, the same
+  numbering `ledger_prefix_check` and git use. A row without a final LF, and a real torn row
+  (`E_MEMORY_LINE`, write refused before any change), behave as before.
+- **`meta/ledger.jsonl` and `meta/dissent.jsonl` are read by LF too.** Their readers
+  (`ledger.read_rows`, `dissent.read_rows`) had the same `splitlines()` framing as the memory
+  ledger, and crashed with `JSONDecodeError` on a row whose string carried a raw U+0085,
+  U+2028 or U+2029, which their own writers emit (`ensure_ascii=False`). CRLF rows still read.
+- **`okfy index --usage --journal` reads the okfy-mcp journal by LF too.** `okfy-mcp` writes
+  journal rows with `ensure_ascii=False`; a query carrying a raw U+0085, U+2028 or U+2029
+  was split into fragments, so the row was lost and counted in `skipped_lines`. A torn
+  row is still one skipped line.
+- **The docs no longer say a signed JWT stays valid until its `exp` regardless of its key.**
+  The Round 19 entry under "okfy-mcp HTTP authorization", the `okfy-mcp` README and the
+  guide (English and Russian) said so; the runtime does not. The same unexpired token is
+  answered `200` before the issuer retires its signing key and `401` once the JWKS set is
+  re-read. One text now stands everywhere: a token is accepted only while it is signed by a
+  key in the issuer's JWKS as cached here and before its `exp`; retiring a key ends
+  acceptance of every token that key signed once the cached set is re-read (at most 300 s,
+  or sooner when a token names an unknown `kid`; newer PyJWT re-reads for that at most once
+  every 30 s); there is no per-token revocation, so to cut off one token without retiring
+  its key, wait for its `exp` and keep access tokens short-lived. No code change.
+- **The Round 19 HTTP unit fixture runs on PyJWT 2.15, not only 2.13.** It served JWKS
+  through `urllib.request.urlopen` alone and assumed an immediate re-read on an unknown
+  `kid`, so on 2.15 it hit the network seam `build_opener().open` and tripped over the
+  30 s re-read cooldown. The fixture now serves both seams, drives PyJWT's own clocks (as
+  `scripts/smoke.sh` does) and fails any other network attempt. A new test pins that the
+  same unexpired token gets `200` before the key is retired and `401` after the set is
+  re-read, while a token of the current key gets `200`. Tests only; the dependency range
+  is unchanged.
+
 ### Stricter behaviour
 
 - **A workspace `acceptance` policy is a closed, typed mapping.** `release-check` on a
@@ -34,9 +165,10 @@ the round-19 subsection moves it a second time.
 - **A signing key the issuer stops publishing is no longer trusted for the life of the
   process.** The JWKS client kept an unbounded per-key cache, with no expiry. It now relies on
   the bounded JWKS-set cache only (300 s, and a token naming an unknown `kid` re-reads the
-  set; newer PyJWT releases allow that re-read at most once every 30 s), so a retired key is refused once the set is re-read. A JWT the issuer already signed
-  stays valid until its `exp`; individual token revocation is still not offered, and the docs
-  now say so.
+  set; newer PyJWT releases allow that re-read at most once every 30 s), so a retired key is
+  refused once the set is re-read. Individual token revocation is still not offered, and the
+  docs now say so. (An earlier wording of this entry said a JWT the issuer already signed
+  stays valid until its `exp`, independent of its key; that was wrong, see Round 20.)
 
 ### Direct write and `migrate ids`: filesystem and ledger
 
@@ -76,8 +208,8 @@ the round-19 subsection moves it a second time.
 
 ### Codes
 
-- **New:** `E_MIGRATE_TARGET` (`okfy migrate ids` would write through a symlink or outside
-  the bundle).
+- **New:** `E_MIGRATE_TARGET` (`okfy migrate ids` would write through a symlink, outside
+  the bundle, or into a file with other hard links).
 - **Widened, same names:** `E_MEMORY_LINE` also stops a direct write;
   `E_REL_WS_ACCEPTANCE_INVALID` also covers a non-mapping policy
   and unknown keys; `E_REL_EVAL_INVALID` and `E_REL_WS_EVAL_INVALID` also cover a non-string
@@ -523,6 +655,25 @@ Contributed by @theaspirational (vsov/okfy#8). No version is bumped here.
   `--oidc-issuer`, where it is the token's). A `human:` actor sent through the
   direct-write lane is committed under the process's own git identity, as every
   write was before.
+
+### The corpus manifest respects `.gitignore`
+
+Contributed by @vbanas (vsov/okfy#9).
+
+- **A gitignored file no longer enters `meta/corpus-manifest.json`.** A corpus whose root
+  holds `.git` is listed with `git ls-files --cached --others --exclude-standard`, the
+  listing the plan (`segment._walk`) already read, so a private file or a build directory
+  stays out of the manifest, `okfy diff` and `manifest_digest`. Hidden paths and embedded
+  bundles are dropped as before.
+- **Same gate as the plan (added when integrating).** A corpus that is a subdirectory of a
+  repo, or has no git, is walked as before, gitignored files included, because the plan
+  walks it that way too; a corpus inside an ignored directory is therefore not listed empty.
+  A non-UTF-8 file name is a key, not a crash.
+- **One-time change for existing bundles.** On a repo-root corpus with gitignored files, the
+  next `okfy diff` reports those files as removed and the next snapshot refresh drops them,
+  so `manifest_digest` changes once. On macOS, a name stored decomposed (NFD) is now keyed
+  as git reports it (precomposed), as the plan already keyed it. The retrieval and
+  federation code digests are unchanged.
 
 ## v0.29.0 — 2026-09-30
 

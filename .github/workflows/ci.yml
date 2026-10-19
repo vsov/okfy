@@ -91,6 +91,17 @@ jobs:
           okfy --help > /dev/null
           ./scripts/smoke.sh
 
+      - name: Memory-only recipe — the documented onboarding runs on the installed commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ runner.os }}" = "Windows" ]; then export PATH="$PWD/.venv/Scripts:$PATH"
+          else export PATH="$PWD/.venv/bin:$PATH"; fi
+          # An empty directory outside the checkout: the recipe refuses to run
+          # inside any git repository, and the work dir is created here.
+          RECIPE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/okfy-memory-recipe.XXXXXX")"
+          sh ./scripts/memory-recipe.sh "$RECIPE_DIR"
+
       - name: Reference bundle — the contract holds, and the gates still say no
         shell: bash
         run: |

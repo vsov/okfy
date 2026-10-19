@@ -30,6 +30,15 @@ def _append_section(path: Path, heading: str, line: str) -> None:
     path.write_text(frontmatter.serialize(meta, body), encoding="utf-8")
 
 
+def _decision_in_scope(scope_ids: dict, d: dict) -> bool:
+    """ADR 0018: a `conflicts` row also cites `resolution.decision`. A row whose
+    decision names an out-of-scope personal concept is dropped like one whose
+    src/dst does — otherwise the exported links/*.md would carry that id."""
+    res = d.get("resolution")
+    dec = res.get("decision") if isinstance(res, dict) else None
+    return not (isinstance(dec, str) and ":" in dec) or ref_in_scope(scope_ids, dec)
+
+
 def export_workspace(ws: Workspace, out: Path) -> Path:
     """Fuse every member into one standalone bundle. A `personal` member is
     the one member whose content is NOT fully owned by this workspace's
@@ -104,7 +113,8 @@ def export_workspace(ws: Workspace, out: Path) -> Path:
             meta, body = frontmatter.parse(p.read_text(encoding="utf-8"))
             rows = meta.get("rows", [])
             kept_rows = [d for d in rows if ref_in_scope(scope_ids, d["src"])
-                        and ref_in_scope(scope_ids, d["dst"])]
+                        and ref_in_scope(scope_ids, d["dst"])
+                        and _decision_in_scope(scope_ids, d)]
             if len(kept_rows) != len(rows):
                 n_rows_dropped += len(rows) - len(kept_rows)
                 meta = dict(meta)

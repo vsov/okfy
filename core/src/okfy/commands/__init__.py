@@ -13,7 +13,7 @@ from .corpus import (cmd_cluster, cmd_diff, cmd_glean, cmd_reanchor,
 from .economics import cmd_budget, cmd_cost
 from .quality import (cmd_dissent, cmd_eval, cmd_job, cmd_ledger, cmd_merge_audit,
                       cmd_stale, cmd_transcript_lint)
-from .retrieval import cmd_fresh, cmd_links, cmd_query, cmd_sample, cmd_show
+from .retrieval import cmd_fresh, cmd_links, cmd_preedit, cmd_query, cmd_sample, cmd_show
 from .review import cmd_dismiss, cmd_propose, cmd_refine, cmd_review, cmd_write
 from .workspace import cmd_link_candidates, cmd_workspace
 
@@ -34,6 +34,7 @@ HANDLERS = {
     "sourcemap": cmd_sourcemap,
     "index": cmd_index,
     "query": cmd_query,
+    "preedit": cmd_preedit,
     "show": cmd_show,
     "links": cmd_links,
     "fresh": cmd_fresh,

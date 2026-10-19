@@ -265,6 +265,36 @@ CODES: dict[str, dict] = {
         "summary": "a concept's `applies_to` is not a non-empty list of project-key strings (or `*`), or an entry is well-formed but does not match the project-key slug grammar workspace.PROJECT_KEY_RE enforces (lowercase, no leading/trailing whitespace, no uppercase) and so could never match any real project_key",
         "way_out": "fix applies_to to a list of project keys or `*`, e.g. [\"my-project\", \"*\"] — lowercase and trimmed",
     },
+    "E_PATH_SCOPE": {
+        "kind": "error",
+        "summary": "a concept's `path_scope` breaks the grammar: not a list, an entry that is not a non-empty string, absolute, containing `..`, a backslash, a NUL or a glob character (`*`, `?`, `[`, `]`), a duplicate, or starting with `./` other than the single entry `./`; raised by validate and by the write paths that would land it",
+        "way_out": "write path_scope as a list of corpus-relative paths: a directory prefix ending in `/`, an exact file, or `./` for the whole root; `[]` means reviewed and applies to no path",
+    },
+    "W_PATH_SCOPE_UNRESOLVED": {
+        "kind": "warning",
+        "summary": "a valid `path_scope` entry matches nothing in the corpus manifest (silent when the bundle carries no manifest): a typo would never match and read as an all-clear",
+        "way_out": "fix the entry, or ignore the warning if the files it names do not exist yet",
+    },
+    "E_PREEDIT_POLICY": {
+        "kind": "error",
+        "summary": "meta/purpose.md `preedit` block is malformed or contradictory: not a mapping, an unknown key, no `governing_types`, a non-list or non-string entry, an undeclared type, or a type that is also in `direct.types`; the pre-edit lookup refuses on it",
+        "way_out": "write `preedit: {governing_types: [<declared type>, ...]}` (`[]` for none), and keep every governing type out of `direct.types`; the owner edits meta/purpose.md",
+    },
+    "E_PREEDIT_ROOT": {
+        "kind": "error",
+        "summary": "the pre-edit lookup has no verified root: meta/corpus.md is absent or unreadable, records no usable `corpus` directory, `--root` does not equal the recorded corpus after realpath, or a workspace was called without `--root`",
+        "way_out": "pass the root the snapshot was taken from (the `corpus` in meta/corpus.md), or repair meta/corpus.md (`okfy snapshot` re-records it)",
+    },
+    "E_PREEDIT_PATH": {
+        "kind": "error",
+        "summary": "a pre-edit lookup input path is refused (reason: escapes_root, nul, outside_root, empty, names_root, backslash, symlink_escape), the path list is empty or has more than 500 entries, or no valid path is left",
+        "way_out": "pass 1 to 500 paths relative to the root (or absolute and inside it); pass the files, or a directory with a trailing `/`, not the root itself",
+    },
+    "E_PREEDIT_PAGE": {
+        "kind": "error",
+        "summary": "the pre-edit lookup's `limit` is not an integer from 1 to 500, or `offset` is not an integer of at least 0",
+        "way_out": "pass limit between 1 and 500 and offset 0 or more; raise limit to at least totals.governing to read every governing match at once",
+    },
     "E_WS_PROJECT_KEY": {
         "kind": "error",
         "summary": "a workspace has a `personal`-role member but no (or a malformed) project_key, so nothing in that member would ever be visible through federation; also raised when project_key is present but not a string (e.g. an unquoted YAML int/float), since a non-string key can never equal any `applies_to` entry",
@@ -731,7 +761,7 @@ CODES: dict[str, dict] = {
     },
     "E_PROPOSAL_REJECTED": {
         "kind": "error",
-        "summary": "this exact or reworded text was already rejected or deleted by the owner",
+        "summary": "this exact or cosmetically reworded text was already rejected or deleted by the owner",
         "way_out": 'reopen it: `okfy propose ... --reopen "<new evidence>"` stating what changed',
     },
     "E_PROPOSAL_DUPLICATE": {
@@ -1255,6 +1285,16 @@ CODES: dict[str, dict] = {
         "summary": "MCP okfy_fresh was called against a workspace target — fresh targets a single bundle",
         "way_out": "point the server at the member bundle's own path, not the workspace",
     },
+    "E_PASSAGE_BUDGET": {
+        "kind": "error",
+        "summary": "a passages query was given a passage_tokens that is not an integer from 100 to 8000 (a bool, a float or a string counts as not an integer) — refused before any concept file is read",
+        "way_out": "pass an integer passage_tokens from 100 to 8000, or omit it for the default 1200",
+    },
+    "E_PASSAGES_WORKSPACE": {
+        "kind": "error",
+        "summary": "a passages query was called against a workspace target — passage selection reads one bundle's concept files, and a workspace has no single concept set",
+        "way_out": "point the server at a member bundle's own path, or drop passages for the federated result",
+    },
     "E_MCP_REFUSAL": {
         "kind": "error",
         "summary": "a registered MCP tool's handler raised a ValueError or KeyError refusal with no leading E_/W_ code of its own; the tool-dispatch boundary (okfy_mcp.handlers.safe_call, used by every tool in server.py) wraps it in the documented {error, message, way_out} envelope instead of letting it escape as a raw ToolError — `message` always carries the original refusal text verbatim",
@@ -1317,8 +1357,8 @@ CODES: dict[str, dict] = {
     },
     "E_MIGRATE_TARGET": {
         "kind": "error",
-        "summary": "`okfy migrate ids` would write a page that is a symbolic link, or that resolves outside the bundle, so the rewrite would land in a file the bundle does not own",
-        "way_out": "replace the link with the real file inside the bundle (or remove it) and run migrate again; the refusal comes before the first write, so nothing was changed",
+        "summary": "`okfy migrate ids` would write a page that is a symbolic link, that resolves outside the bundle, or that has other hard links (st_nlink > 1), so the rewrite would land in a file the bundle does not own alone",
+        "way_out": "replace the link with the real file inside the bundle (or remove it), or replace a multiply linked file with an independent copy, and run migrate again; the refusal comes before the first write, so nothing was changed",
     },
     "E_STALE_NAVIGATION": {
         "kind": "error",
@@ -1372,7 +1412,7 @@ CODES: dict[str, dict] = {
     },
     "E_DIRECT_OWNER_FIELD": {
         "kind": "error",
-        "summary": "a direct write sets or changes a field an owner decision writes: verified, generated, supersedes, superseded_by, stale, stale_reason, stale_since",
+        "summary": "a direct write sets or changes a field an owner decision writes: verified, generated, supersedes, superseded_by, path_scope, stale, stale_reason, stale_since",
         "way_out": "leave the field exactly as the concept has it, or file a proposal instead",
     },
     "E_DIRECT_INVALID": {

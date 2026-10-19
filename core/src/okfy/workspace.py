@@ -211,7 +211,22 @@ def _changed_concepts(member: Member) -> tuple[str, list[str]]:
     return ("ok", sorted(p[:-3] for p in files if p.endswith(".md")))
 
 
-def workspace_status(ws: "Workspace") -> dict:
+def _decision_refs(r) -> list[str]:
+    """ADR 0018: the extra ref a `conflicts` row cites, `resolution.decision`.
+    A moved decision concept makes the WHOLE row stale (an owner resolved this
+    conflict by reading that decision; it is no longer what they read). A value
+    that is not a ref is skipped here — the validating reader names it."""
+    if r.rel != "conflicts" or not isinstance(r.resolution, dict):
+        return []
+    decision = r.resolution.get("decision")
+    return [decision] if isinstance(decision, str) and ":" in decision else []
+
+
+def workspace_status(ws: "Workspace", rows: list | None = None) -> dict:
+    """`rows` (ADR 0018) lets a caller that already holds validated rows — the
+    pre-edit lookup, which must not crash on a malformed-ref row or a
+    duplicate-key links file — compute staleness over exactly those. The default
+    (`None`) is the tolerant `load_rows`, unchanged for every existing caller."""
     from okfy.crosswalk import load_rows, parse_ref
     members_out = []
     changed_by_member: dict[str, set[str]] = {}
@@ -230,14 +245,14 @@ def workspace_status(ws: "Workspace") -> dict:
                                       and not changed),
                             "changed_concepts": sorted(changed)})
     stale = []
-    for r in load_rows(ws):
-        for ref in (r.src, r.dst):
+    for r in (load_rows(ws) if rows is None else rows):
+        for ref in (r.src, r.dst, *_decision_refs(r)):
             mname, cid = parse_ref(ref)
             # a row touching a member whose baseline cannot be verified is
             # stale by definition: there is no proof the reviewed concept
             # still exists as reviewed
             if mname in unverifiable or cid in changed_by_member.get(mname, set()):
-                stale.append(r.__dict__)
+                stale.append(r.as_dict())
                 break
     return {"members": members_out, "stale_rows": stale,
             "unverifiable_members": sorted(unverifiable)}

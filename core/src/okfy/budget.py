@@ -173,7 +173,9 @@ def _read_journal_rows(path: Path) -> tuple[list[dict], int]:
         return [], 0
     rows: list[dict] = []
     skipped = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # LF framing, not splitlines(): okfy-mcp writes with ensure_ascii=False, so a raw
+    # U+0085/U+2028/U+2029 inside a string is not a row break. CR is stripped below.
+    for line in path.read_text(encoding="utf-8").split("\n"):
         line = line.strip()
         if not line:
             continue

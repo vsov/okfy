@@ -130,9 +130,14 @@ def _add_key(path, key: str, value: str) -> None:
 
 
 def _refuse_unsafe_target(bundle: Bundle, path) -> None:
-    """`E_MIGRATE_TARGET` for a page the migration would write through a
-    symlink, or that resolves outside the bundle: `read_text`/`write_text`
-    follow links, so the rewrite would land in a file the bundle does not own."""
+    """`E_MIGRATE_TARGET` for a page the migration would write into a file the
+    bundle does not own alone. `path` is the lexical path — `bundle.get()`
+    resolves links away, `bundle.concepts()` does not — because
+    `read_text`/`write_text` follow links and a rewrite lands in whatever inode
+    the name reaches. Refused: a symbolic link, a path that resolves outside the
+    bundle, and a file with more than one hard link (`st_nlink > 1`): a second
+    name for the inode may live outside the bundle, and the rewrite would change
+    it too. Nothing is detached or copied; the owner decides."""
     rel = path.relative_to(bundle.root).as_posix()
     if path.is_symlink():
         raise ValueError(
@@ -145,6 +150,12 @@ def _refuse_unsafe_target(bundle: Bundle, path) -> None:
             f"E_MIGRATE_TARGET: {rel} resolves outside the bundle — `migrate ids` "
             "never writes outside it; move the real file inside, then migrate "
             "again; nothing was written")
+    if os.lstat(path).st_nlink > 1:
+        raise ValueError(
+            f"E_MIGRATE_TARGET: {rel} has other hard links — `migrate ids` "
+            "rewrites the shared file, so every other name for it (possibly "
+            "outside the bundle) would change too; replace it with an "
+            "independent copy, then migrate again; nothing was written")
 
 
 def migrate_ids(bundle: Bundle) -> dict:
@@ -157,8 +168,10 @@ def migrate_ids(bundle: Bundle) -> dict:
     past one a page moved in the working tree still holds. A page with no
     such commit gets a random one.
 
-    A page that is a symlink, or resolves outside the bundle, is refused
-    (`E_MIGRATE_TARGET`) before anything is written."""
+    A page (`meta/purpose.md` included, checked by its own path, not the file a
+    link leads to) that is a symlink, resolves outside the bundle, or has more
+    than one hard link (`st_nlink > 1`) is refused (`E_MIGRATE_TARGET`) before
+    anything is written. Nothing is detached: copy the file, then migrate."""
     out = {"bundle_uid": None, "okf_id": []}
     purpose = bundle.get("meta/purpose")
     if purpose is None:
@@ -166,9 +179,10 @@ def migrate_ids(bundle: Bundle) -> dict:
     concepts = bundle.concepts()
     # Every file this run would write is checked before the first one is: a
     # refusal halfway would leave the pages before it already migrated.
-    for target in ([purpose] if "bundle_uid" not in purpose.meta else []) + [
-            c for c in concepts if carries_okf_id(c.id) and "okf_id" not in c.meta]:
-        _refuse_unsafe_target(bundle, target.path)
+    for target in ([bundle.root / "meta" / "purpose.md"] if "bundle_uid" not in purpose.meta
+                   else []) + [c.path for c in concepts
+                               if carries_okf_id(c.id) and "okf_id" not in c.meta]:
+        _refuse_unsafe_target(bundle, target)
     uid = purpose.meta.get("bundle_uid")
     if "bundle_uid" not in purpose.meta:
         uid = out["bundle_uid"] = _legacy_uid(bundle.root)

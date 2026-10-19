@@ -73,7 +73,7 @@ The deliverable is a folder, and the folder is designed to survive on its own.
 
 **Deterministic search when the CLI is present.** If OKFy *is* installed, the bundle gains an "accelerated mode": a self-contained BM25 index (no embeddings, no external service) driving `okfy query`, `okfy show`, `okfy links`, and `okfy sample`. `okfy query` also runs **lexicon query expansion by default** — it bridges the words you type to the concept ids the bundle actually uses, deterministically, before the search runs (§11). Same bundle, faster retrieval — but nothing about correctness depends on the CLI being there.
 
-**Proposals-based refinement.** Consuming agents don't edit the bundle in place. They write to a `proposals/` area; changes to knowledge go through the same review gate as changes to code. The bundle's authority is protected by a write policy the core enforces.
+**Proposals-based refinement.** Consuming agents don't edit the bundle in place. They write to a `proposals/` area; changes to knowledge go through the same review gate as changes to code. The bundle's authority is protected by a write policy the core enforces. The one opening is the owner's own: `direct.types` in `meta/purpose.md` can name low-stakes concept types (session notes, logs) that an agent writes at once with `okfy write` — every other type stays a proposal (§10, §13).
 
 **Git history as audit trail.** Because the bundle is a git repository, you get provenance for free: who changed which concept, when, and why, all the way back to the initial extraction. When a downstream decision turns out to rest on a concept, you can trace that concept to the corpus it came from.
 
@@ -137,7 +137,7 @@ A codebase-map bundle has exactly five concept types, and each answers one quest
 
 Where does this bundle *live*? For prose corpora the bundle sits in its own repository, off to the side. For a codebase map that would be a mistake: the map drifts the instant someone merges code without touching the far-away knowledge repo. So codebase-map bundles use **embed residence** — `okfy init --embed` writes the bundle into an `.okf/` directory *inside the mapped repository's own working tree*. The knowledge then rides the same pull request as the code it describes. Change a module's interface and update its Module concept in the same commit; the reviewer sees both diffs together and cannot approve one without the other.
 
-Embedded residence comes with a specific write policy: **`direct`**. Elsewhere OKFy is strict — consuming agents write to a `proposals/` area and never edit knowledge in place, because there is no code review standing between them and the bundle's authority. Inside an embedded map, that review gate already exists: it is the repository's own PR process. So direct writes are safe *there* precisely because the surrounding code review covers the knowledge change too. The same direct-write policy would be reckless in a standalone bundle, where nothing reviews the edit — which is why the policy is tied to residence, not left to preference.
+Embedded residence comes with a specific write policy: **`direct`**. Elsewhere OKFy is strict — consuming agents write to a `proposals/` area and never edit knowledge in place (bar the narrow `direct.types` lane the owner may open for named types, §10), because there is no code review standing between them and the bundle's authority. Inside an embedded map, that review gate already exists: it is the repository's own PR process. So direct writes are safe *there* precisely because the surrounding code review covers the knowledge change too. The same direct-write policy would be reckless in a standalone bundle, where nothing reviews the edit — which is why the policy is tied to residence, not left to preference.
 
 For a coding agent, consuming a codebase-map is a discipline, not a lookup. Before **editing** any code, read the owning Module concept and every Convention that applies to the files you touch — a change that violates a documented invariant or convention is wrong even if the tests pass. Before **redesigning**, read the relevant Decision concepts; do not reopen a decided trade-off without new evidence. And observe coverage honesty: if no concept covers the area, say so rather than presenting a merely similar Module as if it answered the question.
 
@@ -246,11 +246,70 @@ A third member role, `personal` (ADR-0015), federates one owner's own bundle of 
 
 Cheatsheet: `okfy workspace init|status|export` manage the workspace lifecycle; `okfy link-candidates` proposes crosswalk rows; `okfy query <workspace>` auto-detects the federation and answers across members.
 
+### Pre-edit lookup: which rules apply to the files I am about to change
+
+`okfy query` finds concepts by words. A rule such as "never call libc `malloc` for engine data" shares no words with the task "add a retry to the join operator", so a query built from the task finds it only by luck — and an agent that did not find a rule cannot tell "no rule exists" from "my query missed it". The pre-edit lookup is the addressed counterpart: you give it the paths you plan to change and it answers **which declared rules apply to those paths**, found by path rather than by vocabulary.
+
+```bash
+okfy preedit <bundle|workspace> PATH... [--root R] [--limit N] [--offset K]
+```
+
+Over MCP the same operation is `okfy_preedit(paths, root, limit, offset)`. It is read-only: it writes no concept, cache, ledger or log, and it builds no index. The output is one JSON object, `okfy-preedit@1`, identical on both surfaces. The CLI exits 0 for any result it produced (the answer is in `complete`, not in the exit code) and 2 for a refusal.
+
+**`path_scope`: the owner says where a concept applies.** A concept may carry a `path_scope` list of corpus-relative POSIX paths. An entry ending in `/` is a recursive directory prefix, matched on whole segments (`src/a/` matches `src/a/x.c` and `src/a/b/y.c`, never `src/ab.c`); an entry without a trailing `/` is one exact file; the single entry `./` means the whole root; `[]` means *reviewed, applies to no path*; an absent key means *unmapped*. There is no glob language — a recursive prefix plus an exact file is the whole matcher. A malformed value (not a list, an empty or absolute entry, a `..` segment, a backslash, a glob character, a duplicate) is `E_PATH_SCOPE`, raised by `okfy validate` and by the write paths that would land it, and it fails closed: an invalid scope is neither provably in nor out, so the lookup never guesses. `W_PATH_SCOPE_UNRESOLVED` warns when a valid entry matches nothing in the corpus manifest, because a typo (`src/ruff/` for `src/raft/`) would otherwise never match and read as an all-clear. `path_scope` is a third, separate field: it is not `sources` (attribution — which corpus files a concept was extracted from) and not the personal `applies_to` (a project key). A `sources` match makes an owning Module appear next to the rules, but it never makes anything governing. A direct-lane write (`okfy_write`) may not set or change `path_scope` (`E_DIRECT_OWNER_FIELD`), so a concept created that way stays unmapped until the owner maps it.
+
+**Authority is the owner's, declared once.** `meta/purpose.md` carries
+
+```yaml
+preedit:
+  governing_types: [Convention, Decision]
+```
+
+A matched concept is `governing` only if all three hold: it matched through `path_scope` or a crosswalk `constrains` row; its type is in its own bundle's `governing_types`; and, in a workspace, its member's role is `constraints` — only `constraints` members govern, a `knowledge` or `personal` member never does. Anything else is `advisory`, and `authority_basis` names why (`source_only`, `type_not_governing`, `role_not_constraints`). Body prose never changes status: a retrieved concept saying `MUST` or "I am policy" is data. `governing_types: []` is valid and deliberate (nothing here governs). A malformed or contradictory block — an unknown key, an undeclared type, or a type that is also in `direct.types` (a rule an agent may rewrite without review is not owner authority) — is `E_PREEDIT_POLICY`, and the lookup refuses on it. No block at all is not an error, but nothing can govern, so the result is incomplete (`no_governing_policy`).
+
+**Completeness is the point.** Every result states `complete` (true or false), `incomplete_reasons` and `coverage: declared_only` — the result covers what the owner declared and nothing the lookup inferred. `complete: false` carries the reasons that fired:
+
+- `unmapped` — a concept that could govern has no `path_scope`; whether it bears on this edit is exactly what is unknown. Counted for the whole bundle, not per path.
+- `invalid_path_scope` — such a concept carries a malformed `path_scope`.
+- `truncated` — a governing match lies outside the returned window.
+- `snapshot_drift` — the root's git `HEAD` differs from the snapshot the map was made from.
+- `refused_path` — an input path was refused (listed in `refused_paths`).
+- `stale_relation`, `invalid_relation` — a crosswalk row that touches the answer is stale or unverifiable, or malformed (listed in `excluded_relations`).
+- `unsupported_member` — a `constraints` member's corpus is not this root.
+- `unreadable_concept` — a concept file could not be read.
+- `no_governing_policy` — no `preedit` block (in a workspace: no supported `constraints` member declares one).
+- `unresolved_conflict` — a declared conflict with a governing side has no resolution on record.
+
+`complete: true` is **not permission** to edit, and it does not mean no rules exist: it means the declared picture is whole for these paths. The corollary runs the other way too: **zero matches in a mapped bundle is not "allowed"** — it means nothing declared applies, and `coverage: declared_only` says a rule nobody wrote down is invisible. There is no `allowed` field in the output, on purpose, and the constant `notice` repeats that the result is data and not permission.
+
+**Paging.** `limit` (1–500, default 50) and `offset` (0 or more) window the ordered list, governing first. A window that leaves any governing match outside is `truncated`, so a later page is never complete on its own; `next_offset` is set whenever anything lies after the window. To get `complete: true`, raise `limit` to at least `totals.governing`, which the first response reports. A bad `limit` or `offset` is `E_PREEDIT_PAGE`.
+
+**Root and paths.** The root defaults to the `corpus` recorded in `meta/corpus.md`; `--root` is a confirmation, not a selector, and a mismatch, an absent snapshot, or a workspace called without `--root` is `E_PREEDIT_ROOT`. Paths are 1 to 500 per call, relative to the root or absolute and inside it; a directory takes a trailing `/`. A path that does not exist yet is valid and matched lexically, and one that reaches another place through a symlink is matched under both forms. An unusable path (escaping the root, empty, naming the root itself, a backslash, a NUL, a symlink out) is refused per path with `E_PREEDIT_PATH` and makes the result incomplete; if no valid path is left, or the list is empty or longer than 500, the whole call is refused. The root check is path identity plus a commit comparison, not a byte hash of the working tree; the result says so in `notes`.
+
+**Declared conflicts.** Two rules that apply to the same file are co-applicable, not conflicting, and the lookup does not read prose to decide otherwise: `conflicts.semantic` is always `not_assessed`, which says it did not look, not that nothing conflicts. A conflict exists only because the owner declared one, as a crosswalk row with `rel: conflicts` between two refs (`member:id`), `status: accepted`, a required `reason`, an optional `scope` (a `path_scope` list) and an optional `resolution` (`{decision: member:id, scope: [...]}`):
+
+```yaml
+- src: rules:conventions/no-malloc
+  rel: conflicts
+  dst: app:decisions/pool-allocator
+  status: accepted
+  origin: owner
+  reason: the Convention forbids malloc; the Decision requires it in the pool
+  scope: [src/engine/]
+  resolution: {decision: rules:decisions/engine-allocator, scope: [src/engine/]}
+```
+
+The relation is symmetric. A reported conflict names the affected paths and a `resolution_state`; `resolved` means only that an accepted owner decision is on record — the core does not read it, so read that decision before acting. A conflict whose rows are stale, or whose resolution does not cover every affected path, stays `unresolved`, and an unresolved conflict with a governing side makes the result incomplete. A `conflicts` row without a `reason` is refused when written and, if found in a file, is excluded and reported as `diagnostic:conflict_without_reason` (`invalid_relation`). In a single bundle there is no crosswalk, so `conflicts.declared` is `null` (not available), which is not the same as `[]` (none declared). No winner is ever picked by location, score or recency.
+
+**What an agent does with it.** Run it before the first edit of a subsystem, with every path you plan to touch (both sides of a rename). Read the `governing` matches with `okfy_show` (the `content_sha256` is the same value `okfy_show` returns, so a later change is detectable with `expect_sha256` or `okfy_fresh`). If `complete` is false — its reasons all concern whether a governing rule may be unseen, unmapped, stale or contradictory — **stop and ask the owner**; do not proceed on a partial answer. `advisory` matches are context. This is an advisory preflight, not enforcement: nothing in OKFy stops an edit, and the lookup grants no permission.
+
+Cheatsheet: `okfy preedit <bundle> src/engine/join.c src/util/` (CLI) or `okfy_preedit(paths=[...])` (MCP); declare scope with `path_scope:` in a concept's frontmatter; declare authority with `preedit.governing_types` in `meta/purpose.md`; declare a contradiction with a `conflicts` row in the workspace crosswalk.
+
 ## 10. The refinement loop
 
 A bundle is not written once and frozen. The moment agents start consuming it, they will find it wrong — a concept that drifted, a gap the extraction missed, an alias nobody thought of. That discovery is the single most valuable signal a knowledge base can produce, and it is also the most dangerous: the agent that noticed is mid-task, has write access to the same repo, and is one tool-call away from silently editing knowledge that other people's decisions depend on. "Please don't edit the finals" in a prompt is not a control. Trust is not a control.
 
-So OKFy routes every write through one of three channels, and lets the bundle owner pick which is open. When a consuming agent finds a problem, it does not touch the finals — it drops a full concept file into `proposals/` with `okfy propose`, carrying a small envelope that says what it wants (`create`/`update`/`delete`), which concept it targets, and why. Nothing in the live map moves. When *you*, the owner, want to change a concept directly, you use `okfy refine`: it edits the file, validates it, and commits — a fast path, but a deliberate, owner-driven one. And for embedded bundles that live inside a code repo under the `direct` policy, writes are just writes, reviewed by the same pull-request process that reviews the code around them. Three doors, one of them always the agent's, none of them a back door.
+So OKFy routes every write through one of three channels, and lets the bundle owner pick which is open. When a consuming agent finds a problem, it does not touch the finals — it drops a full concept file into `proposals/` with `okfy propose`, carrying a small envelope that says what it wants (`create`/`update`/`delete`), which concept it targets, and why. Nothing in the live map moves. When *you*, the owner, want to change a concept directly, you use `okfy refine`: it edits the file, validates it, and commits — a fast path, but a deliberate, owner-driven one. And for embedded bundles that live inside a code repo under the `direct` policy, writes are just writes, reviewed by the same pull-request process that reviews the code around them. Three doors, one of them always the agent's, none of them a back door. The agent's door is `okfy propose`; the owner may additionally open a narrow lane in `meta/purpose.md` — `direct: {types: [...]}` under `write_policy: proposals` — through which `okfy write` lands a concept of a listed type at once, and nothing else. Every unlisted type still goes through the proposal door. On the CLI `okfy write` of an unlisted type is refused (exit 2, `E_DIRECT_LANE`, or `E_DIRECT_DISABLED` when the bundle lists none) and writes nothing; the MCP tool `okfy_write` files a proposal instead (§13).
 
 What makes this enforcement rather than etiquette is that the core cannot intercept arbitrary file writes — so it moves the gate to the one place every change must pass: the git commit. A `proposals`-policy bundle carries a pre-commit hook that refuses any commit staging a final concept. Hand-edit a concept, `git commit`, and you get:
 
@@ -267,7 +326,7 @@ The gate that turns proposals into knowledge is `/okfy:review`. A human reads ea
 
 One more bridge needs tending. The vocabulary of the people asking questions drifts away from the vocabulary the bundle was built with — new slang, new instruments, new shorthand. `/okfy:lexicon` is the interview that keeps `meta/lexicon.md` current: it mines your recent language, proposes new aliases, and writes the reviewed additions back, so retrieval keeps matching what you actually say.
 
-Cheatsheet: `okfy propose` (agents file changes) → `/okfy:review` (owner accepts/rejects, CLI validates) is the loop; `okfy refine` is the owner's direct edit; `/okfy:lexicon` keeps the vocabulary bridge fresh.
+Cheatsheet: `okfy propose` (agents file changes; `okfy write` only for the types the owner listed under `direct.types`) → `/okfy:review` (owner accepts/rejects, CLI validates) is the loop; `okfy refine` is the owner's direct edit; `/okfy:lexicon` keeps the vocabulary bridge fresh.
 
 **Every CLI leaf declares whether it writes.** `okfy.commands.mutations.MUTATES` is an internal `{full subcommand path: bool}` table — `"review accept": True`, `"eval metrics": False`, and so on for all of it — kept honest by a test that walks the real argparse tree (fails on a missing or extra entry) and, for the commands it can cheaply exercise, proves every `False` leaf leaves a synthetic bundle byte-for-byte untouched. It is not a runtime gate and there is no `okfy mutates` command to query it — it exists so "does this write?" has one answer per verb instead of one guess per reader.
 
@@ -796,28 +855,42 @@ Everything so far assumed the agent runs the `okfy` CLI itself. Many do not — 
 
 The adapter is a **separate package**, on purpose. The MCP SDK carries real dependencies, and the core's whole discipline is that it stays PyYAML-only and portable — just markdown and git, no runtime. So the SDK weight lives entirely in `adapters/mcp/`; the core never learns MCP exists. An adapter is exactly the place a dependency is allowed to sit, precisely so the thing everyone imports does not have to.
 
-It exposes seven tools. Five are read: `okfy_query` (BM25 search → ranked snippets, running the same lexicon query expansion as the CLI — `expand` and `include_stale` default true, so an agent gets the bridged terms and sees stale hits marked without any extra work), `okfy_show` (one full concept by id — with a `section` heading to pull just one block, a `max_chars` cap for the rest, and a `sha256` of the concept file's bytes), `okfy_links` (a concept's inbound and outbound links, plus its external ones — any link with a URI scheme), `okfy_overview` (the index — the first thing an agent should read, so it discloses progressively instead of bulk-reading the map, with `type`, `max_items` / `max_chars` caps; the index text comes back as the exact slice `text[offset:offset+max_chars]` with `total_chars` and a `sha256` of the file's bytes, and when more remains `truncated` plus `next_offset` — pass it back as `offset` to continue, an `offset` past the end is an empty page, and a bad `offset` or `max_chars` is refused `E_OVERVIEW_PAGE`; there is no truncation marker inside the text. For a `--shard-index` bundle, `shard="<dir>"` reads the linked `index/<dir>.md` through the same `index` key, plus `shard`, and pages the same way — only names the resident index links are served, a shard is never a concept, and `okfy_show` on one refuses `E_SHOW_IS_SHARD` naming this call. `shard` refusals: `E_OVERVIEW_SHARD_UNKNOWN`, `E_OVERVIEW_SHARD_PATH` (separator/dot names, symlinks), `E_OVERVIEW_SHARD_MISSING`, `E_OVERVIEW_SHARD_NOT_GENERATED` (no generated-file marker), `E_OVERVIEW_SHARD_FLAT`, `E_OVERVIEW_SHARD_WORKSPACE`, `E_OVERVIEW_SHARD_TYPE`), and `okfy_fresh` (v0.24 — a read-only per-id freshness check; see below). Every capped response carries a `truncated` flag, so a remote agent can bound its own context honestly instead of blowing its window on one call. The sixth is a *write*, but a deliberately narrow one: `okfy_propose` drops a full concept into `proposals/` and nowhere else. The v0.4a write-gate makes that a guarantee, not a request — a tool call physically cannot touch a final concept — so a remote agent that spots a gap can file a fix over the wire, and a human still reviews every one through `okfy review`. The enrichment loop closes across a transport with the gate intact. There is deliberately no `okfy_validate` tool: validation is a maintainer's job, not a consumer's.
+It exposes eight tools. Six are read: `okfy_query` (BM25 search → ranked snippets, running the same lexicon query expansion as the CLI — `expand` and `include_stale` default true, so an agent gets the bridged terms and sees stale hits marked without any extra work), `okfy_show` (one full concept by id — with a `section` heading to pull just one block, a `max_chars` cap for the rest, and a `sha256` of the concept file's bytes), `okfy_links` (a concept's inbound and outbound links, plus its external ones — any link with a URI scheme), `okfy_overview` (the index — the first thing an agent should read, so it discloses progressively instead of bulk-reading the map, with `type`, `max_items` / `max_chars` caps; the index text comes back as the exact slice `text[offset:offset+max_chars]` with `total_chars` and a `sha256` of the file's bytes, and when more remains `truncated` plus `next_offset` — pass it back as `offset` to continue, an `offset` past the end is an empty page, and a bad `offset` or `max_chars` is refused `E_OVERVIEW_PAGE`; there is no truncation marker inside the text. For a `--shard-index` bundle, `shard="<dir>"` reads the linked `index/<dir>.md` through the same `index` key, plus `shard`, and pages the same way — only names the resident index links are served, a shard is never a concept, and `okfy_show` on one refuses `E_SHOW_IS_SHARD` naming this call. `shard` refusals: `E_OVERVIEW_SHARD_UNKNOWN`, `E_OVERVIEW_SHARD_PATH` (separator/dot names, symlinks), `E_OVERVIEW_SHARD_MISSING`, `E_OVERVIEW_SHARD_NOT_GENERATED` (no generated-file marker), `E_OVERVIEW_SHARD_FLAT`, `E_OVERVIEW_SHARD_WORKSPACE`, `E_OVERVIEW_SHARD_TYPE`), `okfy_fresh` (v0.24 — a read-only per-id freshness check; see below), and `okfy_preedit` (the rules that apply to the paths you are about to change, with an explicit `complete` verdict — `paths`, `root`, `limit`, `offset`; read-only and advisory, see *Pre-edit lookup* in §9). Every capped response carries a `truncated` flag, so a remote agent can bound its own context honestly instead of blowing its window on one call. The seventh is a *write*, but a deliberately narrow one: `okfy_propose` drops a full concept into `proposals/` and nowhere else. The v0.4a write-gate makes that a guarantee, not a request — a tool call physically cannot touch a final concept — so a remote agent that spots a gap can file a fix over the wire, and a human still reviews every one through `okfy review`. The enrichment loop closes across a transport with the gate intact. There is deliberately no `okfy_validate` tool: validation is a maintainer's job, not a consumer's.
 
-The seventh, `okfy_write`, is the one exception to that sentence, and only where the owner wrote it down. Some concept types are not worth a review queue — session notes, observations, logs — and several agents working at once need to see each other's writes now, not after the owner's next sitting. `meta/purpose.md` may therefore carry, under `write_policy: proposals`, an exception list: `direct: {types: [note, session-log]}`. A concept of a listed type is written at once (`channel: "direct"`); every other type, and every bundle with no list, still goes to `proposals/` through the same call (`channel: "proposal"`), so an agent never needs to know the policy. Nothing is locked while an agent thinks: the agent sends back the `sha256` `okfy_show` gave it as `expect_sha256` (`absent` to create), the check and the write happen in one step under the existing review lock, and a write against bytes that moved is refused `E_WRITE_BASE_MOVED` with the current `sha256` — show it again, redo the change, write again. What the lane does not relax: the injection and secret scans, the `sources:` check and the archetype schema are the same functions a proposal passes; the type cannot change (`E_DIRECT_RETYPE`), and neither can anything an owner decision wrote — `verified`, `generated`, the stale fields, `supersedes`/`superseded_by` (`E_DIRECT_OWNER_FIELD`); `meta/` is never in the lane, so the policy cannot rewrite itself. The ledger records each one as an `accept` row with `origin: agent-direct` and the agent, not the owner, as actor. The commit names the writer in git's own fields too: its message ends in an `Okfy-Actor: <actor>` trailer (`git log --format='%(trailers:key=Okfy-Actor,valueonly)'`), and for any actor but a `human:` one the commit's *author* is the actor (`claude:vasyl <claude-vasyl@okfy.invalid>`; the email is built from the actor's word characters only), so `git shortlog` and `git log --author` tell agents apart; the committer stays whoever runs the process, and `review accept`, `reject`, `dismiss` and `refine` name the owner's `human:` role in the trailer and keep the owner's git identity as author. An actor is one printable line of at most 255 characters (`E_PROPOSAL_ACTOR` otherwise, nothing written), so it cannot start a second trailer. `okfy write` is the same thing on the CLI, without the fallback. What it is not: authentication (an actor string is still a declaration) or a merge — the first writer wins and the second is refused, never merged, on purpose.
+The eighth, `okfy_write`, is the one exception to that sentence, and only where the owner wrote it down. Some concept types are not worth a review queue — session notes, observations, logs — and several agents working at once need to see each other's writes now, not after the owner's next sitting. `meta/purpose.md` may therefore carry, under `write_policy: proposals`, an exception list: `direct: {types: [note, session-log]}`. A concept of a listed type is written at once (`channel: "direct"`); every other type, and every bundle with no list, still goes to `proposals/` through the same call (`channel: "proposal"`), so an agent never needs to know the policy. Nothing is locked while an agent thinks: the agent sends back the `sha256` `okfy_show` gave it as `expect_sha256` (`absent` to create), the check and the write happen in one step under the existing review lock, and a write against bytes that moved is refused `E_WRITE_BASE_MOVED` with the current `sha256` — show it again, redo the change, write again. What the lane does not relax: the injection and secret scans, the `sources:` check and the archetype schema are the same functions a proposal passes; the type cannot change (`E_DIRECT_RETYPE`), and neither can anything an owner decision wrote — `verified`, `generated`, the stale fields, `supersedes`/`superseded_by` (`E_DIRECT_OWNER_FIELD`); `meta/` is never in the lane, so the policy cannot rewrite itself. The ledger records each one as an `accept` row with `origin: agent-direct` and the agent, not the owner, as actor. The commit names the writer in git's own fields too: its message ends in an `Okfy-Actor: <actor>` trailer (`git log --format='%(trailers:key=Okfy-Actor,valueonly)'`), and for any actor but a `human:` one the commit's *author* is the actor (`claude:vasyl <claude-vasyl@okfy.invalid>`; the email is built from the actor's word characters only), so `git shortlog` and `git log --author` tell agents apart; the committer stays whoever runs the process, and `review accept`, `reject`, `dismiss` and `refine` name the owner's `human:` role in the trailer and keep the owner's git identity as author. An actor is one printable line of at most 255 characters (`E_PROPOSAL_ACTOR` otherwise, nothing written), so it cannot start a second trailer. `okfy write` is the same thing on the CLI, without the fallback: for a type the owner did not list it writes nothing and exits 2 (`E_DIRECT_LANE`, or `E_DIRECT_DISABLED` when the bundle lists no direct types), and you file `okfy propose` yourself. Neither door works on a workspace: the MCP tool answers `E_WRITE_WORKSPACE` (`okfy_propose` `E_PROPOSE_WORKSPACE`), and the CLI reads a workspace directory as a bundle that lists no direct types, so `okfy write` there is `E_DIRECT_DISABLED` (exit 2); aim both at the member bundle's own path. What it is not: authentication (an actor string is still a declaration) or a merge — the first writer wins and the second is refused, never merged, on purpose.
 
 One server serves exactly one bundle — the path is a launch argument, and that one server is one access boundary, matching private-by-default. To expose several bundles at once, point it at a **workspace** path instead: the adapter auto-detects the federation and the same tools answer across members, constraints pulled in, with no MCP-specific machinery. The default transport is stdio — one process per agent session, local-first. A long-running HTTP server for many clients at once is opt-in (`--http`, below) and refuses to start without a way to tell who is calling.
 
-Setup is a paste, never an edit. OKFy will *print* you a correct config snippet — `okfy-mcp config <path> --client claude-code` — but it never writes to your client's config file, because those formats drift and would break silently. You paste the block into `.mcp.json`, restart the client, and the six `okfy_*` tools appear.
+Setup is a paste, never an edit. OKFy will *print* you a correct config snippet — `okfy-mcp config <path> --client claude-code` — but it never writes to your client's config file, because those formats drift and would break silently. You paste the block into `.mcp.json`, restart the client, and the eight `okfy_*` tools appear.
 
 Cheatsheet: `uv tool install ./adapters/mcp` installs `okfy-mcp`; `okfy-mcp serve <path>` runs the stdio server for a bundle or workspace, and `okfy-mcp serve <path> --http --token-file <file>` one HTTP server for many clients behind a bearer token (or `--oidc-issuer <url> --oidc-audience <id>`, both repeatable: JWTs from OpenID issuers, the token's subject as the actor, `okfy:read`/`okfy:write` as scopes); `okfy-mcp config <path> --client claude-code` prints the snippet you paste into your client.
 
 ### One server for many clients: `--http` (contributed, vsov/okfy#7)
 
-`okfy-mcp serve <path> --http` serves the same seven tools at `http://HOST:PORT/mcp` (streamable HTTP, stateless, JSON responses) to every client that may reach it; a write by one is found by the next client's search on its next call. It binds `127.0.0.1` unless told otherwise and speaks plain HTTP — TLS, and `--public-url https://host/mcp` for the `Host` header behind a reverse proxy, are the proxy's job. There is no unauthenticated mode. Who may call is decided one of two ways, and the two are exclusive:
+`okfy-mcp serve <path> --http` serves the same eight tools at `http://HOST:PORT/mcp` (streamable HTTP, stateless, JSON responses) to every client that may reach it; a write by one is found by the next client's search on its next call. It binds `127.0.0.1` unless told otherwise and speaks plain HTTP — TLS, and `--public-url https://host/mcp` for the `Host` header behind a reverse proxy, are the proxy's job. There is no unauthenticated mode. Who may call is decided one of two ways, and the two are exclusive:
 
 - **One shared token.** `--token-file <file>` (or `OKFY_MCP_TOKEN_FILE`): one line, at least 32 characters, no whitespace, read from a file and never from a flag. A missing, unreadable or short token refuses to start, `E_MCP_HTTP_TOKEN`; a request without `Authorization: Bearer <token>` is `401` with `E_MCP_UNAUTHORIZED` before the MCP layer sees it. Every holder is equal and the `actor` of a write is whatever the client typed. The file's permissions and the token's entropy are not checked: `openssl rand -hex 32 > <file>; chmod 600 <file>` is the owner's part.
-- **Identities from an OpenID issuer.** `--oidc-issuer <url> --oidc-audience <client id>` (each repeatable) takes JWT access tokens from OpenID issuers (Authentik, Keycloak, …): RS256 only, signed by a key the issuer publishes, `iss` one of the issuers, `aud` one of the audiences, not expired (no clock-skew allowance). Each issuer's discovery document is read once at start; a wrong URL, no audience, or `--token-file` as well refuses to start, `E_MCP_OIDC_ISSUER`. `okfy:read` is needed to call anything; `okfy:write` for `okfy_write` and `okfy_propose`, else `E_MCP_FORBIDDEN` and nothing is written. The **actor** of a write is then the token's `okfy_actor` claim, else its `sub` (`oidc:<sub>` when that is not already an OKF actor string): an identity the issuer signed, not a declaration, and the `actor` argument is ignored. It must be one printable line of at most 255 characters, else `E_PROPOSAL_ACTOR` and nothing is written; a tool call that reaches a server run this way without a verified token is `E_MCP_UNAUTHORIZED`. `--oidc-write-group <g>` makes `okfy:write` count only for users whose `groups` claim lists `g` (a non-member loses every `okfy:write` scope on the token, however often it is repeated); `--oidc-read-group <g>` closes the bundle to everyone else (`403`). `--oidc-issuer-prefix <url>` additionally trusts every issuer whose URL is a plain path below that prefix, as it turns up — the shape an Authentik gives MCP clients that registered themselves — **without an audience check**: the signature is verified against that issuer's own keys, but nothing ties the token to this bundle except the `okfy:read`/`okfy:write` scope names. Anyone the issuer will let register a client and log a user in gets a token that passes, so pair the prefix with `--oidc-read-group`. **Revocation is the issuer's, not this server's.** A signing key the issuer stops publishing stays accepted until the cached key set is re-read — at most its cache lifetime (300 s in PyJWT), sooner when a token names a `kid` the cached set lacks (newer PyJWT releases re-read for that at most once every 30 s); a JWT already issued stays valid until its `exp`; individual token revocation is not offered, so keep access tokens short-lived at the issuer.
+- **Identities from an OpenID issuer.** `--oidc-issuer <url> --oidc-audience <client id>` (each repeatable) takes JWT access tokens from OpenID issuers (Authentik, Keycloak, …): RS256 only, signed by a key the issuer publishes, `iss` one of the issuers, `aud` one of the audiences, not expired (no clock-skew allowance). Each issuer's discovery document is read once at start; a wrong URL, no audience, or `--token-file` as well refuses to start, `E_MCP_OIDC_ISSUER`. `okfy:read` is needed to call anything; `okfy:write` for `okfy_write` and `okfy_propose`, else `E_MCP_FORBIDDEN` and nothing is written. The **actor** of a write is then the token's `okfy_actor` claim, else its `sub` (`oidc:<sub>` when that is not already an OKF actor string): an identity the issuer signed, not a declaration, and the `actor` argument is ignored. It must be one printable line of at most 255 characters, else `E_PROPOSAL_ACTOR` and nothing is written; a tool call that reaches a server run this way without a verified token is `E_MCP_UNAUTHORIZED`. `--oidc-write-group <g>` makes `okfy:write` count only for users whose `groups` claim lists `g` (a non-member loses every `okfy:write` scope on the token, however often it is repeated); `--oidc-read-group <g>` closes the bundle to everyone else (`403`). `--oidc-issuer-prefix <url>` additionally trusts every issuer whose URL is a plain path below that prefix, as it turns up — the shape an Authentik gives MCP clients that registered themselves — **without an audience check**: the signature is verified against that issuer's own keys, but nothing ties the token to this bundle except the `okfy:read`/`okfy:write` scope names. Anyone the issuer will let register a client and log a user in gets a token that passes, so pair the prefix with `--oidc-read-group`. **Revocation is the issuer's, not this server's.** A token is accepted only while (a) it is signed by a key in the issuer's JWKS as cached here and (b) it is before its `exp`. Retiring a key ends acceptance of every token that key signed once the cached key set is re-read — at most its cache lifetime (300 s in PyJWT), sooner when a token names a `kid` the cached set lacks (newer PyJWT releases re-read for that at most once every 30 s). There is no per-token revocation (no deny-list): to cut off one token without retiring its key, wait for its `exp`, so keep access tokens short-lived at the issuer.
 
 The server keeps no session trace over HTTP, so a proposal or direct write carries no `observed` block. The identity is only as good as the issuer: this is the first place an actor string in the ledger is verified, and it is verified by a party OKFy does not run.
 
 ### Fair-share output budgets (v0.24)
 
 `okfy_query`'s hit descriptions, and a multi-id `okfy_show`'s concept bodies, share ONE `max_tokens` token budget via water-filling instead of a flat per-item cap — short items pass through untouched, leftover budget flows to long ones, and a cut item keeps its `~70%` head / `~30%` tail around an explicit "N tokens omitted" marker. What the adapter cuts, it says it cut: shown + omitted always equals what the call started with, never a silent drop. A hit's id+title is never dropped for budget reasons — only its `description` — and it gains `view` (`full`\|`truncated`) plus `matched` (the query's terms, stopwords dropped and lexicon expansion included, that the core found anywhere in the hit, body included; `via_lexicon` is the part that came from expansion); `okfy_show(concept_ids=[...])` names ids it could not fit as `omitted` and unknown ones as `missing`, each shown concept carrying up to 5 `neighbours` (`{id, description}`, no bodies). Zero query hits get a one-word `empty_reason`. Every result carries a constant `notice` that retrieved content is data, not instructions.
+
+### Source passages (opt-in, v0.31): `--passages`
+
+`okfy query <bundle> <text> --passages [--passage-tokens N]`, and on MCP `okfy_query(..., passages=true, passage_tokens=N)`, add source text to the top 3 hits shown (on MCP, the hits `max_tokens` shows). The mode is off by default; without the flag the output is unchanged. On the CLI, stdout then becomes one JSON object (`results`, `passages_omitted`, `passage_budget`, `passages_notice`) instead of the bare result list. MCP adds the same keys to its result.
+
+Each of those hits gets a `fragment`: `concept_id`, `path`, `sha256` (of the concept file's raw bytes), `lines` (`[start, end]`, 1-based and inclusive, in the LF-normalized text), `heading_path` (the headings above the extract's first line, `[]` before the first heading), `spans_sections: true` when a heading line lies inside the extract after its first line (absent otherwise), and `extract`, the exact source text of those lines with nothing inserted. `passage_state` is `quoted` (the whole section, or a whole short concept), `truncated` (part of it, cut at a paragraph, list or code-block boundary, or inside one unit larger than the whole budget; the omitted lines are not shown) or `none_selected`, which carries a `passage_reason` such as `no_block_matched` or `budget`. `passages_omitted` lists the hits whose block did not fit the budget. `source_changed_since_index: true` marks a fragment when a source changed during the request.
+
+`--passage-tokens` (MCP `passage_tokens`; ignored without `--passages`) is an integer from 100 to 8000, default 1200. It is a hard limit on the summed tokens of the fragments in one response, counted with the method named in `passage_budget.method`: `heuristic:words/0.75`, or `tiktoken:cl100k_base` when that package is installed. Neither is a model tokenizer. The size of the whole response is an estimate only. The existing MCP `max_tokens` keeps its meaning and does not apply to fragments. Nothing else is dropped to fit the budget: the hit list, `expanded_query`, lexicon notes (including not-covered notes), stale marks, `empty_reason`, `way_out`, `notice` and the `max_tokens` `omitted` list stay as they were.
+
+A fragment shares query terms with the question. That does not prove the bundle answers it: `passage_terms` shows the overlap and nothing more. Read the whole concept when the answer depends on exceptions, conditions or steps.
+
+On a workspace, `passages` is refused with `E_PASSAGES_WORKSPACE` before any query runs: point the server at a member bundle, or call again without `passages` for the federated result. A budget that is not an integer in the 100–8000 range is refused with `E_PASSAGE_BUDGET` before any concept file is read.
+
+Experimental. Whether passages save tokens is not established: a live comparison is pending, so this is not a cost claim.
 
 ### What the adapter observes
 
@@ -933,12 +1006,29 @@ that is mostly covered.
 
 An agent that learns something while working — a confirmed root cause, a
 decision and its reasons, a constraint, a workaround that reproduces — can leave
-it in the bundle for the next agent. It never writes the bundle directly. It
-files a proposal, and the owner accepts or rejects it:
+it in the bundle for the next agent. It never edits a concept file by hand. It
+files a proposal, and the owner accepts or rejects it — except for a concept
+type the owner listed under `direct.types` (see *The direct lane* below), which
+`okfy write` lands at once:
 
     agent: okfy query → work → okfy propose --target <id> --as … --evidence …
     owner: okfy review list → okfy review accept | reject
     next agent, next session: okfy query finds it
+
+**The direct lane, where the owner opened it.** `meta/purpose.md` may list
+`direct: {types: [...]}` under `write_policy: proposals` (`okfy validate` checks
+the block; `E_DIRECT_POLICY` otherwise). A concept of a listed type is written
+at once by `okfy write <bundle> <id> --as <actor> --expect <sha256|absent>
+--from <file>` (MCP `okfy_write`), and the result says `persisted: true` with
+`channel: "direct"`. Every other type stays a proposal, accepted only by the
+owner. The two surfaces answer an unlisted type differently: the CLI refuses
+and writes nothing (exit 2, `E_DIRECT_LANE`, or `E_DIRECT_DISABLED` when the
+bundle lists no direct types), the MCP tool files the proposal for you
+(`channel: "proposal"`). A workspace takes no direct write: MCP `okfy_write`
+is `E_WRITE_WORKSPACE`, and the CLI reads a workspace directory as a bundle
+with no direct types (`E_DIRECT_DISABLED`, exit 2) — write to a member
+bundle's own path. A packaged `AGENTS.md` names the listed types in its
+`okfy:direct` block.
 
 **Who.** `--as` is required and must be an OKF v0.2 actor: `<producer>/<version>`
 (`claude-code/1.0`) or `<prefix>:<id>` (`human:alice`). It is recorded as
@@ -1002,7 +1092,7 @@ it is inference). "I checked" is not evidence, and a proposal can never carry
 | `E_PROPOSAL_ACTOR` | missing or malformed actor | `--as <producer>/<version>` |
 | `E_PROPOSAL_EVIDENCE` | unknown kind, missing ref, or a `verified` field | `--evidence <kind>=<ref>` |
 | `E_PROPOSAL_INJECTION` | the text reads as instructions to an agent | none for the agent; the owner may `okfy refine` |
-| `E_PROPOSAL_REJECTED` | the owner already rejected this exact text, a reworded version of it, or a concept it matches was deleted | `--reopen "<what changed>"`, with new evidence |
+| `E_PROPOSAL_REJECTED` | the owner already rejected this text (or a cosmetic variant: case, whitespace, emphasis, trailing punctuation), or a concept holding it was deleted; a genuine paraphrase is not recognised | `--reopen "<what changed>"`, with new evidence |
 | `E_PROPOSAL_DUPLICATE` | a create whose title already names a concept | `--extends <id>` |
 | `E_PROPOSAL_SECRET` | the text carries a secret-shaped value (API key, token, private key) | remove it and refer to where it lives (env var name, vault path) |
 | `E_MEMORY_LINE` | `meta/memory.jsonl` has an unreadable line; a direct write refuses on it too, before it changes anything | the owner repairs it; `okfy validate` lists it |
@@ -1011,7 +1101,7 @@ it is inference). "I checked" is not evidence, and a proposal can never carry
 | `E_GAP_ROW_EXISTS` | accepting a gap as not-covered would duplicate an existing lexicon row for that exact term | reject the proposal — the row is already there |
 | `E_PATCH_SHAPE` | `--patch-file` is not a non-empty list of `{old, new, count}` objects | fix the patch JSON |
 | `E_PATCH_COUNT` | a hunk's declared `count` does not match how many times `old` occurs in the target's current body | `okfy show` the concept, fix the hunk or its `count` |
-| `E_PROPOSAL_SOURCE` | a proposed `sources:` entry is not a file of this bundle's corpus (checked when a checker is available) | `okfy show <id>` for a real anchor, or `--evidence external-source=<url>` with no corpus source |
+| `E_PROPOSAL_SOURCE` | a proposed `sources:` entry is not a file of this bundle's corpus (checked when a checker is available) | `okfy show <bundle> <id>` for a real anchor, or `--evidence external-source=<url>` with no corpus source |
 | `E_BATCH_ENTRY` | an `--batch` JSONL entry could not even be parsed (malformed JSON, not an object, an unknown key) | fix that entry per the message, which names the line number |
 | `E_RESERVED_DIR` | a write target (`create`'s `--target`, `supersede`'s `--new-id`, `--extends`) is relative and `..`-free but its first path segment names a reserved/generated directory (`meta`, `proposals`, `drafts`, or `okfy package`'s own `index`/`protocols`) | choose another directory, e.g. `<dir>-notes/` |
 
@@ -1109,13 +1199,15 @@ first, then accept again. `supersede` is never refused this way: the old
 concept stays in the bundle, so the expectation still finds it, only flagged
 stale.
 
-**Rejection and deletion survive rewording.** `E_PROPOSAL_REJECTED` compares
+**Rejection and deletion survive cosmetic rewording, not paraphrase.** `E_PROPOSAL_REJECTED` compares
 two fingerprints of the text, not one: the exact bytes, and a normalized
 `match_sha256` that folds away case, whitespace, markdown emphasis and
 trailing punctuation. A rejected claim re-cased or re-wrapped is still
 refused; so is proposing the same content a deleted concept once held —
 that refusal names who deleted it and when. `--reopen` is the way out of
-both.
+both. A genuine paraphrase of a rejected claim is a different text and is not
+detected: do not re-file a rejected claim in other words — reopen it with new
+evidence, or leave it.
 
 **Near-duplicate warning, never a refusal.** A `create` whose title is close
 to an existing concept's (same type, title-token overlap), or whose alias
@@ -1188,7 +1280,7 @@ full discipline text this pointer used to carry inline measured 21.7–41% of
 the resident core on the smallest real bundles. The full text — search-first,
 evidence kinds, `--extends`, plus the v0.24 additions (gap/flag/supersede,
 search the user's own wording before rewriting it, `okfy fresh` instead of a
-blind re-read) — moved to a non-resident packaged file, `protocols/memory.md`,
+blind re-read), and the direct lane with its CLI-versus-MCP difference — moved to a non-resident packaged file, `protocols/memory.md`,
 read on demand instead of paid for every turn. Both are written by `okfy
 package`; the protocol file disappears on repackage if the policy no longer
 allows proposals. A bundle that lists `direct.types` gets one more block, between
@@ -1280,3 +1372,135 @@ the date passes, `okfy validate` reports `W_REVIEW_DUE` and
 touches `stale`. Staleness stays what it has been since v0.5: the owner's
 ruling, with a reason, that a text is not to be trusted as current. An expired
 reminder proves nothing about the text; only a person reading it can.
+
+## Memory-only bundle: a minimal recipe
+
+Not every bundle starts from a corpus worth extracting. Sometimes you want
+only a place where an agent's decisions and standing rules survive the
+session. That is a *memory-only bundle*: it has a tiny corpus (the evidence
+the memory points at), no extraction run, and its concepts arrive one at a
+time. Everything below uses commands that already exist; nothing is a special
+mode. `scripts/memory-recipe.sh <empty-work-dir>` runs the same commands in a
+scratch directory against the installed `okfy` and checks every result, so it
+is the executable version of this page.
+
+**Step 1 — make the bundle.** A bundle needs a corpus path to point at, even a
+small one: the files a concept's `sources:` can cite.
+
+```sh
+okfy init "$BUNDLE" --corpus "$CORPUS" --write-policy proposals
+```
+
+*Proves:* the bundle exists as a git repository whose `write_policy` is
+`proposals`, so by default nothing an agent files becomes a concept without
+the owner.
+
+**Step 2 — the owner opens one lane.** `init` writes no extraction plan, so
+the owner declares the types this memory holds in `meta/extraction-plan.md`
+(a `types:` map plus a `layout:` map; this recipe uses the `codebase-map`
+archetype, which brings the `Decision` and `Convention` schemas). Then, in
+`meta/purpose.md`, the owner lists the one type an agent may write at once
+under `direct.types`:
+
+```yaml
+direct:
+  types: [Decision]
+```
+
+and commits both files by hand (`git -C "$BUNDLE" commit --no-verify`; the
+flag is the deliberate owner bypass of the generated pre-commit hook).
+*Proves:* the lane is the owner's declaration, in a tracked file. `okfy
+validate` checks the block (`E_DIRECT_POLICY` otherwise).
+
+**Step 3 — record an owner decision through the direct lane.**
+`okfy write` has no evidence flag: the evidence is part of the concept (its
+`sources:` and body), and `--note` goes to the bundle's `log.md`.
+
+```sh
+okfy write "$BUNDLE" decisions/cursor-paging --as human:owner --expect absent --from cursor-paging.md --note "owner decision; evidence: test run r-17"
+```
+
+*Proves:* the result says `persisted: true` and `channel: "direct"`, the
+concept file is in the bundle at once, and `meta/memory.jsonl` has a row with
+`origin: agent-direct`. (The ledger names the channel, not the person: a direct
+write is recorded that way whoever the `--as` actor is.)
+
+**Step 4 — every other type stays a proposal.** The CLI refuses a type the
+owner did not list; the agent files a proposal instead, and the owner accepts.
+
+```sh
+okfy write "$BUNDLE" conventions/list-cursor --as claude-code/1.0 --expect absent --from list-cursor.md
+okfy propose "$BUNDLE" --target conventions/list-cursor --action create --as claude-code/1.0 --from list-cursor.md --evidence test-run=r-17 --note "agent proposal"
+okfy review accept "$BUNDLE" "$PROPOSAL" --as human:owner
+```
+
+*Proves:* the first command exits 2 with `E_DIRECT_LANE` and writes nothing;
+the proposal is not a concept until `review accept`, which prints the target
+it wrote. `$PROPOSAL` is the `proposal` id `okfy propose` printed. (The MCP
+tool `okfy_write` differs only here: for an unlisted type it files the
+proposal for you.)
+
+**Step 5 — package.**
+
+```sh
+okfy package "$BUNDLE"
+```
+
+*Proves:* `index.md`, `AGENTS.md`, `README.md`, `protocols/memory.md` and the
+retrieval cache exist, `index.md` lists both concepts, and `AGENTS.md` carries
+an `okfy:direct` block naming `Decision`.
+
+**Step 6 — a fresh process finds both.** Run these from a new shell, with
+none of the previous variables set beyond the path:
+
+```sh
+okfy query "$BUNDLE" "cursor paging"
+okfy show "$BUNDLE" decisions/cursor-paging
+okfy show "$BUNDLE" conventions/list-cursor
+```
+
+*Proves:* the memory lives in the bundle, not in the session that wrote it:
+both concepts are ranked, and `show` returns the decision with its evidence.
+
+**Step 7 — personal memory stays in its project.** A `personal` workspace
+member surfaces a concept only when its `applies_to` names the workspace's
+`project_key`. Make a second bundle holding two concepts that contain the same
+needle word, one with `applies_to: [this-project]` and one with
+`applies_to: [other-project]`, index it, and federate:
+
+```sh
+okfy init "$PERSONAL" --corpus "$PCORPUS"
+okfy index "$PERSONAL"
+okfy workspace init "$WS" --member knowledge:main="$BUNDLE" --member personal:me="$PERSONAL" --project-key this-project
+okfy query "$WS" zephyrquartz
+```
+
+*Proves:* the workspace answer contains the `this-project` concept (the
+control) and not the `other-project` one, and carries the note `personal scope
+this-project — 1 of 2 concepts in scope`. The recipe also queries the
+personal bundle directly to show the withheld concept does match the needle,
+so the absence is the scope and not a bad query. Nothing here is access
+control; see *Personal memory, scoped and fail-closed*.
+
+**Step 8 — package again, and know what it rewrites.**
+
+```sh
+okfy package "$BUNDLE"
+```
+
+*Proves:* `AGENTS.md` is generated *whole* on every package. The
+`<!-- okfy:memory -->` and `<!-- okfy:direct -->` markers delimit generated
+blocks inside that generated file; they are not a place for your own text, and
+a line added to `AGENTS.md` is gone after the next `okfy package`. Files under
+`index/` and `protocols/` open with `<!-- okfy:generated … -->`, the mark that
+lets `package` tell its own output from a file it did not write. The owner's
+place for a standing instruction is the body of `meta/purpose.md`: `AGENTS.md`
+tells every agent to read it first, and `package` never writes it. The recipe
+adds an owner line there, packages again, and checks that the line, the
+markers and both concepts survive while a hand edit to `AGENTS.md` does not.
+
+**What this does not show.** It shows that the mechanics work on the installed
+commands, with synthetic text. It does not show that the decisions an agent
+files are right, that the owner reviews proposals carefully, or that the
+corpus holds anything: a memory-only bundle is as good as its owner's
+acceptance discipline.

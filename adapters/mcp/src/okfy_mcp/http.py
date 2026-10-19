@@ -2,7 +2,7 @@
 
 stdio is one process per agent session on the same machine. This is the other
 shape: one long-running process on a host, reached over HTTP by every client,
-the same seven tools, the same bundle, every client seeing every other's
+the same eight tools, the same bundle, every client seeing every other's
 writes on its next call. Who may call is decided in one of two ways:
 
 `--token-file`: one shared token (`BearerToken`). Read from a FILE, never a
@@ -204,8 +204,11 @@ class OidcVerifier:
         # Cloudflare (in front of most issuers) answers 403; name the client.
         # cache_keys stays off: PyJWT's per-key cache has no expiry, so a key
         # the issuer stopped publishing would stay trusted for the process's
-        # life. The JWKS-set cache (cache_jwk_set, 300 s) is bounded and kept;
-        # an unknown kid re-reads the set (newer PyJWT: at most every 30 s).
+        # life, and every token it signed with it, whatever that token's exp.
+        # The JWKS-set cache (cache_jwk_set, 300 s) is bounded and kept; an
+        # unknown kid re-reads the set (newer PyJWT: at most every 30 s). A
+        # token is accepted only while its key is in the cached set AND before
+        # its exp; there is no per-token revocation.
         return jwt.PyJWKClient(jwks_uri, cache_keys=False, timeout=10,
                                headers={"User-Agent": "okfy-mcp"})
 

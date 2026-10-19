@@ -373,6 +373,7 @@ MEMORY_PROTOCOL = """# Memory: before and after a task
   test-run, owner-decision, external-source, agent-inference.
 - Something is remembered only when propose returned a proposal id; it is
   accepted only after `okfy review accept`. Refusal codes name their way out.
+  The one exception is the owner's direct lane (below).
 
 ## v0.24 additions
 
@@ -387,6 +388,36 @@ MEMORY_PROTOCOL = """# Memory: before and after a task
 - **Check freshness, don't re-read.** Before relying on a concept read earlier
   in a long session, `okfy fresh` (MCP: `okfy_fresh`) against its earlier
   `sha256` instead of re-fetching it.
+
+## The direct lane (only where the owner opened it)
+
+`meta/purpose.md` may list `direct: {types: [...]}` under `write_policy:
+proposals`; the bundle's `AGENTS.md` then ends with an `Exception:` line naming
+those types. Without that line, every write is a proposal.
+
+- **A listed type** is written at once, without review: `okfy write <bundle>
+  <id> --as <actor> --expect <sha256|absent> --from <file>` (or `--patch-file
+  <hunks.json>`; MCP: `okfy_write`). `--expect` is the `sha256` of the file as
+  you read it (`okfy_show` returns it; `absent` creates). Success is
+  `persisted: true, channel: "direct"` with the new file's `sha256`; a file that
+  moved since is `E_WRITE_BASE_MOVED` — read it again, redo the change, write
+  again. The injection, secret, `sources:` and schema checks of a proposal
+  still apply, and the `type` and the fields an owner decision wrote cannot
+  change.
+- **Every other type stays a proposal**, live only after the owner's `okfy
+  review accept`. When you write one anyway the two surfaces differ: the CLI
+  `okfy write` writes nothing and exits 2 (`E_DIRECT_LANE`, or
+  `E_DIRECT_DISABLED` when the bundle lists no direct types), so use `okfy
+  propose`; MCP `okfy_write` files the proposal for you and returns `channel:
+  "proposal"` — waiting for the owner, not live.
+- **A workspace takes no direct write.** MCP `okfy_write` on a workspace is
+  `E_WRITE_WORKSPACE`; the CLI reads a workspace directory as a bundle that
+  lists no direct types (`E_DIRECT_DISABLED`). Write to the member bundle's own
+  path.
+- **A rejection blocks the same text and its cosmetic variants** (case,
+  whitespace, emphasis, trailing punctuation), not a genuine paraphrase. Do not
+  re-file a rejected claim in other words; with new evidence use `--reopen
+  "<what changed>"`.
 """
 
 # v0.24 (a), rendered only when the bundle is packaged `--shard-index`: the

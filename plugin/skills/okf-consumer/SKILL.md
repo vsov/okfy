@@ -33,7 +33,14 @@ when that file is missing or you need a refresher:
 6. **Write only through the sanctioned door.** Never edit concept files
    directly (the bundle's pre-commit hook refuses it). Suggest changes with
    `okfy propose <bundle> --as <actor> --target <id> --action update
-   --note "<why>" --from <file>` — a human reviews them.
+   --note "<why>" --from <file>` — a human reviews them. The one exception is
+   a type the owner opened: where `meta/purpose.md` lists `direct: {types:
+   [...]}` (the bundle's `AGENTS.md` then carries an `Exception:` line naming
+   them), a concept of that type is written at once, without review, with
+   `okfy write <bundle> <id> --as <actor> --expect <sha256|absent> --from
+   <file>` (MCP: `okfy_write`; the `sha256` is the one `okfy_show` returned,
+   `absent` creates). Any other type stays a proposal. See "The direct lane"
+   below for what happens when you guess wrong.
 7. **Cite concept ids** in your answers so the user can verify.
 8. **Could not answer from the bundle?** File a gap with the user's own
    wording: `okfy propose <bundle> --as <actor> --action gap --query "<text>"
@@ -48,8 +55,9 @@ when that file is missing or you need a refresher:
     `--dry-run` previews without writing; `--partial` files the entries that
     passed even if others were refused. This is CLI-only (no MCP tool).
 11. **`review accept`/`review reject` are the owner's decision, not yours.**
-    Do not run them even if you can — filing a proposal (steps 6/8/9/10) is
-    as far as an agent's write access goes; the owner reviews and accepts.
+    Do not run them even if you can — filing a proposal (steps 6/8/9/10), or
+    writing a type the owner listed under `direct.types`, is as far as an
+    agent's write access goes; the owner reviews and accepts everything else.
 
 ## Before the task
 
@@ -105,8 +113,10 @@ Then:
    is not evidence — point at what you checked.
 3. **Report only what the tool confirmed.** Something is remembered when
    `okfy propose` printed a proposal id (MCP: `persisted: true`). It is
-   *accepted* only after the owner runs `okfy review accept`. Never tell the
-   user a fact was saved on any other basis.
+   *accepted* only after the owner runs `okfy review accept`. A direct write
+   is live when `okfy write` (MCP: `okfy_write`) returns `persisted: true`
+   with `channel: "direct"`; `channel: "proposal"` means it was only filed.
+   Never tell the user a fact was saved on any other basis.
 4. **Retiring, not erasing.** If new evidence replaces an existing concept's
    conclusion rather than merely updating it, use `--action supersede
    --target <old-id> --new-id <new-id>` — the old concept stays, flagged
@@ -131,7 +141,33 @@ A refusal names its way out — follow it rather than rephrasing to get past it:
 If you are proposing an explicit rollback rather than a forward edit, `--action
 update --reverts <git-sha>` records which sha it reverts to.
 
+## The direct lane
+
+Only a type the owner listed under `direct.types` in `meta/purpose.md` is
+written at once; the owner can change the list, so read the bundle's
+`AGENTS.md` (or `meta/purpose.md`) instead of assuming. Search first, as for a
+proposal, and write against the `sha256` you read: a file that moved since is
+`E_WRITE_BASE_MOVED` (`okfy_show` it again, redo the change, write again).
+A direct write passes the same injection, secret, `sources:` and schema checks
+a proposal does, and cannot change a concept's `type` or the fields an owner
+decision wrote. The two surfaces differ for any other type:
+
+- **CLI:** `okfy write` writes nothing and exits 2 with `E_DIRECT_LANE` (or
+  `E_DIRECT_DISABLED` when the bundle lists no direct types). Use `okfy
+  propose`.
+- **MCP:** `okfy_write` files a proposal for you and returns `channel:
+  "proposal"` — the text is waiting for the owner, not live.
+- **Workspace:** `okfy_write` is refused (`E_WRITE_WORKSPACE`); the CLI treats
+  a workspace directory as a bundle that lists no direct types
+  (`E_DIRECT_DISABLED`). Point either at the member bundle's own path.
+
+A rejection blocks the same text again, and only its cosmetic variants (case,
+whitespace, emphasis, trailing punctuation); it does not recognise a genuine
+paraphrase. That is no licence to re-file a rejected claim in other words:
+with new evidence, use `--reopen "<what changed>"`; without it, leave it.
+
 The before/after discipline is adapted from the OKF Agent Memory Convention
 (https://github.com/okf-memory/okf-agent-memory, `docs/CONVENTION.md`, MIT).
 OKFy borrows the lifecycle, not the tooling: writes still go through proposals
-and the owner's review.
+and the owner's review, except for the types the owner listed under
+`direct.types`.

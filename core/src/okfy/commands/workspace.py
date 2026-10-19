@@ -34,5 +34,5 @@ def cmd_workspace(a) -> int:
 
 
 def cmd_link_candidates(a) -> int:
-    _print([r.__dict__ for r in candidates(Workspace.load(a.dir))])
+    _print([r.as_dict() for r in candidates(Workspace.load(a.dir))])
     return 0
