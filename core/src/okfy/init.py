@@ -1,7 +1,10 @@
 import datetime
+import errno
 import hashlib
 import json
 import os
+import re
+import stat
 from pathlib import Path
 
 from okfy.bundle import is_bundle_dir
@@ -38,8 +41,17 @@ def _git(bundle: Path, *args) -> None:
 
 
 def _corpus_git_sha(corpus: Path) -> str | None:
-    r = run_git(corpus, "rev-parse", "HEAD", capture_output=True, text=True)
-    return r.stdout.strip() if r.returncode == 0 else None
+    # Bytes, decoded only after the exit status (R23-2): text=True decodes with
+    # the locale and replaces bad bytes, so a non-ASCII stderr/stdout could be
+    # read as a value. A SHA is ASCII hex; anything else is not one.
+    r = run_git(corpus, "rev-parse", "HEAD", capture_output=True)
+    if r.returncode != 0:
+        return None
+    try:
+        sha = r.stdout.decode("ascii").strip()
+    except UnicodeDecodeError:
+        return None
+    return sha if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha) else None
 
 
 def _manifest(corpus: Path, errors: list[str] | None = None,
@@ -76,12 +88,13 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
     does not prove the listed bytes were readable and a baseline that silently
     lacks a file it just listed is not a capture.
 
-    A name from `os.walk`'s `filenames` that is NOT `Path.is_file()` — a
-    dangling symlink, a FIFO, a socket, a device — is skipped, exactly as the
-    v0.23 `rglob()` + `is_file()` walk skipped it (a broken link is not a
-    listing failure, it is an absent file). `read_bytes()` on one of these
-    would either raise on a broken link or, for a FIFO, hang forever; neither
-    belongs in `errors`. `skipped_symlinks` collects the relative path of
+    A listed or walked name is classified by one `os.stat` (follows symlinks)
+    (R23-3). ENOENT/ENOTDIR means absent (a dangling symlink is not a listing
+    failure) and is skipped; any other stat error (EACCES, ELOOP) is
+    collected as unreadable, never silently skipped. A stat that succeeds but
+    is not a regular file — a directory, FIFO, socket, device — is skipped and
+    never read (`read_bytes()` on a FIFO would hang forever); neither belongs
+    in `errors`. `skipped_symlinks` collects the relative path of
     every skipped entry that IS a symlink (broken or otherwise non-file), for
     `update.corpus_diff` to report as `skipped_dangling_symlinks` — a note,
     never a refusal."""
@@ -93,6 +106,24 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
 
     def onerror(exc: OSError) -> None:
         problems.append(getattr(exc, "filename", None) or str(exc))
+
+    def _is_regular(p: Path, rel: str) -> bool:
+        """True only for a regular file to read; absent / non-file names are
+        skipped (symlinks noted), an unobservable one goes to `problems`."""
+        try:
+            st = os.stat(p)
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                if skipped_symlinks is not None and os.path.islink(p):
+                    skipped_symlinks.append(rel)
+            else:
+                problems.append(rel)
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            if skipped_symlinks is not None and os.path.islink(p):
+                skipped_symlinks.append(rel)
+            return False
+        return True
 
     def done() -> dict[str, str]:
         if errors is None and problems:
@@ -113,9 +144,7 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
             if any(part.startswith(".") for part in rel.split("/")):
                 continue
             p = corpus / rel
-            if not p.is_file():
-                if skipped_symlinks is not None and p.is_symlink():
-                    skipped_symlinks.append(rel)
+            if not _is_regular(p, rel):
                 continue
             try:
                 out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
@@ -135,9 +164,7 @@ def _manifest(corpus: Path, errors: list[str] | None = None,
                 continue
             p = Path(dirpath) / name
             rel = p.relative_to(corpus).as_posix()
-            if not p.is_file():
-                if skipped_symlinks is not None and p.is_symlink():
-                    skipped_symlinks.append(rel)
+            if not _is_regular(p, rel):
                 continue
             try:
                 out[rel] = hashlib.sha256(p.read_bytes()).hexdigest()

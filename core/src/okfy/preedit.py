@@ -24,7 +24,6 @@ Two modes, one implementation of the rules: a single bundle, and a workspace
 crosswalk `constrains` pulls, owner-declared `conflicts`).
 """
 import hashlib
-import json
 import os
 import posixpath
 import re
@@ -37,7 +36,7 @@ from okfy.archetype import load_archetype
 from okfy.bundle import Bundle
 from okfy.crosswalk import _is_ref, read_rows_located
 from okfy.federate import (_in_scope, _same_as_root, _scope_crosswalk_rows, active_rows,
-                           ref_in_scope)
+                           ref_in_scope, row_fingerprint)
 from okfy.gitenv import git_marker, run_git
 from okfy.pathscope import entry_contains, entry_matches, nfc, normalize_relative, path_scope_problems
 from okfy.update import _source_path
@@ -724,13 +723,6 @@ class _RowEntry:
     stale: bool = False
 
 
-def _fingerprint(row_dict: dict) -> str:
-    """Canonical content of a row dict. Staleness is a pure function of a row's
-    content (its refs and decision against the members' state), so rows with
-    equal content share it and rows with different content never do."""
-    return json.dumps(row_dict, sort_keys=True, default=str)
-
-
 def _concept_exists(m, cid: str) -> bool:
     root = Path(m.path).resolve()
     p = (root / f"{cid}.md").resolve()
@@ -894,8 +886,8 @@ def _workspace(target, paths, root, limit, offset) -> dict:
     status = workspace_status(ws, rows=safe_rows)
     active, _, _ = active_rows(ws, rows=safe_rows, status=status)
     unverifiable = set(status["unverifiable_members"])
-    stale_prints = {_fingerprint(s) for s in status["stale_rows"]}
-    entries = [replace(e, stale=_fingerprint(e.row.as_dict()) in stale_prints) for e in entries]
+    stale_prints = {row_fingerprint(s) for s in status["stale_rows"]}
+    entries = [replace(e, stale=row_fingerprint(e.row.as_dict()) in stale_prints) for e in entries]
     root_of = _same_as_root(active)
     by_root: dict[str, set] = {}
     for ref, rt in root_of.items():

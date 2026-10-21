@@ -2,6 +2,8 @@
 expansion via lexicon rows (member's own + workspace-level meta/lexicon.md)
 and accepted same-as rows, per-member BM25 with lexicon pins entering RRF at
 rank 1, role grouping, deterministic constrains auto-pull."""
+import json
+
 from okfy import lexicon
 from okfy.bm25 import tokenize
 from okfy.bundle import Bundle
@@ -27,6 +29,13 @@ def _name_tokens(entry: dict) -> set[str]:
     return toks
 
 
+def row_fingerprint(row_dict: dict) -> str:
+    """Canonical content of a row dict. Staleness is a pure function of a row's
+    content (its refs and decision against the members' state), so rows with
+    equal content share it and rows with different content never do."""
+    return json.dumps(row_dict, sort_keys=True, default=str)
+
+
 def active_rows(ws: Workspace, rows: list | None = None,
                 status: dict | None = None) -> tuple[list, int, list[str]]:
     """Accepted crosswalk rows minus stale ones (a row citing a concept that
@@ -35,15 +44,19 @@ def active_rows(ws: Workspace, rows: list | None = None,
     An unverifiable baseline is stale-by-definition, never fresh-by-default;
     audit round 8). Stale rows are DETECTED by workspace_status; here they
     stop influencing answers too — an equivalence or constraint reviewed
-    against a concept that has since changed is a hypothesis again."""
+    against a concept that has since changed is a hypothesis again.
+
+    A row is excluded by its OWN canonical content (`row_fingerprint`), never
+    by its (src, rel, dst) triple: distinct rows may share refs, and a stale
+    proposed twin must not remove a fresh accepted row (R23-4)."""
     from okfy.workspace import workspace_status
     st = workspace_status(ws, rows=rows) if status is None else status
-    stale = {(s["src"], s["rel"], s["dst"]) for s in st["stale_rows"]}
+    stale = {row_fingerprint(s) for s in st["stale_rows"]}
     out, n_stale = [], 0
     for r in (load_rows(ws) if rows is None else rows):
         if r.status != "accepted":
             continue
-        if (r.src, r.rel, r.dst) in stale:
+        if row_fingerprint(r.as_dict()) in stale:
             n_stale += 1
             continue
         out.append(r)

@@ -10,6 +10,59 @@ how `okfy query` ranks a single bundle. The contributed retrieval change (the fi
 contributed subsections below) does: it moves the retrieval code digest (see there), and
 the round-19 subsection moves it a second time.
 
+### Round 23
+
+- **R23-1:** `scripts/memory-recipe.sh` captures the selected directory without losing a trailing
+  line feed. `$(...)` strips trailing newlines, so a selected work directory whose name ended in a
+  line feed resolved to its sibling without one: with that sibling empty the recipe wrote into the
+  wrong directory, and otherwise a valid empty directory was refused. The work directory, the
+  script's own directory and the repository directory are now captured with a sentinel after the
+  substitution, so each names the directory that was selected, the "inside the OKFy repository" guard
+  compares the right paths, and a directory that cannot be entered is still refused as
+  `cannot resolve`.
+- **R23-2:** git output is decoded after its return code is read, and a commit id must be a full
+  40- or 64-digit lowercase hex line. A corpus whose `.git` file names a path with a byte that is not
+  text made `okfy snapshot --force` and `okfy validate` raise `UnicodeDecodeError`, which the CLI
+  turned into a bare exit 2 with empty stdout. They now give what the same corpus gives when the path
+  is ASCII: `okfy validate` reports `W_CORPUS_SHA` (`E_CORPUS_SHA` under `--strict-sources`) and
+  the snapshot refresh refuses with `E_CORPUS_LISTING`. The `cat-file` probe in
+  `okfy validate` reads the return code only.
+- **R23-3:** the corpus manifest classifies each entry with one `os.stat`. A listed file below a
+  path that is no longer a directory (ENOTDIR) or that is gone (ENOENT) is absent: skipped, and a
+  dangling symlink is noted. Any other failure (EACCES, ELOOP) is collected as unreadable and
+  refused with `E_CORPUS_LISTING` state `unreadable`, as in round 22; a non-regular entry is skipped
+  unread. A listed self-referential symlink (ELOOP) was dropped silently and put in the skipped
+  symlinks, and an unstattable listed entry raised `PermissionError` from `okfy init`, a traceback
+  instead of the refusal.
+- **R23-4:** staleness is keyed by a row's content, not by its `(src, rel, dst)` triple. In
+  `okfy preedit` over a workspace, a stale proposed row that shared a triple with a fresh accepted
+  row made the accepted row count as stale and drop out of the lookup, so a dangling endpoint of the
+  accepted row went unreported and the answer was `complete: true`. A row is now excluded as stale
+  only when its own canonical content (`row_fingerprint`, the sorted-key JSON of the row) equals a
+  stale row's, so a proposed row can no longer change an accepted row's completeness through the
+  freshness filter. One `row_fingerprint` serves `federate.active_rows` and the row-local `stale`
+  flag of `okfy preedit`; `n_stale` still counts the accepted rows excluded as stale.
+- **Smoke negatives:** `scripts/smoke.sh` runs three installed-artifact negatives against the wheels
+  it installs: a stale proposed twin must not hide the accepted endpoint diagnostic (R23-4), a
+  gitfile with a non-UTF-8 byte must give a JSON report naming `W_CORPUS_SHA` (R23-2), and an
+  unstattable corpus entry must be refused without a traceback (R23-3; it prints SKIP when chmod does
+  not deny). On the published `b941aa9` wheel each fails at its own assertion. The smoke now also
+  restores permissions before it removes its temporary directory.
+
+Contract changes in round 23:
+
+- None. No code, state or reason was added: R23-2 and R23-3 use the existing `W_CORPUS_SHA`,
+  `E_CORPUS_SHA` and `E_CORPUS_LISTING` (states `failed`, `partial`, `unreadable`), and R23-4 surfaces
+  through the existing `invalid_relation` and `endpoint_*` reasons. `okfy preedit` keeps
+  `coverage: declared_only` and `semantic: not_assessed`, has no `allowed` key, and a no-match is not
+  permission.
+- The federation code digest moved from `6545a557…` to `560b55bb…` (`federate.py`). Federated eval
+  runs recorded before this change read stale by the existing contract; they were not rewritten. The
+  retrieval digest is unchanged.
+- Residuals: `update._corpus_dirty_paths` still decodes git output as text; `scripts/memory-recipe.sh`
+  with `CDPATH` set and a relative argument is unchanged; the listing policy for a corpus that is a
+  subdirectory of a repository is still deferred by the owner. Round 23 is not published.
+
 ### Round 22
 
 - **R22-1:** a read failure is a refusal, not an omission. A git listing that succeeds does not

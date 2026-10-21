@@ -52,7 +52,15 @@ lacks() { if grep -qF -- "$2" "$1"; then cat "$1" >&2; fail "$3"; fi; }
 command -v okfy >/dev/null 2>&1 || fail "okfy is not on PATH (install the wheel first)"
 command -v git >/dev/null 2>&1 || fail "git is not on PATH"
 [ -d "$1" ] || fail "$1 is not an existing directory — create an empty one (mktemp -d)"
-WORK="$(cd "$1" && pwd -P)"
+# Capture the directory name losslessly (R23-1). Command substitution strips ALL trailing
+# newlines, so `WORK="$(cd "$1" && pwd -P)"` turns a directory named "work<LF>" into the path of
+# its sibling "work": the emptiness guard below then judges, and the recipe writes into, a
+# different directory than the one selected. A sentinel printed inside the substitution is never
+# stripped; `%?x` then drops exactly the LF that `pwd` printed plus the sentinel, so any LFs that
+# are part of the name stay. A failing `cd`/`pwd` makes the assignment fail, and `|| fail` keeps
+# `set -e` from ending the script without the refusal message.
+WORK="$(cd -- "$1" && pwd -P && echo x)" || fail "cannot resolve $1 — pass an existing directory"
+WORK="${WORK%?x}"
 # Prove the listing worked before judging it, and judge emptiness by entries, not by text.
 # `[ -z "$(ls -A ...)" ]` is wrong twice: a failing `ls` reads as an empty string, and command
 # substitution strips trailing newlines, so a directory whose only entry is named "\n" reads as
@@ -65,8 +73,13 @@ case "$LISTING" in
   *) fail "cannot list $WORK — the recipe only runs in an empty, readable directory" ;;
 esac
 [ "$LISTING" = "ls-status=0" ] || fail "$WORK is not empty — the recipe only runs in an empty directory"
-HERE="$(cd "$(dirname "$0")" && pwd -P)"
-REPO="$(cd "$HERE/.." && pwd -P)"
+# Same sentinel for the script's own location: `dirname` and `pwd` both lose trailing LFs.
+D="$(dirname -- "$0" && echo x)" || fail "cannot locate this script ($0)"
+D="${D%?x}"
+HERE="$(cd -- "$D" && pwd -P && echo x)" || fail "cannot resolve the script directory"
+HERE="${HERE%?x}"
+REPO="$(cd -- "$HERE/.." && pwd -P && echo x)" || fail "cannot resolve the repository directory"
+REPO="${REPO%?x}"
 case "$WORK/" in
   "$REPO"/*) fail "$WORK is inside the OKFy repository — use a directory outside it" ;;
 esac

@@ -897,7 +897,7 @@ def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
               f"corpus snapshot git_sha is malformed: {sha!r}")
         return
     probe = run_git(corpus, "cat-file", "-e", f"{sha}^{{commit}}",
-                    capture_output=True, text=True)
+                    capture_output=True)
     if probe.returncode != 0:
         r.add(level, code, "meta/corpus.md",
               f"corpus snapshot git_sha {sha[:12]}... is not a commit of "
