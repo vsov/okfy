@@ -27,6 +27,21 @@
 # shellcheck disable=SC2016  # backticks and $ in single quotes are literal text here
 set -eu
 
+# Isolate every git call below from the caller's environment. A GIT_DIR,
+# GIT_INDEX_FILE, GIT_WORK_TREE, GIT_OBJECT_DIRECTORY or GIT_COMMON_DIR left
+# exported (a git hook does this) sends `git -C` and `okfy init` into ANOTHER
+# repository: `-C` only changes the directory, and these variables outrank it.
+# Policy source: core/src/okfy/gitenv.py -- drop every GIT_* variable except
+# identity (GIT_AUTHOR_*, GIT_COMMITTER_*), config (GIT_CONFIG*), ssh
+# (GIT_SSH*), GIT_TERMINAL_PROMPT, GIT_ASKPASS and GIT_EXEC_PATH. This must run
+# before the first git invocation.
+for v in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+  case "$v" in
+    GIT_AUTHOR_*|GIT_COMMITTER_*|GIT_CONFIG*|GIT_SSH*|GIT_TERMINAL_PROMPT|GIT_ASKPASS|GIT_EXEC_PATH) ;;
+    *) unset "$v" ;;
+  esac
+done
+
 fail() { echo "MEMORY RECIPE FAIL: $*" >&2; exit 1; }
 step() { printf 'STEP %s: %s\n' "$1" "$2"; }
 # has FILE TEXT: FILE contains TEXT as a fixed string; says why when it does not
@@ -38,7 +53,18 @@ command -v okfy >/dev/null 2>&1 || fail "okfy is not on PATH (install the wheel 
 command -v git >/dev/null 2>&1 || fail "git is not on PATH"
 [ -d "$1" ] || fail "$1 is not an existing directory — create an empty one (mktemp -d)"
 WORK="$(cd "$1" && pwd -P)"
-[ -z "$(ls -A "$WORK")" ] || fail "$WORK is not empty — the recipe only runs in an empty directory"
+# Prove the listing worked before judging it, and judge emptiness by entries, not by text.
+# `[ -z "$(ls -A ...)" ]` is wrong twice: a failing `ls` reads as an empty string, and command
+# substitution strips trailing newlines, so a directory whose only entry is named "\n" reads as
+# empty. The status line appended inside the substitution is never stripped: it carries the
+# exit status of `ls` itself (the `&& ... ||` form keeps `set -e` from ending the substitution
+# before it is written), and any entry leaves something in front of it.
+LISTING="$(ls -A "$WORK" 2>/dev/null && echo "ls-status=0" || echo "ls-status=$?")"
+case "$LISTING" in
+  *ls-status=0) ;;
+  *) fail "cannot list $WORK — the recipe only runs in an empty, readable directory" ;;
+esac
+[ "$LISTING" = "ls-status=0" ] || fail "$WORK is not empty — the recipe only runs in an empty directory"
 HERE="$(cd "$(dirname "$0")" && pwd -P)"
 REPO="$(cd "$HERE/.." && pwd -P)"
 case "$WORK/" in

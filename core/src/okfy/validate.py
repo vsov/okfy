@@ -842,7 +842,7 @@ def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
     locally present and is a git repo, the pinned SHA must be a real commit
     of that repo — a mutated or unreachable pin is reported, never silently
     trusted (audit round 8 regulatory mutation M1)."""
-    from okfy.gitenv import run_git
+    from okfy.gitenv import git_marker, run_git
     try:
         snap = bundle.get("meta/corpus")
     except frontmatter.FrontmatterError:
@@ -872,10 +872,26 @@ def _check_corpus_snapshot(bundle: Bundle, r: Report, strict: bool = False):
                   "than `okfy snapshot`); re-run `okfy snapshot`")
     sha = str(snap.meta.get("git_sha") or "").strip()
     corpus = Path(str(snap.meta.get("corpus") or ""))
-    if not sha or not corpus.is_dir() or not (corpus / ".git").exists():
+    if not sha:
+        return
+    try:
+        if not corpus.is_dir():
+            return
+    except OSError:
+        # Path.is_dir raises on EACCES for an unreadable parent; the marker
+        # probe below decides whether that is a finding.
+        pass
+    marker = git_marker(corpus)
+    if marker == "absent":
         return
     level, code = (("error", "E_CORPUS_SHA") if strict
                    else ("warning", "W_CORPUS_SHA"))
+    if marker == "unobservable":
+        r.add(level, code, "meta/corpus.md",
+              f"the .git of corpus {corpus} could not be observed, so the "
+              f"recorded git_sha {sha[:12]}... cannot be verified — restore "
+              "permissions on the corpus and re-run")
+        return
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         r.add(level, code, "meta/corpus.md",
               f"corpus snapshot git_sha is malformed: {sha!r}")

@@ -10,6 +10,182 @@ how `okfy query` ranks a single bundle. The contributed retrieval change (the fi
 contributed subsections below) does: it moves the retrieval code digest (see there), and
 the round-19 subsection moves it a second time.
 
+### Round 22
+
+- **R22-1:** a read failure is a refusal, not an omission. A git listing that succeeds does not
+  prove the listed files can be read: `git ls-files` exits 0 with an empty stderr for a file
+  whose permissions forbid reading, and `okfy init` and `okfy snapshot --force` recorded a
+  baseline that silently lacked it. `okfy init` and `okfy snapshot` (with or without `--force`)
+  now refuse with `E_CORPUS_LISTING`, state `unreadable`, naming the unreadable paths, before
+  their first write; the init target is not created and the bundle is untouched. The same holds
+  for an unreadable file or directory in a corpus that is walked. `--force` does not turn unread
+  bytes into read ones. A healthy refresh after a wrong baseline works as before, and manifest-mode
+  `okfy diff` keeps reporting the same condition as `E_DIFF_PARTIAL_LISTING`.
+- **R22-2:** the `.git` marker at the corpus root is probed with `os.lstat`, which has three
+  answers (new `gitenv.git_marker`: absent, present, unobservable). A dangling `.git` symlink was
+  read as no marker and the corpus was walked, which put gitignored files into the manifest and
+  the plan. Now a present marker (directory, gitfile, valid or dangling symlink) selects git and a
+  git failure is `E_CORPUS_LISTING` state `failed`; a marker that cannot be observed (EACCES,
+  ELOOP) is `failed` too, never a walk. No marker is still a walk, and a corpus that is a
+  subdirectory of a repository is still walked (the owner deferred that policy).
+  `okfy validate` now reports, instead of silently skipping, a corpus whose `.git` is dangling or
+  unobservable: `W_CORPUS_SHA` (`E_CORPUS_SHA` under `--strict-sources`) on `meta/corpus.md`.
+- **R22-3:** the emptiness guard of `scripts/memory-recipe.sh` decides by directory entries, not
+  by listing text. `[ -z "$(ls -A ...)" ]` strips trailing newlines, so a work directory whose
+  only entry is named `"\n"` read as empty and the recipe ran in it. The guard now appends the
+  exit status of `ls` inside the substitution, where nothing is stripped: a failed listing is
+  still `cannot list`, a bare status means empty, and any entry (a newline-only name, a dotfile,
+  a dangling symlink) is `is not empty`. Both refusal messages are unchanged.
+- **R22-4:** an unobservable `.git` marker is not an absent one. `okfy preedit` decided "no git at
+  or above the root" with `os.path.lexists`, which is false both for a missing entry and for a
+  `stat` that failed (EACCES on a root without search permission), so a committed corpus whose
+  root could not be searched answered `head_git_sha: null`, `verified: true`, `complete: true`.
+  The probe is now `gitenv.git_marker` per level: `present` and `unobservable` both mean git may
+  be there, and only a root where every level is `absent` is non-git. Such a root is
+  refused at the root with `E_PREEDIT_ROOT` (the message names the permissions repair) before any
+  operand is resolved, never verified. A garbage HEAD under a readable root is still
+  `root_unverifiable`.
+- **R22-5:** `okfy preedit` input paths are resolved by one function that tells a missing future
+  file from a failed observation. A symlink loop, a directory without search permission or a file
+  used as a directory made non-strict `realpath` hand back the unresolved suffix, and the lookup
+  accepted it as a lexical path inside the root with `complete: true`. These operands are now
+  refused per path with `E_PREEDIT_PATH`, new reason `unresolvable_path`; a path that does not
+  exist yet (also under a missing directory), a plain `..` and an internal symlink are
+  unchanged, and `symlink_escape`, `ambiguous_dotdot` and `names_root` keep their precedence.
+- **R22-6:** git's output is read as bytes. `git rev-parse HEAD` stderr holding bytes that are not
+  text (a gitfile naming a path with a `0xff` byte) raised `UnicodeDecodeError` before the return
+  code was looked at, so the root was neither `ok` nor `unverifiable`. Stderr is decoded with
+  replacement for the note only, and stdout counts as a HEAD only when it is a 40- or 64-digit
+  lowercase hex commit id; anything else under git is `root_unverifiable`.
+- **R22-7:** the endpoint check of `okfy preedit` no longer depends on a pull. It ran only for
+  rows reached through a `constrains` pull to a destination match, so an accepted
+  `alpha constrains kb:modules/never-existed`, `alpha same-as missing` or `alpha conflicts missing`,
+  with `alpha` matching the path, vanished and the answer was `complete: true`. One function
+  (`_relevant_endpoint_problems`) now decides it: an accepted, fresh row is relevant when either
+  endpoint, or any member of its same-as class, is a matched concept, and both of its endpoints are
+  checked (`endpoint_missing:<side>` / `endpoint_unreadable:<side>`, `invalid_relation`). A row
+  with no relevant endpoint, and any proposed row, still never affects completeness; the pull and
+  its note are unchanged.
+- **R22-8:** the personal-scope filter keeps its attribution when `rel` or `status` is malformed.
+  A diagnostic for a non-string `rel` has `src`/`dst` None, so a row of a personal concept that
+  does not apply to this project passed the filter and turned the answer incomplete with a
+  file-level exclusion. The filter now reads the raw endpoints the file carried and runs before any
+  diagnostic or exclusion is built: such a row leaves the result equal to the no-row baseline except
+  for the aggregate personal-exclusion note, which names no ref. A row with a non-string endpoint
+  stays unattributable and conservative (`diagnostic:malformed_ref`, incomplete).
+
+Contract changes in round 22:
+
+- `E_CORPUS_LISTING` has a third state, `unreadable`, and its `failed` state now also covers an
+  unobservable or dangling `.git` marker at the corpus root. `okfy init` and `okfy snapshot`
+  refuse it with exit 2 before writing. (R22-1, R22-2)
+- `E_PREEDIT_PATH` has a ninth per-path reason, `unresolvable_path` (a failed physical
+  resolution: ELOOP, EACCES, ENOTDIR). `E_PREEDIT_ROOT` now also covers a corpus root whose
+  `.git` entry cannot be observed (no search permission); `root_unverifiable` also covers an
+  unobservable ancestor level and git output that is not a commit id. (R22-4, R22-5, R22-6)
+- `excluded_relations` reasons `endpoint_missing:<side>` / `endpoint_unreadable:<side>` now also
+  name relevant `same-as` and `conflicts` rows, not only `constrains`, and a row with a malformed
+  `rel`/`status` of an out-of-scope personal concept appears nowhere. (R22-7, R22-8)
+- `W_CORPUS_SHA` (`E_CORPUS_SHA` under `--strict-sources`) on `meta/corpus.md` has a new trigger: a
+  corpus whose `.git` marker is dangling or cannot be observed, which `okfy validate` used to skip.
+  (R22-2)
+- Relevance widening: an accepted `same-as` row (or `conflicts` row) with a dangling endpoint is now
+  listed in `excluded_relations` and makes the answer incomplete (`invalid_relation`) whenever
+  either endpoint, or any member of its same-as class, is a matched concept, whether or not a pull
+  was built. Before round 22 only a row reached through a `constrains` pull was checked. (R22-7)
+- Scope rule: the personal-scope filter decides from the raw endpoints the file carried, before any
+  diagnostic is built, so a malformed `rel` or `status` no longer exposes an out-of-scope personal
+  row. (R22-8)
+- Recipe guard: `scripts/memory-recipe.sh` decides that its work directory is empty by entries; a
+  directory holding only a newline-named entry is refused as `is not empty`. The two refusal
+  messages are unchanged. (R22-3)
+
+### Round 21
+
+- **R21-1:** `scripts/memory-recipe.sh` no longer lets an ambient `GIT_DIR`, `GIT_INDEX_FILE`,
+  `GIT_WORK_TREE`, object-directory or common-dir variable redirect its git calls into another
+  repository; it drops repository-location variables as `gitenv` does, before its first git call.
+- **R21-2:** a work directory the recipe cannot list is refused before anything is written,
+  instead of being taken for empty.
+- **R21-3:** a git listing that exits 0 but wrote to stderr (an unreadable untracked subtree is
+  only a warning) is a partial listing, not the whole corpus. The test is any stderr output,
+  not English text. `okfy diff` in manifest mode therefore refuses with
+  `E_DIFF_PARTIAL_LISTING` instead of reporting the unseen file as `removed`; `okfy init`,
+  `okfy snapshot`, `okfy survey` and `okfy segment` refuse with the new `E_CORPUS_LISTING`
+  before writing anything.
+- **R21-4:** a corpus whose root holds `.git` is listed by git, and a failed listing (corrupt
+  index, garbage HEAD, an empty or stray `.git`, no git executable) is the same coded refusal
+  `E_CORPUS_LISTING`, with a repair path. It no longer falls back to a filesystem walk, which
+  put gitignored files, and their digests, into the committed manifest. A corpus with no
+  `.git` at its root, or a subdirectory of a repository, is walked exactly as before.
+  `test_walk_falls_back_on_broken_git_dir` now asserts the refusal (renamed
+  `test_walk_refuses_a_broken_git_dir_with_a_coded_error`): still no crash, no longer a wider scope.
+- **R21-10:** `okfy preedit` (CLI and `okfy_preedit`, single bundle and workspace) no longer
+  reads a HEAD it could not read as a successful non-git comparison. A root with a `.git` whose
+  HEAD cannot be read (garbage HEAD, git not installed, an unborn repository) is
+  `complete: false` with the new incomplete reason `root_unverifiable` and `root.verified:
+  false`. A root with no `.git` at or above it is unchanged.
+- **R21-5:** a reported `conflicts` entry takes its status, scope, reason, resolution, staleness
+  and file from its own row. The lookup carried the resolution through a dictionary keyed by
+  `(src, rel, dst)`, so a `proposed` row (or any other row with the same refs, in the same or
+  another links file) could hand its resolution to an accepted conflict and flip it to
+  `resolved`, depending on row order. Rows now travel as row-local entries; the triple-keyed
+  `originals`, `file_of`, `hidden` and `stale_keys` are gone from `okfy preedit`.
+- **R21-6:** a resolution resolves an operand only when its scope contains it: an equal entry,
+  an ancestor directory entry, or `./`. A file scope no longer resolves a conflict over its
+  parent directory (`out_of_scope`). Overlap still decides which operands a conflict `scope`
+  reaches. New `pathscope.entry_contains`; sibling prefixes (`engine/` vs `engine2/`) never match.
+- **R21-7:** a relevant accepted `constrains` row whose source concept is missing or unreadable,
+  or whose destination or same-as class member is missing, is listed in `excluded_relations`
+  (`endpoint_missing:<side>` / `endpoint_unreadable:<side>`) and the result is incomplete with
+  `invalid_relation`. The summary note stays, but is no longer the only signal. A readable
+  linked-only constraint (`path_scope: []`) is still pulled.
+- **R21-8:** a crosswalk row whose `rel` or `status` is a list or a mapping is the named
+  diagnostic `malformed_rel` / `malformed_status` from the validating reader instead of a
+  `TypeError`, so `okfy preedit` and `okfy_preedit` answer `complete: false` with
+  `invalid_relation`. The tolerant `load_rows` (federated query, `okfy workspace status`)
+  skips such a row. No `except TypeError` was added to either surface.
+- **R21-9:** the `path_scope` grammar rejects non-canonical entries: an empty segment
+  (`src//auth/`, `src/auth//`) and a `.` segment (`src/./auth/`, `src/auth/.`). The lookup
+  compares entries to normalised operands, so such an entry could never match and read as an
+  all-clear. `okfy validate` reports `E_PATH_SCOPE`; the proposal and direct-write paths refuse
+  it; a lookup on a bundle carrying one is `invalid_path_scope`, incomplete; a crosswalk
+  `conflicts` row's `scope` (`invalid_scope`) and `resolution.scope` (`invalid_resolution`) are
+  diagnosed by the same predicate. The single entry `./`, `[]`, spaces, NFC/NFD folding and
+  duplicate detection are unchanged, and an owner's value is never rewritten.
+- **R21-11:** `okfy preedit` checks the physical target of an operand as written, before the
+  lexical fold of `..`. With `jump -> ../outside/child`, `jump/../secret.py` names
+  `outside/secret.py`, not the root's `secret.py`; it is refused per path with
+  `E_PREEDIT_PATH`, reason `symlink_escape` (the target is outside the root) or the new
+  `ambiguous_dotdot` (inside the root but not the file the folded form names: a `..` crossed a
+  symlink). Plain `a/../b.py` and an internal symlink `link/x.py` behave as before.
+
+Contract changes in round 21 (every external contract the bullets above changed):
+
+- New error code `E_CORPUS_LISTING`, with two states: `failed` (git exited non-zero, the `.git`
+  at the root is empty or damaged, or git could not be run) and `partial` (git exited 0 but
+  wrote to stderr). Raised by `okfy init`, `okfy snapshot`, `okfy survey` and `okfy segment`;
+  the CLI exits 2. There is no filesystem-walk fallback for a root that holds `.git`. (R21-3, R21-4)
+- `okfy diff` in manifest mode refuses a partial listing with the existing
+  `E_DIFF_PARTIAL_LISTING`; its meaning is unchanged. (R21-3)
+- New `okfy preedit` incomplete reason `root_unverifiable`, ordered after `snapshot_drift`, with
+  `root.verified: false`. An unborn repository counts as unverifiable. (R21-10)
+- `okfy preedit` per-path refusals (`E_PREEDIT_PATH`): `symlink_escape` is now judged on the
+  physical target of the path as written, and `ambiguous_dotdot` is new. (R21-11)
+- `path_scope` grammar: an empty segment or a `.` segment is invalid (`E_PATH_SCOPE`,
+  `invalid_path_scope`, and for crosswalk rows `invalid_scope` / `invalid_resolution`). (R21-9)
+- `okfy preedit` `excluded_relations` gains the reasons `endpoint_missing:<side>` and
+  `endpoint_unreadable:<side>` (side `src` or `dst`); they fire `invalid_relation` and are not
+  stale reasons. (R21-7)
+- Crosswalk reader diagnostics gain `malformed_rel` and `malformed_status`; the tolerant
+  `load_rows` skips such a row. (R21-8)
+- Conflict resolution: `resolution_basis: out_of_scope` now means the resolution scope does not
+  contain the operand (directed containment), and each conflict's status, resolution and
+  staleness come from its own row. (R21-5, R21-6)
+- `scripts/memory-recipe.sh`: repository-location `GIT_*` variables are dropped before the first
+  git call, and a work directory it cannot list is refused (`cannot list <dir>`) instead of being
+  taken for empty. (R21-1, R21-2)
+
 ### Pre-edit lookup
 
 - **`path_scope`: where a concept applies, declared by the owner.** A concept may carry a list of
@@ -31,7 +207,7 @@ the round-19 subsection moves it a second time.
   tools (it had seven).
 - **Completeness is explicit, and is not permission.** Every result carries `complete`,
   `incomplete_reasons` (`unmapped`, `invalid_path_scope`, `truncated`, `snapshot_drift`,
-  `refused_path`, `stale_relation`, `invalid_relation`, `unsupported_member`,
+  `root_unverifiable`, `refused_path`, `stale_relation`, `invalid_relation`, `unsupported_member`,
   `unreadable_concept`, `no_governing_policy`, `unresolved_conflict`) and `coverage:
   declared_only`. `complete: true` does not mean no rule exists or that the edit is allowed,
   and zero matches in a mapped bundle does not mean allowed. There is no `allowed` field.
@@ -669,6 +845,13 @@ Contributed by @vbanas (vsov/okfy#9).
   repo, or has no git, is walked as before, gitignored files included, because the plan
   walks it that way too; a corpus inside an ignored directory is therefore not listed empty.
   A non-UTF-8 file name is a key, not a crash.
+- **One git listing for the plan and the manifest.** Both read `segment.git_listing`, so
+  they cannot disagree on which corpora are git corpora. `okfy survey` gains a `listing`
+  field (`git` or `walk`) naming the rule it used. The survey no longer raises on a file
+  name that is not UTF-8: such a name cannot be cited from a concept's frontmatter, so it
+  is reported under `skipped.undecodable` (escaped) instead of planned. The README and the
+  User Guide said every git corpus is walked with `git ls-files`; they now say a
+  subdirectory of a repository is walked directly.
 - **One-time change for existing bundles.** On a repo-root corpus with gitignored files, the
   next `okfy diff` reports those files as removed and the next snapshot refresh drops them,
   so `manifest_digest` changes once. On macOS, a name stored decomposed (NFD) is now keyed

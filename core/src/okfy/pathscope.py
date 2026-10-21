@@ -10,6 +10,8 @@ A `path_scope` is a YAML list of corpus-relative POSIX strings:
   `src/a/` matches `src/a/x.c` and never `src/ab.c`);
 - an entry without a trailing `/` is an exact file;
 - the single entry `./` means the whole root;
+- an entry is canonical: no empty segment (`//`) and no `.` segment (`src//a/`,
+  `src/./a/`, `src/a/.` are invalid; the owner's value is never rewritten);
 - `[]` means "reviewed, applies to no path"; an absent key means "unmapped".
 
 There is no glob DSL. Comparison keys are NFC-normalised and case-sensitive.
@@ -60,6 +62,17 @@ def path_scope_problems(value) -> list[str]:
             problems.append(f"{label} is absolute — paths are relative to the corpus root")
         if ".." in entry.split("/"):
             problems.append(f"{label} contains a `..` segment — a scope cannot leave the root")
+        if entry != WHOLE_ROOT:
+            segs = entry.split("/")
+            if segs[-1] == "":                       # a directory entry: one trailing `/`
+                segs = segs[:-1]
+            if "" in segs:
+                problems.append(f"{label} has an empty segment (`//`) — the lookup compares "
+                                "against normalised paths and would never match it; write "
+                                "single `/` separators")
+            if "." in (segs[1:] if entry.startswith("./") else segs):   # `./x` has its own message
+                problems.append(f"{label} has a `.` segment — the lookup would never match it; "
+                                "drop it (only the single entry `./` may use it)")
         bad = [c for c in GLOB_CHARS if c in entry]
         if bad:
             problems.append(f"{label} contains glob character(s) {bad} — there is no glob "
@@ -105,6 +118,31 @@ def entry_matches(entry: str, operand: str) -> bool:
     if operand.endswith("/"):
         return entry_matches_dir(entry, operand[:-1])
     return entry_matches_file(entry, operand)
+
+
+def entry_contains(entry: str, operand: str) -> bool:
+    """Directed containment (R21-6): does `entry` contain EVERYTHING `operand`
+    names? Unlike `entry_matches`, which asks whether the two overlap (a file
+    inside a directory operand does), this is true only when the whole operand
+    lies inside the entry:
+
+    - a file operand is contained by an equal file entry, an ancestor directory
+      entry, or `./`;
+    - a directory operand (trailing `/`) is contained by the same directory
+      entry, an ancestor directory entry, or `./`; a file entry never contains
+      a directory, and a directory inside the operand does not either.
+
+    Whole path segments, NFC keys, so `engine/` never contains `engine2/x.py`."""
+    e = nfc(entry)
+    if e == WHOLE_ROOT:
+        return True
+    if operand.endswith("/"):
+        d = nfc(operand)[:-1]
+        return e.endswith("/") and (d == e[:-1] or d.startswith(e))
+    p = nfc(operand)
+    if e.endswith("/"):
+        return p.startswith(e)
+    return e == p
 
 
 # ---------------------------------------------------------------- input paths

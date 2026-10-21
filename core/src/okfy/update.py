@@ -1013,6 +1013,11 @@ def refresh_snapshot(bundle: Bundle, *, force: bool = False) -> dict:
     except ValueError:
         old_outcomes = {}
 
+    # Still the payload phase, before any write: a git listing that failed or
+    # is partial, or a listed file/directory that cannot be read (R22-1, state
+    # "unreadable", `force` included), raises CorpusListingError here
+    # (R21-3/R21-4), so nothing below runs and none of the three files is touched. It is not a ValueError, so
+    # the probe above cannot swallow it either.
     new_manifest = _manifest(corpus_raw)
     old_pins_by_key = {(p["concept"], p["source"]): p
                        for p in _load_source_pins(bundle).get("pins") or []}

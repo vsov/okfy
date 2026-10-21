@@ -120,7 +120,22 @@ def write_rows(ws_root: Path, a: str, b: str, rows: list[Row], note: str = "") -
     return p
 
 
+def _enum_shape_problem(d: dict) -> tuple[str, str] | None:
+    """`(diagnostic, message)` when `rel` or `status` is not a string (R21-8), else
+    None. The ONE predicate for both readers, and it must run BEFORE any set
+    membership test: `[x] in RELS` raises TypeError (unhashable), and a list or
+    mapping in a Row would crash every later `(src, rel, dst)` key."""
+    if not isinstance(d.get("rel"), str):
+        return ("malformed_rel", f"rel must be a string, got {type(d.get('rel')).__name__}")
+    if not isinstance(d.get("status"), str):
+        return ("malformed_status",
+                f"status must be a string, got {type(d.get('status')).__name__}")
+    return None
+
+
 def load_rows(ws: Workspace) -> list[Row]:
+    """The tolerant loader. A row whose `rel`/`status` is not a string is skipped
+    (the validating reader names it); no other check is made here."""
     out: list[Row] = []
     links = ws.root / "links"
     if not links.is_dir():
@@ -128,6 +143,8 @@ def load_rows(ws: Workspace) -> list[Row]:
     for p in sorted(links.glob("*.md")):
         meta, _ = frontmatter.parse(p.read_text(encoding="utf-8"))
         for d in meta.get("rows", []):
+            if isinstance(d, dict) and _enum_shape_problem(d):
+                continue
             out.append(Row(d["src"], d["rel"], d["dst"], d["status"], d["origin"],
                            d.get("reason"), d.get("scope"), d.get("resolution")))
     return out
@@ -149,8 +166,9 @@ def _diagnostic(name: str, file: str, detail: str, d=None) -> dict:
 
 def _check_row(d, file: str) -> tuple[Row | None, dict | None]:
     """Validate one raw row mapping: `(Row, None)` or `(None, diagnostic)`. The
-    first problem wins, in this order: missing_field, malformed_ref, unknown_rel,
-    unknown_status, then the `conflicts`-only checks."""
+    first problem wins, in this order: missing_field, malformed_ref, malformed_rel,
+    malformed_status (non-string `rel`/`status`, checked before any membership test),
+    unknown_rel, unknown_status, then the `conflicts`-only checks."""
     if not isinstance(d, dict):
         return None, _diagnostic("missing_field", file, "a row must be a mapping")
     missing = [k for k in LEGACY_KEYS if d.get(k) is None]
@@ -159,6 +177,9 @@ def _check_row(d, file: str) -> tuple[Row | None, dict | None]:
     if not (_is_ref(d["src"]) and _is_ref(d["dst"])):
         return None, _diagnostic("malformed_ref", file,
                                  "src and dst must be member:concept-id refs", d)
+    shape = _enum_shape_problem(d)
+    if shape:
+        return None, _diagnostic(shape[0], file, shape[1], d)
     if d["rel"] not in RELS:
         return None, _diagnostic("unknown_rel", file,
                                  f"rel {d['rel']!r} is not one of {sorted(RELS)}", d)
@@ -209,7 +230,7 @@ def read_rows_located(ws: Workspace) -> tuple[list[tuple[Row, str]], list[dict]]
 
 def read_rows(ws: Workspace) -> tuple[list[Row], list[dict]]:
     """`(rows, diagnostics)`: the validating reader (ADR 0018, Declared
-    conflicts). Diagnostic names: unknown_rel, unknown_status, malformed_ref,
+    conflicts). Diagnostic names: unknown_rel, unknown_status, malformed_rel, malformed_status, malformed_ref,
     missing_field, conflict_without_reason, invalid_scope, invalid_resolution,
     duplicate_key. `load_rows` stays the tolerant loader."""
     located, diags = read_rows_located(ws)

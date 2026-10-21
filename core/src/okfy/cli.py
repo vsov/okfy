@@ -8,7 +8,7 @@ from okfy.guard import GuardError
 from okfy.memory import EVENTS
 from okfy.passages import DEFAULT_PASSAGE_TOKENS
 from okfy.proposals import ACTIONS, FLAG_TYPES
-from okfy.segment import DEFAULT_BUDGET
+from okfy.segment import DEFAULT_BUDGET, CorpusListingError
 
 
 def _positive_int(v: str) -> int:
@@ -593,6 +593,9 @@ def main(argv=None) -> int:
     try:
         return HANDLERS[a.cmd](a)
     except GuardError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    except CorpusListingError as e:     # R21-3/R21-4/R22-1/R22-2: coded refusal (failed, partial, unreadable), message leads with the code
         print(str(e), file=sys.stderr)
         return 2
     except (FileNotFoundError, KeyError, ValueError) as e:

@@ -10,8 +10,10 @@ already-exported GIT_DIR. OKFy's generated pre-commit hook runs
 `okfy validate`, which asks the CORPUS repo questions while GIT_DIR still
 points at the bundle's hook — so validate silently read the wrong repo.
 """
+import errno
 import os
 import subprocess
+from pathlib import Path
 
 # Kept: identity and transport config a caller may deliberately set for THIS
 # invocation (e.g. tests pinning GIT_AUTHOR_*, or a real SSH/askpass setup).
@@ -41,3 +43,21 @@ def run_git(repo, *args, **kw) -> subprocess.CompletedProcess:
     if "env" in kw:
         env.update(kw.pop("env"))
     return subprocess.run(["git", "-C", str(repo), *args], env=env, **kw)
+
+
+def git_marker(directory) -> str:
+    """Structural probe of `<directory>/.git`: "absent", "present" or "unobservable".
+
+    `lstat`, not `exists()`: `exists()` follows a symlink, so a DANGLING `.git`
+    symlink (the entry is there, its target is not) read as absent, and any
+    OSError `stat` raised read as absent too. Here ENOENT/ENOTDIR is absent;
+    success is present whatever the entry is (a directory, a gitfile, a valid or
+    a dangling symlink: git decides what it is worth); any other OSError (EACCES,
+    ELOOP, ...) is unobservable, which is never the same answer as absent."""
+    try:
+        os.lstat(Path(directory) / ".git")
+    except FileNotFoundError:
+        return "absent"
+    except OSError as exc:
+        return "absent" if exc.errno == errno.ENOTDIR else "unobservable"
+    return "present"

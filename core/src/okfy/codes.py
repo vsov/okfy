@@ -160,13 +160,13 @@ CODES: dict[str, dict] = {
     },
     "E_CORPUS_SHA": {
         "kind": "error",
-        "summary": "(--strict-sources) meta/corpus.md's git_sha is malformed or not a real commit of the local corpus repo",
-        "way_out": "re-pin meta/corpus.md's git_sha to a real commit of the corpus repo",
+        "summary": "(--strict-sources) meta/corpus.md's git_sha is malformed or not a real commit of the local corpus repo, or the corpus's .git is dangling or cannot be observed",
+        "way_out": "re-pin meta/corpus.md's git_sha to a real commit of the corpus repo, or restore the corpus's .git and its permissions",
     },
     "W_CORPUS_SHA": {
         "kind": "warning",
-        "summary": "meta/corpus.md's git_sha is malformed or not a real commit of the local corpus repo",
-        "way_out": "re-pin meta/corpus.md's git_sha; becomes an error under --strict-sources",
+        "summary": "meta/corpus.md's git_sha is malformed or not a real commit of the local corpus repo, or the corpus's .git is dangling or cannot be observed",
+        "way_out": "re-pin meta/corpus.md's git_sha or restore the corpus's .git and its permissions; becomes an error under --strict-sources",
     },
     "E_EXEC_MISSING": {
         "kind": "error",
@@ -267,7 +267,7 @@ CODES: dict[str, dict] = {
     },
     "E_PATH_SCOPE": {
         "kind": "error",
-        "summary": "a concept's `path_scope` breaks the grammar: not a list, an entry that is not a non-empty string, absolute, containing `..`, a backslash, a NUL or a glob character (`*`, `?`, `[`, `]`), a duplicate, or starting with `./` other than the single entry `./`; raised by validate and by the write paths that would land it",
+        "summary": "a concept's `path_scope` breaks the grammar: not a list, an entry that is not a non-empty string, absolute, containing `..`, a backslash, a NUL or a glob character (`*`, `?`, `[`, `]`), a duplicate, starting with `./` other than the single entry `./`, or non-canonical (an empty segment `//`, a `.` segment, a trailing `/.`); raised by validate and by the write paths that would land it",
         "way_out": "write path_scope as a list of corpus-relative paths: a directory prefix ending in `/`, an exact file, or `./` for the whole root; `[]` means reviewed and applies to no path",
     },
     "W_PATH_SCOPE_UNRESOLVED": {
@@ -282,13 +282,13 @@ CODES: dict[str, dict] = {
     },
     "E_PREEDIT_ROOT": {
         "kind": "error",
-        "summary": "the pre-edit lookup has no verified root: meta/corpus.md is absent or unreadable, records no usable `corpus` directory, `--root` does not equal the recorded corpus after realpath, or a workspace was called without `--root`",
-        "way_out": "pass the root the snapshot was taken from (the `corpus` in meta/corpus.md), or repair meta/corpus.md (`okfy snapshot` re-records it)",
+        "summary": "the pre-edit lookup has no verified root: meta/corpus.md is absent or unreadable, records no usable `corpus` directory, `--root` does not equal the recorded corpus after realpath, a workspace was called without `--root`, or the root cannot be observed (no search permission on the root directory)",
+        "way_out": "pass the root the snapshot was taken from (the `corpus` in meta/corpus.md), or repair meta/corpus.md (`okfy snapshot` re-records it); for an unobservable root restore search permission on the root directory (`chmod u+x`)",
     },
     "E_PREEDIT_PATH": {
         "kind": "error",
-        "summary": "a pre-edit lookup input path is refused (reason: escapes_root, nul, outside_root, empty, names_root, backslash, symlink_escape), the path list is empty or has more than 500 entries, or no valid path is left",
-        "way_out": "pass 1 to 500 paths relative to the root (or absolute and inside it); pass the files, or a directory with a trailing `/`, not the root itself",
+        "summary": "a pre-edit lookup input path is refused (reason: escapes_root, nul, outside_root, empty, names_root, backslash, symlink_escape, ambiguous_dotdot, unresolvable_path), the path list is empty or has more than 500 entries, or no valid path is left",
+        "way_out": "pass 1 to 500 paths relative to the root (or absolute and inside it); pass the files, or a directory with a trailing `/`, not the root itself; for `unresolvable_path` repair the path (break the symlink loop, restore search permission on the directory, or name a real directory instead of a file)",
     },
     "E_PREEDIT_PAGE": {
         "kind": "error",
@@ -857,6 +857,11 @@ CODES: dict[str, dict] = {
         "kind": "error",
         "summary": "manifest-mode `okfy diff`/`okfy snapshot` could not fully list the corpus (an unreadable path, or an empty new listing against a non-empty old one)",
         "way_out": "fix the permissions on the reported path, or point meta/corpus.md at the right directory, then run okfy diff again — a partial listing would report every unlisted file as removed",
+    },
+    "E_CORPUS_LISTING": {
+        "kind": "error",
+        "summary": "(R21-3, R21-4, R22-1, R22-2) the corpus could not be captured completely, in one of three states: `failed` (a corpus whose ROOT holds `.git` is listed by git and git exited non-zero, the `.git` is empty or damaged, a dangling `.git` symlink, a garbage HEAD or index, no git executable, or the `.git` marker itself could not be observed, e.g. EACCES or ELOOP on the corpus path); `partial` (git exited 0 but wrote to stderr, e.g. an unreadable untracked subtree); `unreadable` (the listing succeeded, but a listed file or a directory could not be read) — `okfy survey`, `okfy segment`, `okfy init`, `okfy snapshot` refuse instead of walking the filesystem (which would add the gitignored files git was asked to leave out) or recording a baseline that silently lacks a file it just listed",
+        "way_out": "for `failed` and `partial`, repair the repository (run `git status` in it and fix what it reports, such as the unreadable path or the dangling `.git` link), or remove the stray .git if the corpus is not a repository; for `unreadable`, make the named paths readable, or exclude them (a .gitignore entry in a git corpus), then run the command again (`--force` does not turn unread bytes into read ones); nothing was read or written. A corpus with no .git at its root, or a subdirectory of a repository, is walked as before",
     },
     "E_CORPUS_DIRTY": {
         "kind": "error",

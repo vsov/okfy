@@ -1,7 +1,7 @@
 import contextlib
+import errno
 import fcntl
-import subprocess
-import sys
+import os
 from fnmatch import fnmatch
 from math import ceil
 from pathlib import Path
@@ -9,7 +9,7 @@ from pathlib import Path
 from okfy import frontmatter
 from okfy.actor import utc_now
 from okfy.bundle import Bundle, drop_bundle_paths
-from okfy.gitenv import run_git
+from okfy.gitenv import git_marker, run_git
 
 DEFAULT_BUDGET = 50_000  # ~tokens of material per Worker (ADR-0008)
 
@@ -71,30 +71,138 @@ def _default_excluded(rel: str) -> bool:
     return Path(name).suffix.lower() in DEFAULT_EXCLUDES["exts"]
 
 
-def _walk(corpus: Path) -> list[str]:
-    """Relative posix paths, files only. Git corpora get exact gitignore semantics."""
-    if (corpus / ".git").exists():
+E_CORPUS_LISTING = "E_CORPUS_LISTING"
+
+
+class CorpusListingError(Exception):
+    """A corpus could not be captured COMPLETELY (R21-3, R21-4, R22-1, R22-2).
+
+    `state` is "failed" (git exited non-zero or could not be run, or the corpus
+    root's `.git` marker could not be observed), "partial" (git exited 0 but
+    wrote to stderr: an unreadable subtree is a warning there, not a failure)
+    or "unreadable" (the listing succeeded, git's or the walk's, but a listed
+    file or a directory could not be READ: a successful listing does not prove
+    the bytes are readable). `listed` is what git printed for a partial listing,
+    else None. Not a ValueError: callers that treat ValueError as "no
+    information this round" (refresh_snapshot's diff probe, the CLI's generic
+    handler) must not swallow a refusal that widens or shrinks the corpus."""
+    code = E_CORPUS_LISTING
+
+    def __init__(self, corpus, state: str, detail: str, listed: list[str] | None = None):
+        self.corpus, self.state, self.detail, self.listed = Path(corpus), state, detail, listed
+        if state == "unreadable":
+            super().__init__(
+                f"{E_CORPUS_LISTING}: the corpus {self.corpus} was listed, but some of it "
+                f"could not be read (state: {state}; unreadable: {detail}). A file that "
+                "cannot be read is not a file that was removed, and a baseline captured "
+                "without it would claim evidence that is gone, so nothing was written. "
+                "Make those paths readable, or exclude them (a .gitignore entry in a git "
+                "corpus), then run the command again")
+            return
+        what = ("git could not list it" if state == "failed"
+                else "git listed it only partially")
+        said = f"; git said: {detail}" if detail else ""
+        super().__init__(
+            f"{E_CORPUS_LISTING}: the corpus {self.corpus} holds a .git at its root, "
+            f"so it is listed by git, and {what} (state: {state}{said}). A file git "
+            "did not list is not a file that was removed, and a walk would add the "
+            "gitignored files git was asked to leave out, so nothing was read or "
+            "written. Repair the repository (run `git status` in it), or remove the "
+            "stray .git if the corpus is not a repository")
+
+
+def _stderr_text(raw) -> str:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    return " ".join((raw or "").split())[:400]
+
+
+def git_listing(corpus: Path) -> list[str] | None:
+    """Every path git lists under `corpus` (tracked + untracked, gitignore
+    respected), embedded bundles dropped, or None when the corpus root holds
+    no `.git` (not selected). The one git listing both the plan (`_walk`) and
+    the corpus manifest (`init._manifest`) read, so they cannot disagree on
+    which corpora are git corpora.
+
+    Only a corpus whose ROOT holds `.git`: a subdirectory of a repo is walked,
+    because the enclosing repo's ignores are its owner's, and an ignored
+    directory would list empty. Bytes + `os.fsdecode`, as `os.walk` names
+    files, so a non-UTF-8 name is a path, not a UnicodeDecodeError.
+
+    The root marker is probed with `gitenv.git_marker` (R22-2), which has three
+    answers, not two: absent returns None (walk); present is selected (a
+    directory, a gitfile, a valid OR dangling symlink: `exists()` read the
+    dangling one as absent and walked the gitignored files in); unobservable
+    (`lstat` failed with something other than ENOENT/ENOTDIR: EACCES, ELOOP)
+    raises "failed" and never walks, because the answer is unknown, not "no".
+
+    Three outcomes for a selected corpus, never a silent fourth:
+    complete (exit 0, empty stderr) returns the list; failed (non-zero exit,
+    or git could not be run) and partial (exit 0 with ANY stderr, not matched
+    against English text) raise `CorpusListingError`. Any `.git` entry at the
+    root that git cannot list is failed, because git answers an empty `.git`
+    and a garbage HEAD alike with "not a git repository"."""
+    marker = git_marker(corpus)
+    if marker == "absent":
+        return None
+    if marker == "unobservable":
         try:
-            out = run_git(
-                corpus, "ls-files", "--cached", "--others",
-                "--exclude-standard", "-z",
-                capture_output=True, text=True, check=True).stdout
-            rels = {r for r in out.split("\0") if r and (corpus / r).is_file()}
-            return drop_bundle_paths(corpus, sorted(rels))
-        except subprocess.CalledProcessError:
-            print(f"warning: {corpus} has .git but is not a valid git repo; "
-                  "falling back to rglob", file=sys.stderr)
+            os.lstat(corpus / ".git")
+            why = "the .git marker could not be observed"
+        except OSError as exc:
+            why = (f"the .git marker could not be observed: "
+                   f"{errno.errorcode.get(exc.errno, exc.errno)} ({exc.strerror})")
+        raise CorpusListingError(corpus, "failed", why)
+    try:
+        r = run_git(corpus, "ls-files", "--cached", "--others", "--exclude-standard",
+                    "-z", capture_output=True)
+    except OSError as exc:                       # no git executable, unusable cwd
+        raise CorpusListingError(corpus, "failed", f"{type(exc).__name__}: {exc}") from exc
+    if r.returncode != 0:
+        raise CorpusListingError(corpus, "failed", _stderr_text(r.stderr))
+    listed = drop_bundle_paths(
+        corpus, sorted({os.fsdecode(b) for b in r.stdout.split(b"\0") if b}))
+    if r.stderr:
+        raise CorpusListingError(corpus, "partial", _stderr_text(r.stderr), listed)
+    return listed
+
+
+def _listing(corpus: Path) -> tuple[list[str], str]:
+    """(relative posix paths, files only; "git" or "walk"). The filesystem
+    walk is for a corpus git was NOT selected for; a selected corpus whose
+    listing is not complete raises `CorpusListingError` (R21-4)."""
+    listed = git_listing(corpus)
+    if listed is not None:
+        return [r for r in listed if (corpus / r).is_file()], "git"
     rels = []
     for p in sorted(corpus.rglob("*")):
         rel = p.relative_to(corpus)
         if p.is_file() and not any(part.startswith(".") for part in rel.parts):
             rels.append(rel.as_posix())
-    return drop_bundle_paths(corpus, rels)
+    return drop_bundle_paths(corpus, rels), "walk"
+
+
+def _walk(corpus: Path) -> list[str]:
+    """Relative posix paths, files only. Git corpora get exact gitignore semantics."""
+    return _listing(corpus)[0]
+
+
+def _utf8(rel: str) -> bool:
+    try:
+        rel.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
 
 
 def survey(corpus: Path, sample_chars: int = 400, max_samples: int = 25) -> dict:
     corpus = Path(corpus).resolve()
-    rels = _walk(corpus)
+    rels, listing = _listing(corpus)
+    # a name that is not UTF-8 cannot be cited from UTF-8 frontmatter: report
+    # it (escaped, so the JSON prints) instead of planning it
+    undecodable = [os.fsencode(r).decode("utf-8", "backslashreplace")
+                   for r in rels if not _utf8(r)]
+    rels = [r for r in rels if _utf8(r)]
     excluded = [r for r in rels if _default_excluded(r)]
     survivors = [r for r in rels if not _default_excluded(r)]
     binary = [r for r in survivors if not _is_text(corpus / r)]
@@ -113,10 +221,13 @@ def survey(corpus: Path, sample_chars: int = 400, max_samples: int = 25) -> dict
     for f in files[::step][:max_samples]:
         head = (corpus / f["path"]).read_text(encoding="utf-8")[:sample_chars]
         samples.append({"path": f["path"], "head": head})
-    return {"corpus": str(corpus), "file_count": len(files),
+    skipped = {"excluded": excluded, "binary": binary}
+    if undecodable:
+        skipped["undecodable"] = undecodable
+    return {"corpus": str(corpus), "listing": listing, "file_count": len(files),
             "tokens_est": sum(f["tokens_est"] for f in files),
             "by_ext": by_ext, "files": files, "samples": samples,
-            "skipped": {"excluded": excluded, "binary": binary},
+            "skipped": skipped,
             "oversized": [f["path"] for f in files if f["tokens_est"] > DEFAULT_BUDGET]}
 
 
