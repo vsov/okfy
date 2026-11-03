@@ -650,12 +650,13 @@ else
   echo "SMOKE NEG stat: PASS"
 fi
 
-step "NEG embed (vsov/okfy#11): deleted drafts of an --embed bundle are read from git"
-echo "SMOKE NEG embed: merge-audit must read both drafts; release-check must refuse a draft no commit holds"
+step "NEG embed (vsov/okfy#11, #13): deleted drafts of an --embed bundle are read from git"
+echo "SMOKE NEG embed: merge-audit must read both drafts; release-check must refuse a draft that does not parse and one no commit holds"
 # `git show <rev>:<path>` reads <path> from the repository root, and an --embed
 # bundle sits below it, so every draft read failed. recover_drafts still said
 # 'git', and release-check, which looked only at that state, passed its
-# recoverability check without reading a single draft.
+# recoverability check without reading a single draft. A committed draft whose
+# frontmatter does not parse was passed the same way, in any bundle.
 EC="$WORK/neg-embed/corpus"
 EB="$EC/kb"
 mkdir -p "$EC" || fail "NEG embed setup: mkdir"
@@ -671,7 +672,10 @@ for d in gamma-a gamma-b; do
   printf -- '---\ntype: GlossaryTerm\ntitle: Gamma\nsources: [app.md]\n---\n\nDraft %s.\n' "$d" \
     > "$EB/drafts/segment-01/$d.md"
 done
-{ git -C "$EC" add . && git -C "$EC" commit -qm "extract: two drafts"; } >/dev/null 2>&1 \
+# committed with the others; no merge_map names it until the unparsed check below
+printf -- '---\ntype: GlossaryTerm\ntitle: [unclosed\n---\n\nDraft gamma-bad.\n' \
+  > "$EB/drafts/segment-01/gamma-bad.md"
+{ git -C "$EC" add . && git -C "$EC" commit -qm "extract: three drafts"; } >/dev/null 2>&1 \
   || fail "NEG embed setup: could not commit the drafts"
 printf -- '---\ntype: GlossaryTerm\ntitle: Gamma\nsources: [app.md]\n---\n\nGamma.\n' \
   > "$EB/glossary/gamma.md"
@@ -709,12 +713,32 @@ emb_dissent "$WORK/emb-release.json"
 grep -q 'E_REL_DISSENT_UNADJUDICATED' "$WORK/emb-release.json" \
   && ! grep -q 'E_REL_DISSENT_UNVERIFIABLE' "$WORK/emb-release.json" \
   || { cat "$WORK/emb-release.json"; fail "NEG embed setup: release-check did not reach adjudication with readable drafts"; }
-# A merge_map entry for a draft that no commit ever held: recovery still says
-# 'git' (the deletion commit is found), but one draft is missing from what it read.
+# Two drafts a merge group can name that recovery cannot hand back, while its
+# state still says 'git' (the deletion commit is found): one committed with
+# frontmatter that does not parse (#13), and one no commit ever held. Each gets
+# its own copy of the corpus, because the ledger only grows: once one of them is
+# in the merge map, the other could not turn the gate red on its own.
+emb_unverifiable() {   # $1 = report, $2 = the draft the refusal must name
+  python - "$1" "$2" <<'PY'
+import json, sys
+problems = json.load(open(sys.argv[1]))["problems"]
+assert any(p.startswith("E_REL_DISSENT_UNVERIFIABLE") and sys.argv[2] in p
+           for p in problems), problems
+PY
+}
+EMB_DEL="$(git -C "$EB" log -n 1 --format=%H --diff-filter=D -- 'drafts/*')"
+git -C "$EB" show "$EMB_DEL^:./drafts/segment-01/gamma-bad.md" >/dev/null 2>&1 \
+  || fail "NEG embed setup: the unparsable draft is not in the commit before the deletion"
+cp -R "$EC" "$WORK/neg-embed/corpus-missing" || fail "NEG embed setup: could not copy the corpus"
+emb_ledger run-2 "drafts/segment-01/gamma-bad=glossary/gamma"
+emb_dissent "$WORK/emb-unparsed.json"
+emb_unverifiable "$WORK/emb-unparsed.json" drafts/segment-01/gamma-bad \
+  || fail "NEG embed: release-check passed the dissent check with a committed draft whose frontmatter does not parse"
+EB="$WORK/neg-embed/corpus-missing/kb"
 emb_ledger run-2 "drafts/segment-01/gamma-c=glossary/gamma"
 emb_dissent "$WORK/emb-missing.json"
-grep -q 'E_REL_DISSENT_UNVERIFIABLE' "$WORK/emb-missing.json" \
-  || { cat "$WORK/emb-missing.json"; fail "NEG embed: release-check passed the dissent check with a draft it could not read"; }
+emb_unverifiable "$WORK/emb-missing.json" drafts/segment-01/gamma-c \
+  || fail "NEG embed: release-check passed the dissent check with a draft no commit holds"
 echo "SMOKE NEG embed: PASS"
 
 printf '\nSMOKE OK\n'
