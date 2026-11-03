@@ -83,11 +83,27 @@ def merge_groups(bundle: Bundle) -> tuple[str, list[dict]]:
 
 
 def _resolve_ref(bundle: Bundle, ref: str | None) -> tuple[str, str | None]:
-    """(state, resolved-sha). state is 'ok', 'unreachable-ref', or 'git-error'."""
+    """(state, resolved-sha). state is 'ok', 'unreachable-ref', or 'git-error'.
+
+    With no `ref`, the parent of the newest commit that deleted `drafts/`.
+
+    `--full-history`: with a path filter git simplifies history by default, and
+    at a merge whose tree matches one parent for `drafts/*` it follows that
+    parent only. A bundle consolidated on a branch and merged with a merge
+    commit into a line that never held `drafts/` then lost its deletion commit
+    (vsov/okfy#10), and a re-extraction merged that way recovered the PREVIOUS
+    run's drafts. A merge is not itself listed: with no `-m` it shows no diff.
+
+    `--date-order`: every deletion on any merged line is now listed, and the
+    first one is used, so it must be the newest. Commit dates alone do not
+    promise that (clock skew, rebased commits); this order never shows a
+    commit before its descendants and falls back to dates only between lines
+    that are not ancestors of each other."""
     if not _is_git_repo(bundle):
         return ("git-error", None)
     if ref is None:
-        log = _git(bundle, "log", "--format=%H", "--diff-filter=D", "--", "drafts/*")
+        log = _git(bundle, "log", "--format=%H", "--full-history", "--date-order",
+                   "--diff-filter=D", "--", "drafts/*")
         if log.returncode != 0:
             return ("git-error", None)
         shas = log.stdout.split()

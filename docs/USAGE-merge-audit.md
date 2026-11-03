@@ -75,9 +75,15 @@ An explicit `--ref` overrides the working tree even if drafts happen to be prese
 if you name a ref, that is what gets audited. To find the right ref yourself:
 
 ```bash
-git -C ~/bundles/my-bundle log --oneline --diff-filter=D -- 'drafts/*'
-# the parent of the commit listed there is the pre-consolidation state
+git -C ~/bundles/my-bundle log --oneline --full-history --date-order --diff-filter=D -- 'drafts/*'
+# the parent of the first commit listed there is the pre-consolidation state
 ```
+
+`--full-history` matters once the bundle's branch has been merged with a merge commit:
+without it, git follows only the parent that matches the merge for `drafts/*` and can
+skip the branch that deleted the drafts. `--date-order` lists the newest deletion first
+when a re-extraction has deleted `drafts/` more than once. This is the same lookup
+`merge-audit`, `schism` and `release-check` use.
 
 ### 1.6 Machine-readable output
 
