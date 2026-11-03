@@ -138,7 +138,12 @@ def recover_drafts(bundle: Bundle, draft_ids, ref: str | None = None
         return (state, {})
     out = {}
     for did in ids:
-        show = _git(bundle, "show", f"{sha}:{did}.md")
+        # `./`: in `<rev>:<path>` git reads <path> from the repository root,
+        # not the current directory. An --embed bundle sits below that root,
+        # so the bare form failed on every draft and this returned ('git', {})
+        # (vsov/okfy#11); `./` makes it relative to the bundle root, which is
+        # the repository root for a standalone bundle.
+        show = _git(bundle, "show", f"{sha}:./{did}.md")
         if show.returncode != 0:
             continue
         _parse(did, show.stdout, out)

@@ -52,8 +52,12 @@ For each group, **before you open the final concept and before you look at the
 findings**, read the drafts:
 
 ```bash
-git -C <bundle> show <pre-consolidation-ref>:<draft-id>.md
+git -C <bundle> show <pre-consolidation-ref>:./<draft-id>.md
 ```
+
+Keep the `./`: without it git reads the path from the repository root, so in a
+bundle created with `--embed` (a subdirectory of the corpus repository) every
+draft reads as missing.
 
 Then answer, in writing:
 

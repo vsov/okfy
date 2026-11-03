@@ -741,8 +741,8 @@ def _check_dissent(bundle: Bundle, problems: list, notes: list):
     # required contract that is a failure of the evidence, not a detail — the
     # same standard merge-audit applies to itself when it refuses to report
     # "clean" for groups it could not read.
-    rstate, _ = recover_drafts(bundle, sorted({d for g in groups
-                                               for d in g["drafts"]}))
+    wanted = sorted({d for g in groups for d in g["drafts"]})
+    rstate, recovered = recover_drafts(bundle, wanted)
     if rstate not in ("live", "git"):
         problems.append(
             f"E_REL_DISSENT_UNVERIFIABLE: acceptance.dissent is required but the "
@@ -750,6 +750,19 @@ def _check_dissent(bundle: Bundle, problems: list, notes: list):
             f"adjudication in meta/dissent.jsonl is unfalsifiable and cannot be "
             f"redone; restore the history that holds drafts/ or drop the "
             f"required contract")
+        return
+    # The state says where recovery looked, not that it found anything: a draft
+    # that could not be read or parsed is only absent from the mapping. Checking
+    # the state alone passed an --embed bundle whose every read failed
+    # (vsov/okfy#11). merge-audit already counts these as unverifiable.
+    missing = [d for d in wanted if d not in recovered]
+    if missing:
+        problems.append(
+            f"E_REL_DISSENT_UNVERIFIABLE: acceptance.dissent is required but "
+            f"{len(missing)} of {len(wanted)} pre-consolidation draft(s) cannot be "
+            f"read ({rstate}; e.g. {', '.join(missing[:3])}) — their adjudications "
+            f"in meta/dissent.jsonl are unfalsifiable and cannot be redone; restore "
+            f"the history that holds those drafts or drop the required contract")
         return
 
     unadjudicated, open_, stale = [], [], []
