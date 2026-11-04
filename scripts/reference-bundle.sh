@@ -1121,6 +1121,76 @@ SC=$(session 'set -euo pipefail
 echo "  session C (gemini-cli/0.3): $SC"
 rm -rf "$SCEN"
 
+# --- a merge commit does not hide the drafts (vsov/okfy#10) ---------------------
+# The dissent gate recovers the drafts at the parent of the commit that deleted
+# them. A path-filtered `git log` simplifies history: at a merge whose tree
+# matches one parent for drafts/*, it follows that parent only. A bundle
+# consolidated on a branch and merged with a merge commit into a line that never
+# held drafts/ lost its deletion commit, and release-check went red with
+# E_REL_DISSENT_UNVERIFIABLE over a tree identical to the green one. A
+# re-extraction merged that way was worse: it silently recovered the PREVIOUS
+# run's drafts. Both layouts are built on copies, and neither merge changes a
+# file. Each copy first proves that a plain `git log` loses the deletion it needs,
+# so the check cannot pass without testing anything.
+#
+# Plumbing, not `git switch` + `git merge`: the bundle is green with uncommitted
+# and untracked files in its working tree, and its pre-commit hook runs on every
+# porcelain commit. `commit-tree` writes the commit `git merge --no-ff` would
+# (the second parent's tree, both parents), and `update-ref` moves the checked-out
+# branch onto it. The tree is the one HEAD already had, so neither the index nor
+# the working tree goes out of step with it.
+step "merged history: a merge commit does not hide the deleted drafts"
+DRAFTS_ADD="$(git -C "$BUNDLE" log -n 1 --format=%H --diff-filter=A -- 'drafts/*')"
+DRAFTS_DEL="$(git -C "$BUNDLE" log -n 1 --format=%H --diff-filter=D -- 'drafts/*')"
+[ -n "$DRAFTS_ADD" ] && [ -n "$DRAFTS_DEL" ] \
+  || fail "merged history premise: no commit added and then deleted drafts/"
+BRANCH="$(git -C "$BUNDLE" symbolic-ref --short HEAD)"
+
+# the bundle's branch, merged into a line cut before the drafts ever existed
+MERGED="$WORK/merged-okf"
+rm -rf "$MERGED"
+cp -R "$BUNDLE" "$MERGED"
+M="$(git -C "$MERGED" commit-tree "$BRANCH^{tree}" -p "$DRAFTS_ADD^" -p "$BRANCH" \
+       -m "merge the bundle branch")"
+git -C "$MERGED" update-ref "refs/heads/$BRANCH" "$M"
+[ -z "$(git -C "$MERGED" log --format=%H --diff-filter=D -- 'drafts/*')" ] \
+  || fail "merged history premise: a simplified git log still finds the deletion"
+set +e
+okfy release-check "$MERGED" > "$WORK/merged.json"
+MRC=$?
+set -e
+grep -q E_REL_DISSENT_UNVERIFIABLE "$WORK/merged.json" \
+  && { cat "$WORK/merged.json"; fail "a merge commit hid the deleted drafts from release-check"; }
+[ "$MRC" -eq 0 ] && grep -q '"ok": true' "$WORK/merged.json" \
+  || { cat "$WORK/merged.json"; fail "the merged bundle no longer passes (exit $MRC)"; }
+okfy merge-audit "$MERGED" --json > "$WORK/merged-audit.json" || fail "okfy merge-audit (merged)"
+grep -q "\"ref\": \"$(git -C "$MERGED" rev-parse "$DRAFTS_DEL^")\"" "$WORK/merged-audit.json" \
+  || { cat "$WORK/merged-audit.json"; fail "merge-audit did not read the parent of the deletion"; }
+rm -rf "$MERGED"
+echo "  merged into a line without drafts/: release-check ok, drafts read at the deletion's parent"
+
+# a second extraction on a side line (drafts back, then deleted again), merged
+# into the bundle's branch, whose own history already holds the first deletion
+RERUN="$WORK/rerun-okf"
+rm -rf "$RERUN"
+cp -R "$BUNDLE" "$RERUN"
+WITH_DRAFTS="$({ git -C "$RERUN" ls-tree "$BRANCH"
+                 git -C "$RERUN" ls-tree "$DRAFTS_DEL^" drafts; } | git -C "$RERUN" mktree)"
+RERUN_ADD="$(git -C "$RERUN" commit-tree "$WITH_DRAFTS" -p "$BRANCH" \
+               -m "extract: re-extraction of segment-01")"
+RERUN_DEL="$(git -C "$RERUN" commit-tree "$BRANCH^{tree}" -p "$RERUN_ADD" \
+               -m "consolidate: re-extraction of segment-01")"
+M="$(git -C "$RERUN" commit-tree "$BRANCH^{tree}" -p "$BRANCH" -p "$RERUN_DEL" \
+       -m "merge the re-extraction")"
+git -C "$RERUN" update-ref "refs/heads/$BRANCH" "$M"
+[ "$(git -C "$RERUN" log -n 1 --format=%H --diff-filter=D -- 'drafts/*')" = "$DRAFTS_DEL" ] \
+  || fail "rerun premise: a simplified git log does not fall back to the first run's deletion"
+okfy merge-audit "$RERUN" --json > "$WORK/rerun-audit.json" || fail "okfy merge-audit (rerun)"
+grep -q "\"ref\": \"$RERUN_ADD\"" "$WORK/rerun-audit.json" \
+  || { cat "$WORK/rerun-audit.json"; fail "a re-extraction merged with a merge commit read the first run's drafts"; }
+rm -rf "$RERUN"
+echo "  re-extraction merged with a merge commit: drafts read from the second run, not the first"
+
 # --- the positive control ----------------------------------------------------
 # Twenty-five breaks all went red. That is only evidence if the bundle they were made
 # from is still green: a permanently red artifact would satisfy every assertion

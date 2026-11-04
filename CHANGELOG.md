@@ -10,6 +10,31 @@ how `okfy query` ranks a single bundle. The contributed retrieval change (the fi
 contributed subsections below) does: it moves the retrieval code digest (see there), and
 the round-19 subsection moves it a second time.
 
+### Deleted drafts are found across merges and in embedded bundles
+
+Contributed by @vbanas (vsov/okfy#12, vsov/okfy#14; issues vsov/okfy#10, #11, #13), with one
+neighbouring case added here. `merge-audit`, `schism` and `release-check` all read the
+pre-consolidation drafts through the same lookup.
+
+- **A merge commit no longer hides the deletion of `drafts/`.** The lookup is
+  `git log --full-history --date-order`. Before, a bundle consolidated on a branch and merged
+  with a merge commit into a line that never held `drafts/` read as `unreachable-ref`. A
+  re-extraction merged that way silently read the previous run's drafts.
+- **A merge that itself deletes `drafts/` is the deletion.** The lookup also uses
+  `--diff-merges=first-parent`. Before, such a merge was never listed, and the lookup fell back to
+  an older deletion and audited the previous run's drafts. This was true before the change
+  above too.
+- **An embedded bundle reads its drafts.** Drafts are read as `<commit>:./<draft>.md`, relative to
+  the bundle. A bundle made with `okfy init --embed` sits below its repository's root, so every
+  read missed and recovery reported `git` with no draft read.
+- **Stricter `release-check`.** Under `acceptance.dissent: required`, any draft of a merge group
+  that cannot be read or parsed now fails with `E_REL_DISSENT_UNVERIFIABLE`, naming the draft.
+  Before, the gate checked only the recovery state and passed. `merge-audit` already reported
+  these groups as unverifiable. No new codes; the retrieval and federation code digests are
+  unchanged.
+- `scripts/smoke.sh` has a `NEG embed` step and `scripts/reference-bundle.sh` two merged-history
+  checks. Each fails against the previous code.
+
 ### Round 23
 
 - **R23-1:** `scripts/memory-recipe.sh` captures the selected directory without losing a trailing

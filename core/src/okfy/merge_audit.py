@@ -83,11 +83,37 @@ def merge_groups(bundle: Bundle) -> tuple[str, list[dict]]:
 
 
 def _resolve_ref(bundle: Bundle, ref: str | None) -> tuple[str, str | None]:
-    """(state, resolved-sha). state is 'ok', 'unreachable-ref', or 'git-error'."""
+    """(state, resolved-sha). state is 'ok', 'unreachable-ref', or 'git-error'.
+
+    With no `ref`, the parent of the newest commit that deleted `drafts/`.
+
+    `--full-history`: with a path filter git simplifies history by default, and
+    at a merge whose tree matches one parent for `drafts/*` it follows that
+    parent only. A bundle consolidated on a branch and merged with a merge
+    commit into a line that never held `drafts/` then lost its deletion commit
+    (vsov/okfy#10), and a re-extraction merged that way recovered the PREVIOUS
+    run's drafts.
+
+    `--diff-merges=first-parent`: a merge can itself delete `drafts/` (the
+    consolidation done while resolving it). With no diff for merges, git never
+    listed it and the lookup fell back to an OLDER deletion, auditing the
+    previous run's drafts. Diffed against its first parent, such a merge is
+    the deletion. A merge that brings in a branch's deletion is listed only
+    when its first parent still held drafts, and that parent is then the
+    state the deletion removed. `--no-patch` because that option otherwise
+    prints the diffs.
+
+    `--date-order`: every deletion on any merged line is now listed, and the
+    first one is used, so it must be the newest. Commit dates alone do not
+    promise that (clock skew, rebased commits); this order never shows a
+    commit before its descendants and falls back to dates only between lines
+    that are not ancestors of each other."""
     if not _is_git_repo(bundle):
         return ("git-error", None)
     if ref is None:
-        log = _git(bundle, "log", "--format=%H", "--diff-filter=D", "--", "drafts/*")
+        log = _git(bundle, "log", "--format=%H", "--full-history", "--date-order",
+                   "--diff-merges=first-parent", "--no-patch",
+                   "--diff-filter=D", "--", "drafts/*")
         if log.returncode != 0:
             return ("git-error", None)
         shas = log.stdout.split()
@@ -138,7 +164,12 @@ def recover_drafts(bundle: Bundle, draft_ids, ref: str | None = None
         return (state, {})
     out = {}
     for did in ids:
-        show = _git(bundle, "show", f"{sha}:{did}.md")
+        # `./`: in `<rev>:<path>` git reads <path> from the repository root,
+        # not the current directory. An --embed bundle sits below that root,
+        # so the bare form failed on every draft and this returned ('git', {})
+        # (vsov/okfy#11); `./` makes it relative to the bundle root, which is
+        # the repository root for a standalone bundle.
+        show = _git(bundle, "show", f"{sha}:./{did}.md")
         if show.returncode != 0:
             continue
         _parse(did, show.stdout, out)

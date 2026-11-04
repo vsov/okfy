@@ -650,4 +650,95 @@ else
   echo "SMOKE NEG stat: PASS"
 fi
 
+step "NEG embed (vsov/okfy#11, #13): deleted drafts of an --embed bundle are read from git"
+echo "SMOKE NEG embed: merge-audit must read both drafts; release-check must refuse a draft that does not parse and one no commit holds"
+# `git show <rev>:<path>` reads <path> from the repository root, and an --embed
+# bundle sits below it, so every draft read failed. recover_drafts still said
+# 'git', and release-check, which looked only at that state, passed its
+# recoverability check without reading a single draft. A committed draft whose
+# frontmatter does not parse was passed the same way, in any bundle.
+EC="$WORK/neg-embed/corpus"
+EB="$EC/kb"
+mkdir -p "$EC" || fail "NEG embed setup: mkdir"
+printf '# App\n\nOne tracked note.\n' > "$EC/app.md"
+{ git -C "$EC" init -q && git -C "$EC" add . && git -C "$EC" commit -qm "initial"; } \
+  >/dev/null 2>&1 || fail "NEG embed setup: could not commit the corpus"
+okfy init "$EB" --corpus "$EC" --embed --language en >/dev/null 2>"$WORK/emb-init.err" \
+  || { cat "$WORK/emb-init.err"; fail "NEG embed setup: okfy init --embed"; }
+grep -q 'dissent: required' "$EB/meta/purpose.md" \
+  || fail "NEG embed setup: --embed no longer requires dissent, so release-check would skip the check"
+mkdir -p "$EB/drafts/segment-01" "$EB/glossary"
+for d in gamma-a gamma-b; do
+  printf -- '---\ntype: GlossaryTerm\ntitle: Gamma\nsources: [app.md]\n---\n\nDraft %s.\n' "$d" \
+    > "$EB/drafts/segment-01/$d.md"
+done
+# committed with the others; no merge_map names it until the unparsed check below
+printf -- '---\ntype: GlossaryTerm\ntitle: [unclosed\n---\n\nDraft gamma-bad.\n' \
+  > "$EB/drafts/segment-01/gamma-bad.md"
+{ git -C "$EC" add . && git -C "$EC" commit -qm "extract: three drafts"; } >/dev/null 2>&1 \
+  || fail "NEG embed setup: could not commit the drafts"
+printf -- '---\ntype: GlossaryTerm\ntitle: Gamma\nsources: [app.md]\n---\n\nGamma.\n' \
+  > "$EB/glossary/gamma.md"
+rm -rf "$EB/drafts"
+{ git -C "$EC" add -A && git -C "$EC" commit -qm "consolidate: 1 concept from 2 drafts"; } \
+  >/dev/null 2>&1 || fail "NEG embed setup: could not commit the consolidation"
+emb_ledger() {   # $1 = run id, $2 = merge map
+  okfy ledger add "$EB" --run "$1" --segment consolidation --inputs app.md \
+    --prompt-version consolidate@1 --outputs glossary/gamma --validation ok \
+    --merge-map "$2" >/dev/null 2>"$WORK/emb-ledger.err" \
+    || { cat "$WORK/emb-ledger.err"; fail "NEG embed setup: okfy ledger add ($1)"; }
+}
+emb_ledger run-1 "drafts/segment-01/gamma-a=glossary/gamma,drafts/segment-01/gamma-b=glossary/gamma"
+[ "$(git -C "$EB" rev-parse --show-prefix)" = "kb/" ] \
+  || fail "NEG embed setup: the bundle is not a subdirectory of its repository"
+[ ! -e "$EB/.git" ] || fail "NEG embed setup: the bundle has a repository of its own"
+okfy merge-audit "$EB" --json > "$WORK/emb-audit.json" 2>"$WORK/emb-audit.err" \
+  || { cat "$WORK/emb-audit.err"; fail "NEG embed setup: okfy merge-audit exited non-zero"; }
+EMB_AUDIT_MSG="NEG embed: merge-audit did not read the deleted drafts of an --embed bundle from git"
+python - "$WORK/emb-audit.json" <<'PY' || fail "$EMB_AUDIT_MSG"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["recovery"] == "git" and d["groups_total"] == 1, d
+assert d["unverifiable"] == [], d["unverifiable"]
+PY
+emb_dissent() {   # $1 = output file; release-check is red either way, only its dissent lines count
+  set +e
+  okfy release-check "$EB" > "$1" 2>"$WORK/emb-release.err"
+  set -e
+  python -c 'import json, sys; json.load(open(sys.argv[1]))' "$1" 2>/dev/null \
+    || { cat "$1" "$WORK/emb-release.err"; fail "NEG embed setup: release-check printed no JSON report"; }
+}
+emb_dissent "$WORK/emb-release.json"
+# Readable drafts: the check moves on to adjudication, which nothing has done yet.
+grep -q 'E_REL_DISSENT_UNADJUDICATED' "$WORK/emb-release.json" \
+  && ! grep -q 'E_REL_DISSENT_UNVERIFIABLE' "$WORK/emb-release.json" \
+  || { cat "$WORK/emb-release.json"; fail "NEG embed setup: release-check did not reach adjudication with readable drafts"; }
+# Two drafts a merge group can name that recovery cannot hand back, while its
+# state still says 'git' (the deletion commit is found): one committed with
+# frontmatter that does not parse (#13), and one no commit ever held. Each gets
+# its own copy of the corpus, because the ledger only grows: once one of them is
+# in the merge map, the other could not turn the gate red on its own.
+emb_unverifiable() {   # $1 = report, $2 = the draft the refusal must name
+  python - "$1" "$2" <<'PY'
+import json, sys
+problems = json.load(open(sys.argv[1]))["problems"]
+assert any(p.startswith("E_REL_DISSENT_UNVERIFIABLE") and sys.argv[2] in p
+           for p in problems), problems
+PY
+}
+EMB_DEL="$(git -C "$EB" log -n 1 --format=%H --diff-filter=D -- 'drafts/*')"
+git -C "$EB" show "$EMB_DEL^:./drafts/segment-01/gamma-bad.md" >/dev/null 2>&1 \
+  || fail "NEG embed setup: the unparsable draft is not in the commit before the deletion"
+cp -R "$EC" "$WORK/neg-embed/corpus-missing" || fail "NEG embed setup: could not copy the corpus"
+emb_ledger run-2 "drafts/segment-01/gamma-bad=glossary/gamma"
+emb_dissent "$WORK/emb-unparsed.json"
+emb_unverifiable "$WORK/emb-unparsed.json" drafts/segment-01/gamma-bad \
+  || fail "NEG embed: release-check passed the dissent check with a committed draft whose frontmatter does not parse"
+EB="$WORK/neg-embed/corpus-missing/kb"
+emb_ledger run-2 "drafts/segment-01/gamma-c=glossary/gamma"
+emb_dissent "$WORK/emb-missing.json"
+emb_unverifiable "$WORK/emb-missing.json" drafts/segment-01/gamma-c \
+  || fail "NEG embed: release-check passed the dissent check with a draft no commit holds"
+echo "SMOKE NEG embed: PASS"
+
 printf '\nSMOKE OK\n'
