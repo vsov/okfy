@@ -18,8 +18,9 @@ okfy merge-audit ~/bundles/my-bundle
 ```
 
 That is the whole thing for a bundle that has already been consolidated. The tool
-reconstructs the merge groups from the ledger's `merge_map`, auto-detects the commit
-before `drafts/` was deleted, recovers the drafts from it, and prints a report.
+reconstructs the merge groups from the ledger's `merge_map`, finds, for each
+consolidation run, the commit before that run deleted its drafts, recovers the drafts
+from those commits, and prints a report.
 
 It **never fails your build**. Exit code 0 means the audit ran, not that it found
 nothing. `release-check` is not affected by anything it reports.
@@ -41,7 +42,9 @@ unverifiable: 0
 
 The header line tells you three things. `state` is how the drafts were obtained;
 `groups` is how many multi-draft merges exist at all; `with findings` is how many of
-them have something to look at.
+them have something to look at. Once an update has merged new drafts into existing
+concepts, the drafts come from more than one commit and the header lists them all:
+`state: ok (refs 5bbeef9, 0c4d2a1)`.
 
 Read `unverifiable` first, every time. `unverifiable: 0` means every group was actually
 inspected. Anything else prints `N group(s) NOT AUDITED` with a reason, and it means
@@ -72,12 +75,14 @@ okfy merge-audit ~/bundles/my-bundle --ref 5bbeef92fbbe
 ```
 
 An explicit `--ref` overrides the working tree even if drafts happen to be present —
-if you name a ref, that is what gets audited. To find the right ref yourself:
+if you name a ref, that is what gets audited, for every draft. Without one, each
+consolidation run's drafts are read where that run deleted them. To list the deletions
+yourself:
 
 ```bash
 git -C ~/bundles/my-bundle log --oneline --full-history --date-order \
-    --diff-merges=first-parent --no-patch --diff-filter=D -- 'drafts/*'
-# the parent of the first commit listed there is the pre-consolidation state
+    --diff-merges=first-parent --no-renames --name-only --diff-filter=D -- 'drafts/*'
+# each commit listed, with the drafts it deleted; its parent still holds them
 ```
 
 `--full-history` matters once the bundle's branch has been merged with a merge commit:
@@ -85,8 +90,15 @@ without it, git follows only the parent that matches the merge for `drafts/*` an
 skip the branch that deleted the drafts. `--date-order` lists the newest deletion first
 when a re-extraction has deleted `drafts/` more than once. `--diff-merges=first-parent`
 lists a merge commit that itself deleted `drafts/`, which git otherwise never shows as a
-deletion; `--no-patch` keeps it from printing the diffs. This is the same lookup
-`merge-audit`, `schism` and `release-check` use.
+deletion.
+
+A draft belongs to the last ledger row whose `merge_map` names it, and it is read at the
+parent of the newest commit that deleted all of that row's drafts: the row's
+consolidation, or a re-extraction that deleted the same drafts again. A draft id alone is
+not enough to find it, because re-extraction reuses ids and two branches can each
+extract and delete the same id with different content. If no one commit deleted all of
+a row's drafts, each of them is read at the newest deletion of its own path. This is
+the same lookup `merge-audit`, `schism` and `release-check` use.
 
 ### 1.6 Machine-readable output
 
@@ -94,6 +106,9 @@ deletion; `--no-patch` keeps it from printing the diffs. This is the same lookup
 okfy merge-audit ~/bundles/my-bundle --json | jq '.by_kind'
 okfy merge-audit ~/bundles/my-bundle --quiet     # summary only, no per-group detail
 ```
+
+In the JSON, `refs` maps each draft read from git to the commit it was read at. `ref`
+is that commit when every draft was read at the same one, and `null` otherwise.
 
 ### 1.7 What a false positive looks like
 

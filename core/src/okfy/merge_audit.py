@@ -82,10 +82,22 @@ def merge_groups(bundle: Bundle) -> tuple[str, list[dict]]:
     return ("ok", sorted(groups, key=lambda g: g["final"]))
 
 
-def _resolve_ref(bundle: Bundle, ref: str | None) -> tuple[str, str | None]:
-    """(state, resolved-sha). state is 'ok', 'unreachable-ref', or 'git-error'.
+# A commit id as git prints it: 40 hex digits, or 64 in a SHA-256 repository.
+_SHA_RE = re.compile(rb"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
-    With no `ref`, the parent of the newest commit that deleted `drafts/`.
+
+def _commit(bundle: Bundle, rev: str) -> str | None:
+    """The commit `rev` names, or None when it names none."""
+    probe = _git(bundle, "rev-parse", "--verify", f"{rev}^{{commit}}")
+    return probe.stdout.strip() if probe.returncode == 0 else None
+
+
+def _deletions(bundle: Bundle) -> tuple[str, dict[str, list[str]]]:
+    """(state, {draft path: [sha, ...]}): every commit that deleted each draft
+    path, newest first. state is 'ok' or 'git-error'.
+
+    One `git log` over `drafts/` lists each deleting commit with the draft
+    paths it deleted.
 
     `--full-history`: with a path filter git simplifies history by default, and
     at a merge whose tree matches one parent for `drafts/*` it follows that
@@ -100,30 +112,95 @@ def _resolve_ref(bundle: Bundle, ref: str | None) -> tuple[str, str | None]:
     previous run's drafts. Diffed against its first parent, such a merge is
     the deletion. A merge that brings in a branch's deletion is listed only
     when its first parent still held drafts, and that parent is then the
-    state the deletion removed. `--no-patch` because that option otherwise
-    prints the diffs.
+    state the deletion removed.
 
-    `--date-order`: every deletion on any merged line is now listed, and the
-    first one is used, so it must be the newest. Commit dates alone do not
+    `--date-order`: deletions on every merged line are listed, and the first
+    one listed for a path counts as its newest. Commit dates alone do not
     promise that (clock skew, rebased commits); this order never shows a
     commit before its descendants and falls back to dates only between lines
-    that are not ancestors of each other."""
-    if not _is_git_repo(bundle):
-        return ("git-error", None)
-    if ref is None:
-        log = _git(bundle, "log", "--format=%H", "--full-history", "--date-order",
-                   "--diff-merges=first-parent", "--no-patch",
-                   "--diff-filter=D", "--", "drafts/*")
-        if log.returncode != 0:
-            return ("git-error", None)
-        shas = log.stdout.split()
-        if not shas:
-            return ("unreachable-ref", None)
-        ref = f"{shas[0]}^"
-    probe = _git(bundle, "rev-parse", "--verify", f"{ref}^{{commit}}")
-    if probe.returncode != 0:
-        return ("unreachable-ref", None)
-    return ("ok", probe.stdout.strip())
+    that are not ancestors of each other.
+
+    `--no-renames`: a draft moved inside `drafts/` is a deletion of its path.
+    `--relative`: paths relative to the bundle root, which an `--embed`
+    bundle does not share with its repository. `-z`: paths verbatim.
+
+    The output is each commit id, then a line feed and its NUL-terminated
+    paths. A token that is neither fails the lookup closed as 'git-error':
+    skipping it could hide the deletion a draft should be read at, and the
+    draft would be read at an older one."""
+    log = run_git(bundle.root, "log", "-z", "--format=%H", "--full-history",
+                  "--date-order", "--diff-merges=first-parent", "--no-renames",
+                  "--relative", "--name-only", "--diff-filter=D",
+                  "--", "drafts/*", capture_output=True)
+    if log.returncode != 0:
+        return ("git-error", {})
+    out: dict[str, list[str]] = {}
+    sha = None
+    for tok in log.stdout.split(b"\0"):
+        tok = tok.removeprefix(b"\n")
+        if not tok:
+            continue
+        if _SHA_RE.fullmatch(tok):
+            sha = tok.decode("ascii")
+        elif sha is not None and tok.startswith(b"drafts/"):
+            out.setdefault(tok.decode("utf-8", "surrogateescape"), []).append(sha)
+        else:
+            return ("git-error", {})
+    return ("ok", out)
+
+
+def _newest_common(lists: list[list[str]]) -> str | None:
+    """The newest sha present in every list. Each list is newest first and
+    taken from the same `git log`, so the first common sha of any one of them
+    is the newest."""
+    rest = [set(shas) for shas in lists[1:]]
+    return next((s for s in lists[0] if all(s in r for r in rest)), None)
+
+
+def _deletion_per_draft(bundle: Bundle, ids: list[str],
+                        deletions: dict[str, list[str]]) -> dict[str, str]:
+    """{draft_id: sha of the commit that deleted it}; the draft is read at
+    that commit's parent. A draft no commit deleted is left out.
+
+    Each consolidation run deletes its own drafts, so one commit for the whole
+    bundle reads only the last run's: a merge group that an `/okfy:update`
+    grew held drafts of both runs and read as unverifiable (vsov/okfy#15).
+    The newest deletion of each path is not the answer either, because a
+    draft id is not unique across runs: re-extraction reuses ids, and two
+    branches can each extract and delete the same id with different content
+    when only one of their rows maps it. So the drafts are resolved per
+    ledger row:
+
+    - a draft belongs to the last row whose `merge_map` names it, the
+      "later row wins" rule `merge_groups` applies;
+    - a row's drafts are read at the newest commit that deleted all of them
+      (a draft that no commit deleted does not count). That is the row's
+      consolidation, or a re-extraction that deleted the same ids again;
+    - if no one commit deleted all of them (deleted piecemeal), each draft of
+      that row is read at the newest deletion of its own path, and so is a
+      draft that no row names."""
+    rows: list[list[str]] = []
+    owner: dict[str, int] = {}
+    for row in read_rows(bundle):
+        mm = row.get("merge_map")
+        if isinstance(mm, dict) and mm:
+            rows.append([str(d) for d in mm])
+            for d in rows[-1]:
+                owner[d] = len(rows) - 1
+
+    def deleted(did: str) -> list[str]:
+        return deletions.get(f"{did}.md", [])
+
+    common: dict[int, str | None] = {}
+    out: dict[str, str] = {}
+    for did in ids:
+        if not deleted(did):
+            continue
+        i = owner.get(did)
+        if i is not None and i not in common:
+            common[i] = _newest_common([deleted(d) for d in rows[i] if deleted(d)])
+        out[did] = (common[i] if i is not None else None) or deleted(did)[0]
+    return out
 
 
 def recover_drafts(bundle: Bundle, draft_ids, ref: str | None = None
@@ -131,16 +208,25 @@ def recover_drafts(bundle: Bundle, draft_ids, ref: str | None = None
     """(state, {draft_id: {'meta': dict, 'body': str}}).
 
     Resolution order: the working tree first (drafts are still live between
-    `okfy cluster` and consolidation), then git history at the auto-detected
-    parent of the commit that deleted `drafts/`. An EXPLICIT `ref` overrides the
-    working tree entirely — a caller who names a ref means that ref, and quietly
-    auditing something else would be a fail-open surprise. state is one of
-    'live', 'git', 'unreachable-ref', 'git-error'. A draft that cannot be read
-    or parsed is simply absent from the mapping — the caller reports its group
-    as unverifiable rather than as clean."""
+    `okfy cluster` and consolidation), then git history, each draft at the
+    parent of the commit that deleted it (see `_deletion_per_draft`). An
+    EXPLICIT `ref` overrides the working tree and that lookup entirely — a
+    caller who names a ref means that ref, and quietly auditing something else
+    would be a fail-open surprise. state is one of 'live', 'git',
+    'unreachable-ref', 'git-error'. A draft that cannot be read or parsed is
+    simply absent from the mapping — the caller reports its group as
+    unverifiable rather than as clean."""
+    state, drafts, _ = _recover(bundle, draft_ids, ref)
+    return (state, drafts)
+
+
+def _recover(bundle: Bundle, draft_ids, ref: str | None
+             ) -> tuple[str, dict[str, dict], dict[str, str]]:
+    """`recover_drafts`, plus {draft_id: sha} for each draft looked up in git:
+    the commit it was read at, whether or not it could be read there."""
     ids = list(draft_ids)
     if not ids:
-        return ("live", {})
+        return ("live", {}, {})
 
     def _parse(did: str, text: str, out: dict) -> None:
         try:
@@ -157,13 +243,33 @@ def recover_drafts(bundle: Bundle, draft_ids, ref: str | None = None
                 _parse(did, p.read_text(encoding="utf-8"), out)
             except OSError:
                 continue
-        return ("live", out)
+        return ("live", out, {})
 
-    state, sha = _resolve_ref(bundle, ref)
-    if state != "ok":
-        return (state, {})
+    if not _is_git_repo(bundle):
+        return ("git-error", {}, {})
+    if ref is not None:
+        sha = _commit(bundle, ref)
+        if sha is None:
+            return ("unreachable-ref", {}, {})
+        at = dict.fromkeys(ids, sha)
+    else:
+        state, deletions = _deletions(bundle)
+        if state != "ok":
+            return (state, {}, {})
+        if not deletions:
+            return ("unreachable-ref", {}, {})
+        parent: dict[str, str | None] = {}
+        at = {}
+        for did, sha in _deletion_per_draft(bundle, ids, deletions).items():
+            if sha not in parent:
+                parent[sha] = _commit(bundle, f"{sha}^")
+            if parent[sha] is not None:
+                at[did] = parent[sha]
+        if parent and not at:
+            # every deletion found has no parent to read (a shallow clone)
+            return ("unreachable-ref", {}, {})
     out = {}
-    for did in ids:
+    for did, sha in at.items():
         # `./`: in `<rev>:<path>` git reads <path> from the repository root,
         # not the current directory. An --embed bundle sits below that root,
         # so the bare form failed on every draft and this returned ('git', {})
@@ -173,7 +279,7 @@ def recover_drafts(bundle: Bundle, draft_ids, ref: str | None = None
         if show.returncode != 0:
             continue
         _parse(did, show.stdout, out)
-    return ("git", out)
+    return ("git", out, at)
 
 
 def _load_archetype(bundle: Bundle):
@@ -327,15 +433,21 @@ def audit_merge(bundle: Bundle, ref: str | None = None,
                 only_group: str | None = None) -> dict:
     """Compare every multi-draft merge group against the concept it produced.
 
-    Returns {state, recovery, ref, groups_total, groups_with_findings, findings,
-    unverifiable, by_kind, notes}. `state` is 'live' when drafts came from the
-    working tree, 'ok' when they were recovered from git, and otherwise the
-    failure state ('no-merge-map', 'unreachable-ref', 'git-error'). Any failure
-    state guarantees a non-empty `unverifiable` list: this function never reports
-    "no findings" for work it could not actually inspect."""
-    out = {"state": "ok", "recovery": None, "ref": None, "groups_total": 0,
-           "groups": [], "groups_with_findings": 0, "findings": [],
-           "unverifiable": [], "by_kind": dict.fromkeys(KINDS, 0), "notes": []}
+    Returns {state, recovery, ref, refs, groups_total, groups_with_findings,
+    findings, unverifiable, by_kind, notes}. `state` is 'live' when drafts came
+    from the working tree, 'ok' when they were recovered from git, and otherwise
+    the failure state ('no-merge-map', 'unreachable-ref', 'git-error'). Any
+    failure state guarantees a non-empty `unverifiable` list: this function never
+    reports "no findings" for work it could not actually inspect.
+
+    `refs` maps each draft looked up in git to the commit it was read at. Drafts
+    of different consolidation runs are read at different commits, so `ref` is
+    that commit only when it is the same for every draft, and None otherwise:
+    one commit named for all of them would send a reader to the wrong drafts."""
+    out = {"state": "ok", "recovery": None, "ref": None, "refs": {},
+           "groups_total": 0, "groups": [], "groups_with_findings": 0,
+           "findings": [], "unverifiable": [],
+           "by_kind": dict.fromkeys(KINDS, 0), "notes": []}
 
     gstate, groups = merge_groups(bundle)
     if gstate != "ok":
@@ -365,7 +477,7 @@ def audit_merge(bundle: Bundle, ref: str | None = None,
                      for g in groups]
     out["groups_total"] = len(groups)
     draft_ids = sorted({d for g in groups for d in g["drafts"]})
-    rstate, drafts = recover_drafts(bundle, draft_ids, ref=ref)
+    rstate, drafts, refs = _recover(bundle, draft_ids, ref)
     out["recovery"] = rstate
     if rstate in ("unreachable-ref", "git-error"):
         out["state"] = rstate
@@ -380,8 +492,9 @@ def audit_merge(bundle: Bundle, ref: str | None = None,
 
     out["state"] = "live" if rstate == "live" else "ok"
     if rstate == "git":
-        _, sha = _resolve_ref(bundle, ref)
-        out["ref"] = sha
+        out["refs"] = refs
+        shas = set(refs.values())
+        out["ref"] = shas.pop() if len(shas) == 1 else None
 
     archetype, anote = _load_archetype(bundle)
     if anote:
