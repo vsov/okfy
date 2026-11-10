@@ -75,8 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
              "the merged concepts no longer do (not a gate, never fails a build)")
     p.add_argument("bundle", type=Path)
     p.add_argument("--ref", default=None,
-                   help="git ref holding the drafts (default: auto-detect the "
-                        "commit before drafts/ was deleted); overrides live drafts")
+                   help="git ref holding the drafts (default: for each "
+                        "consolidation run, the commit before it deleted its "
+                        "drafts); overrides live drafts")
     p.add_argument("--group", default=None,
                    help="restrict the report to one merged concept id")
     p.add_argument("--json", action="store_true")

@@ -741,4 +741,105 @@ emb_unverifiable "$WORK/emb-missing.json" drafts/segment-01/gamma-c \
   || fail "NEG embed: release-check passed the dissent check with a draft no commit holds"
 echo "SMOKE NEG embed: PASS"
 
+step "NEG runs (vsov/okfy#15): each consolidation run's drafts are read where that run deleted them"
+echo "SMOKE NEG runs: merge-audit must read a group two runs fed, each draft at its own run; release-check must not refuse it"
+# Every draft was read at one commit, the parent of the newest deletion of
+# drafts/, so only the last run's drafts could be read. A merge group that an
+# update grew holds drafts of both runs: merge-audit called it unverifiable and
+# release-check refused it with E_REL_DISSENT_UNVERIFIABLE. A draft id is not
+# unique across runs, so the newest deletion of each path is not the answer
+# either: here a side branch extracts and deletes update-01/x with other content,
+# no row maps it, and its deletion is the newest of that path. run-2 maps x and
+# y, and only its own consolidation deleted both. run-1 deletes its two drafts in
+# separate commits, so no one commit deleted all of them and each is read at its
+# own path's deletion.
+RCORP="$WORK/neg-runs/corpus"
+RB="$WORK/neg-runs/kb"
+mkdir -p "$RCORP" || fail "NEG runs setup: mkdir"
+printf '# A\n\nOne.\n' > "$RCORP/a.md"
+printf '# B\n\nTwo.\n' > "$RCORP/b.md"
+{ git -C "$RCORP" init -q && git -C "$RCORP" add . && git -C "$RCORP" commit -qm "corpus"; } \
+  >/dev/null 2>&1 || fail "NEG runs setup: could not commit the corpus"
+okfy init "$RB" --corpus "$RCORP" --language en >/dev/null 2>"$WORK/runs-init.err" \
+  || { cat "$WORK/runs-init.err"; fail "NEG runs setup: okfy init"; }
+grep -q 'dissent: required' "$RB/meta/purpose.md" \
+  || fail "NEG runs setup: okfy init no longer requires dissent, so release-check would skip the check"
+runs_draft() {   # $1 = draft id, $2 = source, $3 = body
+  mkdir -p "$RB/$(dirname "$1")"
+  printf -- '---\ntype: GlossaryTerm\ntitle: X\nsources: [%s]\n---\n\n%s\n' "$2" "$3" > "$RB/$1.md"
+}
+runs_commit() {   # $1 = message; prints the new commit
+  { git -C "$RB" add -A && git -C "$RB" commit -qm "$1"; } >/dev/null 2>&1 \
+    || fail "NEG runs setup: could not commit '$1'"
+  git -C "$RB" rev-parse HEAD
+}
+runs_ledger() {   # $1 = run id, $2 = outputs, $3 = merge map
+  okfy ledger add "$RB" --run "$1" --segment consolidation --inputs a.md \
+    --prompt-version consolidate@1 --outputs "$2" --validation ok \
+    --merge-map "$3" >/dev/null 2>"$WORK/runs-ledger.err" \
+    || { cat "$WORK/runs-ledger.err"; fail "NEG runs setup: okfy ledger add ($1)"; }
+}
+# run-1: two drafts, consolidated into glossary/x in two deleting commits
+runs_draft drafts/segment-01/x a.md "Run one, segment one."
+runs_draft drafts/segment-02/x a.md "Run one, segment two."
+R1_EXTRACT="$(runs_commit "extract: run-1")"
+rm "$RB/drafts/segment-02/x.md"
+R1_DROP="$(runs_commit "consolidate: run-1, drop a duplicate draft")"
+mkdir -p "$RB/glossary"
+printf -- '---\ntype: GlossaryTerm\ntitle: X\nsources: [a.md]\n---\n\nX.\n' > "$RB/glossary/x.md"
+rm -rf "$RB/drafts"
+runs_commit "consolidate: run-1" >/dev/null
+runs_ledger run-1 glossary/x "drafts/segment-01/x=glossary/x,drafts/segment-02/x=glossary/x"
+SIDE_BASE="$(git -C "$RB" rev-parse HEAD)"
+# run-2: an update; x grows the glossary/x group, y becomes its own concept
+runs_draft drafts/update-01/x b.md "Run two."
+runs_draft drafts/update-01/y b.md "Run two, y."
+R2_EXTRACT="$(runs_commit "extract: run-2")"
+printf -- '---\ntype: GlossaryTerm\ntitle: X\nsources: [a.md, b.md]\n---\n\nX.\n' > "$RB/glossary/x.md"
+printf -- '---\ntype: GlossaryTerm\ntitle: Y\nsources: [b.md]\n---\n\nY.\n' > "$RB/glossary/y.md"
+rm -rf "$RB/drafts"
+runs_commit "consolidate: run-2" >/dev/null
+runs_ledger run-2 glossary/x,glossary/y "drafts/update-01/x=glossary/x,drafts/update-01/y=glossary/y"
+# a side branch cut before run-2 reuses update-01/x; it is committed later than
+# run-2 and merged, so --date-order lists its deletion first
+MAIN="$(git -C "$RB" symbolic-ref --short HEAD)"
+git -C "$RB" switch -qc side "$SIDE_BASE" >/dev/null 2>&1 || fail "NEG runs setup: git switch -c side"
+SIDE_DATE="@$(( $(date +%s) + 3600 )) +0000"
+export GIT_AUTHOR_DATE="$SIDE_DATE" GIT_COMMITTER_DATE="$SIDE_DATE"
+runs_draft drafts/update-01/x a.md "The side branch."
+SIDE_EXTRACT="$(runs_commit "extract: side")"
+rm -rf "$RB/drafts"
+runs_commit "consolidate: side" >/dev/null
+git -C "$RB" switch -q "$MAIN" >/dev/null 2>&1 || fail "NEG runs setup: git switch $MAIN"
+git -C "$RB" merge -q --no-ff -m "merge side" side >/dev/null 2>&1 \
+  || fail "NEG runs setup: could not merge the side branch"
+unset GIT_AUTHOR_DATE GIT_COMMITTER_DATE
+NEWEST_X="$(git -C "$RB" log -n 1 --format=%H --full-history --date-order --diff-filter=D \
+              -- drafts/update-01/x.md)"
+[ -n "$NEWEST_X" ] && [ "$(git -C "$RB" rev-parse "$NEWEST_X^")" = "$SIDE_EXTRACT" ] \
+  || fail "NEG runs setup: the newest deletion of update-01/x is not the side branch's"
+okfy merge-audit "$RB" --json > "$WORK/runs-audit.json" 2>"$WORK/runs-audit.err" \
+  || { cat "$WORK/runs-audit.err"; fail "NEG runs setup: okfy merge-audit exited non-zero"; }
+python - "$WORK/runs-audit.json" "$R1_EXTRACT" "$R1_DROP" "$R2_EXTRACT" <<'PY' \
+  || fail "NEG runs: merge-audit did not read each draft where its own consolidation run deleted it"
+import json, sys
+d = json.load(open(sys.argv[1]))
+r1_extract, r1_drop, r2_extract = sys.argv[2:5]
+assert d["recovery"] == "git" and d["groups_total"] == 1, d
+assert d["unverifiable"] == [], d["unverifiable"]
+assert d["refs"] == {"drafts/segment-01/x": r1_drop,
+                     "drafts/segment-02/x": r1_extract,
+                     "drafts/update-01/x": r2_extract}, d["refs"]
+assert d["ref"] is None, d["ref"]
+PY
+set +e
+okfy release-check "$RB" > "$WORK/runs-release.json" 2>"$WORK/runs-release.err"
+set -e
+python -c 'import json, sys; json.load(open(sys.argv[1]))' "$WORK/runs-release.json" 2>/dev/null \
+  || { cat "$WORK/runs-release.json" "$WORK/runs-release.err"; fail "NEG runs setup: release-check printed no JSON report"; }
+grep -q 'E_REL_DISSENT_UNADJUDICATED' "$WORK/runs-release.json" \
+  && ! grep -q 'E_REL_DISSENT_UNVERIFIABLE' "$WORK/runs-release.json" \
+  || { cat "$WORK/runs-release.json"; fail "NEG runs: release-check refused a merge group that two consolidation runs fed"; }
+echo "SMOKE NEG runs: PASS"
+
 printf '\nSMOKE OK\n'
