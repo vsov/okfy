@@ -35,6 +35,20 @@ pre-consolidation drafts through the same lookup.
 - `scripts/smoke.sh` has a `NEG embed` step and `scripts/reference-bundle.sh` two merged-history
   checks. Each fails against the previous code.
 
+### Each consolidation run's drafts are read where that run deleted them
+
+Contributed by @vbanas (vsov/okfy#16; issue vsov/okfy#15). `merge-audit`, `schism` and `release-check` share the lookup.
+
+- **A merge group that an update grew is audited.** Before, one commit was used for the whole
+  bundle, so a group holding drafts of two runs read only the last run's drafts and the group
+  was `NOT AUDITED`. Each draft is now read at the parent of the commit that deleted it for its
+  own ledger row; the report header lists every commit used (`state: ok (refs …)`), and the
+  JSON `ref` is `null` when there is more than one (`refs` maps draft → commit).
+- **A later branch that deletes a draft id again does not hide a multi-draft row.** A row's
+  drafts are read at the newest commit that deleted all of them, so a branch that re-extracts
+  only some of them is not read. A re-extraction that deletes all of a row's drafts again and
+  writes no ledger row is read, as before (vsov/okfy#12).
+
 ### Round 23
 
 - **R23-1:** `scripts/memory-recipe.sh` captures the selected directory without losing a trailing

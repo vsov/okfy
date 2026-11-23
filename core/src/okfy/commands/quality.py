@@ -256,7 +256,13 @@ def cmd_merge_audit(a) -> int:
 
     where = out["state"]
     if out["recovery"] == "git":
-        where += f" (ref {(out['ref'] or '')[:7]})"
+        # one commit per consolidation run whose drafts were read; --json maps
+        # each draft to its commit
+        shas = list(dict.fromkeys(out["refs"].values()))
+        if len(shas) == 1:
+            where += f" (ref {shas[0][:7]})"
+        elif shas:
+            where += f" (refs {', '.join(s[:7] for s in shas)})"
     print(f"merge-audit: {b.root}")
     print(f"state: {where}   groups: {out['groups_total']}   "
           f"with findings: {out['groups_with_findings']}")

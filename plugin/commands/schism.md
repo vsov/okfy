@@ -52,8 +52,12 @@ For each group, **before you open the final concept and before you look at the
 findings**, read the drafts:
 
 ```bash
-git -C <bundle> show <pre-consolidation-ref>:./<draft-id>.md
+git -C <bundle> show <ref>:./<draft-id>.md
 ```
+
+`<ref>` is the draft's own entry in the `refs` map of `merge-audit --json`. Drafts
+of different consolidation runs are read at different commits, so a group that an
+update grew needs more than one; `ref` is set only when every draft shares one.
 
 Keep the `./`: without it git reads the path from the repository root, so in a
 bundle created with `--embed` (a subdirectory of the corpus repository) every
